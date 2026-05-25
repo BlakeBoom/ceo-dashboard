@@ -1,0 +1,540 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Boomerang BPO — Weekly Operations Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+--bg:#f6f5f0;--card:#ffffff;--border:#e2e0d8;--border-light:#eeede6;
+--text:#1a1a18;--text2:#6b6a65;--text3:#9c9a92;
+--green-bg:#e4f0d4;--green-text:#2d5a0a;--green-border:#b8d89a;
+--amber-bg:#fef0d5;--amber-text:#7a5600;--amber-border:#f5d88a;
+--red-bg:#fde4e4;--red-text:#8b1a1a;--red-border:#f5aaaa;
+--grey-bg:#f1efe8;--grey-text:#9c9a92;--grey-border:#d3d1c7;
+--accent:#2c5aa0;--accent-light:#e8eff8;
+}
+body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(--text);-webkit-font-smoothing:antialiased}
+.dash{max-width:1200px;margin:0 auto;padding:24px 20px 60px}
+.header{display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:24px;flex-wrap:wrap;gap:12px}
+.header-left h1{font-size:20px;font-weight:600;letter-spacing:-0.3px;color:var(--text)}
+.header-left p{font-size:13px;color:var(--text3);margin-top:2px}
+.data-source-badge{display:inline-flex;align-items:center;gap:4px;font-size:11px;padding:2px 8px;border-radius:6px;margin-left:8px}
+.data-source-badge.live{background:#e4f0d4;color:#2d5a0a}
+.data-source-badge.static{background:#fef0d5;color:#7a5600}
+.week-nav{display:flex;gap:4px;flex-wrap:wrap}
+.wk-btn{font-size:12px;font-weight:500;padding:6px 14px;border-radius:8px;cursor:pointer;border:1px solid var(--border);background:var(--card);color:var(--text2);transition:all .15s}
+.wk-btn:hover{border-color:var(--accent);color:var(--accent)}
+.wk-btn.act{background:var(--accent);color:#fff;border-color:var(--accent)}
+.summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:28px}
+.sum-card{background:var(--card);border:1px solid var(--border-light);border-radius:12px;padding:14px 16px}
+.sum-label{font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:0.5px;color:var(--text3)}
+.sum-val{font-size:26px;font-weight:700;letter-spacing:-0.5px;margin-top:2px;color:var(--text)}
+.sum-sub{font-size:11px;color:var(--text3);margin-top:1px}
+.sec-title{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:1px;color:var(--text3);margin:28px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border-light);display:flex;align-items:center;gap:6px}
+.sec-dot{width:6px;height:6px;border-radius:50%;background:var(--accent)}
+.camp-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:12px}
+.camp-card{background:var(--card);border:1px solid var(--border-light);border-radius:14px;padding:16px 18px;transition:border-color .15s}
+.camp-card:hover{border-color:var(--border)}
+.camp-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
+.camp-name{font-size:14px;font-weight:600;letter-spacing:-0.2px;color:var(--text)}
+.camp-fte{font-size:11px;font-weight:500;padding:3px 8px;border-radius:6px;background:var(--grey-bg);color:var(--text2)}
+.camp-overall{width:8px;height:8px;border-radius:50%;margin-left:8px;flex-shrink:0}
+.camp-overall.green{background:var(--green-text)}
+.camp-overall.amber{background:var(--amber-text)}
+.camp-overall.red{background:var(--red-text)}
+.kpi-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(90px,1fr));gap:6px}
+.kpi{padding:8px 10px;border-radius:8px;border-left:3px solid transparent}
+.kpi.green{background:var(--green-bg);border-left-color:var(--green-border)}
+.kpi.amber{background:var(--amber-bg);border-left-color:var(--amber-border)}
+.kpi.red{background:var(--red-bg);border-left-color:var(--red-border)}
+.kpi.grey{background:var(--grey-bg);border-left-color:var(--grey-border)}
+.kpi-label{font-size:10px;font-weight:500;text-transform:uppercase;letter-spacing:0.3px;margin-bottom:3px}
+.kpi.green .kpi-label{color:var(--green-text)}
+.kpi.amber .kpi-label{color:var(--amber-text)}
+.kpi.red .kpi-label{color:var(--red-text)}
+.kpi.grey .kpi-label{color:var(--grey-text)}
+.kpi-val{font-size:15px;font-weight:600;letter-spacing:-0.3px}
+.kpi.green .kpi-val{color:var(--green-text)}
+.kpi.amber .kpi-val{color:var(--amber-text)}
+.kpi.red .kpi-val{color:var(--red-text)}
+.kpi.grey .kpi-val{color:var(--grey-text)}
+.kpi-tgt{font-size:10px;font-weight:400;margin-top:1px;opacity:0.7}
+.kpi.green .kpi-tgt{color:var(--green-text)}
+.kpi.amber .kpi-tgt{color:var(--amber-text)}
+.kpi.red .kpi-tgt{color:var(--red-text)}
+.kpi.grey .kpi-tgt{color:var(--grey-text)}
+.trend-row{display:flex;align-items:center;gap:8px;margin-top:10px;padding-top:10px;border-top:1px solid var(--border-light)}
+.trend-label{font-size:10px;color:var(--text3);font-weight:500;text-transform:uppercase;letter-spacing:0.3px;white-space:nowrap}
+.spark{height:20px;flex:1;display:flex;align-items:end;gap:2px}
+.spark-bar{flex:1;border-radius:2px 2px 0 0;min-width:4px;transition:height .3s}
+.refresh-bar{position:fixed;top:0;left:0;right:0;height:3px;background:var(--accent);transform:scaleX(0);transform-origin:left;transition:transform .3s;z-index:100}
+.refresh-bar.loading{transform:scaleX(0.7);transition:transform 2s}
+.refresh-bar.done{transform:scaleX(1);transition:transform .2s}
+.last-updated{font-size:11px;color:var(--text3);text-align:center;margin-top:32px;padding-top:16px;border-top:1px solid var(--border-light)}
+.error-banner{background:#fde4e4;border:1px solid var(--red-border);border-radius:10px;padding:12px 18px;margin-bottom:16px;font-size:13px;color:var(--red-text);display:none}
+.loading-overlay{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:80px 20px;color:var(--text3)}
+.loading-spinner{width:32px;height:32px;border:3px solid var(--border-light);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite;margin-bottom:12px}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media(max-width:600px){
+.camp-grid{grid-template-columns:1fr}
+.summary{grid-template-columns:repeat(2,1fr)}
+.kpi-grid{grid-template-columns:repeat(3,1fr)}
+}
+</style>
+</head>
+<body>
+<div class="refresh-bar" id="refreshBar"></div>
+<div class="dash">
+<div class="error-banner" id="errorBanner"></div>
+<div id="app"><div class="loading-overlay"><div class="loading-spinner"></div><div>Loading dashboard data...</div></div></div>
+</div>
+
+<script>
+// ════════════════════════════════════════════════════════════════════════
+// CONFIGURATION — update these values for your environment
+// ════════════════════════════════════════════════════════════════════════
+
+const CONFIG = {
+    // Google Apps Script proxy URL (exchanges refresh token for access token)
+    PROXY_URL: 'https://script.google.com/macros/s/AKfycbxyaBQ7tDpJ9R53mQnX2PQ-5ea8NjaZes6b540ji43iaeXlgpSVUK0BRdTJzp6FgQPQ/exec',
+
+    // Zoho Analytics settings
+    ZOHO_API_BASE: 'https://analyticsapi.zoho.com',
+    WORKSPACE: 'Alpha_BI',
+    VIEW_NAME: 'qt_ceo_scorecard',
+
+    ORG_ID: '723580241',
+
+    // Auto-refresh every 30 minutes (picks up 06:00/13:00/18:00 syncs)
+    REFRESH_INTERVAL_MS: 30 * 60 * 1000,
+};
+
+
+// ════════════════════════════════════════════════════════════════════════
+// CAMPAIGN CONFIGURATION (targets + KPI display config per campaign)
+// ════════════════════════════════════════════════════════════════════════
+
+const TARGETS = {
+    'Gousto':          {csat:88, qa:90, cph:5.5, adherence:95, billable:17, absence:5},
+    'VETNIQUE':        {csat:90, qa:95, cph:6, res_time:48, acw:1.25, billable:10, absence:5},
+    'JUSTPARK_usa':    {csat:80, qa:85, fcr:90, sla:90, billable:8, absence:5},
+    'JUSTPARK_uk':     {csat:80, qa:90, cph:6, fcr:85, billable:18, absence:5},
+    'JUSTPARK_so':     {csat:75, qa:90, sla:90, billable:4, absence:5},
+    'BUTTERNUTBOX':    {csat:90, qa:90, cpd:50, billable:24, absence:5},
+    'Medexpress':      {csat:85, qa:90, compliance:100, productivity:90, billable:150, absence:5},
+    'PICKNPAY':        {csat:85, qa:80, talk_sla:90, calls_abn:5, billable:66, absence:5},
+    'ROYALCANIN':      {qa:95, cph:4, error_rate:2, billable:14, absence:5},
+    'HUNZAG':          {qa:95, cpd:20, res_time:24, billable:3, absence:5},
+    'GOODLIFESORTED':  {qa:95, cph:4, aht:3, calls_abn:8, billable:5, absence:5},
+    'PINTER':          {csat:80, qa:90, res_time:24, avg_resp_time:4, billable:10, absence:5},
+    'BEER52':          {qa:90, sph:1.25, billable:6, absence:5},
+    '1LIFE':           {qa:90, sales:350, billable:30, absence:5},
+};
+
+const KPI_CONFIG = {
+    'Gousto':         [['csat','CSAT','higher'],['qa','QA','higher'],['cph','CPH','higher'],['adherence','Adherence','higher'],['billable','Billable hrs','higher'],['absence','Absence','lower']],
+    'VETNIQUE':       [['csat','CSAT','higher'],['qa','QA','higher'],['cph','CPH','higher'],['res_time','Res. time','lower'],['billable','Billable hrs','higher'],['absence','Absence','lower']],
+    'JUSTPARK_usa':   [['csat','CSAT','higher'],['qa','QA','higher'],['fcr','FCR','higher'],['sla','SLA','higher'],['billable','Billable hrs','higher'],['absence','Absence','lower']],
+    'JUSTPARK_uk':    [['csat','CSAT','higher'],['qa','QA','higher'],['cph','CPH','higher'],['fcr','FCR','higher'],['tickets','Tickets','none'],['billable','Billable hrs','higher'],['absence','Absence','lower']],
+    'JUSTPARK_so':    [['csat','CSAT','higher'],['qa','QA','higher'],['sla','SLA','higher'],['billable','Billable hrs','higher'],['absence','Absence','lower']],
+    'BUTTERNUTBOX':   [['csat','CSAT','higher'],['qa','QA','higher'],['cpd','CPD','higher'],['billable','Billable hrs','higher'],['absence','Absence','lower']],
+    'Medexpress':     [['csat','CSAT','higher'],['qa','QA','higher'],['aht','AHT','lower'],['tickets','Tickets','none'],['billable','Billable hrs','higher'],['absence','Absence','lower']],
+    'PICKNPAY':       [['qa','QA','higher'],['sla','Talk SLA','higher'],['calls','Calls','none'],['abandon_rate','Abandoned','lower'],['billable','Billable hrs','higher'],['absence','Absence','lower']],
+    'ROYALCANIN':     [['qa','QA','higher'],['cph','CPH','higher'],['tickets','Tickets','none'],['billable','Billable hrs','higher'],['absence','Absence','lower']],
+    'HUNZAG':         [['qa','QA','higher'],['cpd','CPD','higher'],['res_time','Res. time','lower'],['tickets','Tickets','none'],['billable','Billable hrs','higher'],['absence','Absence','lower']],
+    'GOODLIFESORTED': [['qa','QA','higher'],['cph','CPH','higher'],['aht','AHT','lower'],['calls','Calls','none'],['billable','Billable hrs','higher'],['absence','Absence','lower']],
+    'PINTER':         [['csat','CSAT','higher'],['qa','QA','higher'],['res_time','Res. time','lower'],['tickets','Tickets','none'],['billable','Billable hrs','higher'],['absence','Absence','lower']],
+    'BEER52':         [['qa','QA','higher'],['sph','SPH','higher'],['calls','Calls','none'],['sales','Sales','none'],['billable','Billable hrs','higher'],['absence','Absence','lower']],
+    '1LIFE':          [['qa','QA','higher'],['sales','Sales','higher'],['tickets','Tickets','none'],['billable','Billable hrs','higher'],['absence','Absence','lower']],
+};
+
+// Column mapping: qt_ceo_scorecard columns → internal metric keys
+const COL_MAP = {
+    'campaign_key': 'campaign_key',
+    'campaign_name': 'campaign_name',
+    'section': 'section',
+    'week_label': 'week',
+    'fte_count': 'fte',
+    'csat_achieved': 'csat',
+    'qa_achieved': 'qa',
+    'cph_achieved': 'cph',
+    'cpd_achieved': 'cpd',
+    'adherence_achieved': 'adherence',
+    'billable_hours_total': 'billable',
+    'aht_achieved': 'aht',
+    'acw_achieved': 'acw',
+    'fcr_achieved': 'fcr',
+    'sla_achieved': 'sla',
+    'calls_total': 'calls',
+    'abandoned_total': 'abandoned',
+    'abandon_rate_pct': 'abandon_rate',
+    'tickets_total': 'tickets',
+    'sales_total': 'sales',
+    'sph_achieved': 'sph',
+    'resolution_time_avg': 'res_time',
+    'avg_response_time': 'avg_resp_time',
+    'compliance_achieved': 'compliance',
+    'absence_rate_pct': 'absence',
+    'error_rate_avg': 'error_rate',
+    'talk_time_avg': 'talk_time',
+    'conversion_achieved': 'conversion',
+    'recruitment_count': 'recruitment',
+    'retentions_total': 'retentions',
+};
+
+
+// ════════════════════════════════════════════════════════════════════════
+// FALLBACK DATA (snapshot from User_metrics_3 — used if API fails)
+// ════════════════════════════════════════════════════════════════════════
+
+const FALLBACK_DATA = {"data":[{"campaign_key":"Gousto","campaign_name":"GOUSTO","section":"Customer Services","week":"W16, 2026","fte":15,"metrics":{"csat":93.6,"qa":null,"cph":5.44,"cpd":null,"adherence":96.8,"billable":270.2,"aht":null,"acw":null,"fcr":null,"sla":null,"calls":0,"tickets":0,"sales":null,"sph":null,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":null,"absence":20.0}},{"campaign_key":"Gousto","campaign_name":"GOUSTO","section":"Customer Services","week":"W17, 2026","fte":13,"metrics":{"csat":88.7,"qa":null,"cph":5.89,"cpd":null,"adherence":95.7,"billable":188.0,"aht":null,"acw":null,"fcr":null,"sla":null,"calls":0,"tickets":0,"sales":null,"sph":null,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":null,"absence":23.1}},{"campaign_key":"Gousto","campaign_name":"GOUSTO","section":"Customer Services","week":"W18, 2026","fte":15,"metrics":{"csat":95.4,"qa":null,"cph":5.54,"cpd":null,"adherence":93.1,"billable":282.0,"aht":null,"acw":null,"fcr":null,"sla":null,"calls":0,"tickets":0,"sales":null,"sph":null,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":null,"absence":100.0}},{"campaign_key":"Gousto","campaign_name":"GOUSTO","section":"Customer Services","week":"W19, 2026","fte":14,"metrics":{"csat":93.6,"qa":null,"cph":6.09,"cpd":null,"adherence":96.2,"billable":282.3,"aht":null,"acw":null,"fcr":null,"sla":null,"calls":0,"tickets":0,"sales":null,"sph":null,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":null,"absence":57.1}},{"campaign_key":"Gousto","campaign_name":"GOUSTO","section":"Customer Services","week":"W20, 2026","fte":13,"metrics":{"csat":94.5,"qa":null,"cph":6.22,"cpd":null,"adherence":95.6,"billable":282.8,"aht":null,"acw":null,"fcr":null,"sla":null,"calls":0,"tickets":0,"sales":null,"sph":null,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":null,"absence":15.4}},{"campaign_key":"VETNIQUE","campaign_name":"VETNIQUE","section":"Customer Services","week":"W16, 2026","fte":11,"metrics":{"csat":84.2,"qa":98.1,"cph":7.64,"cpd":null,"adherence":null,"billable":415.0,"aht":null,"acw":61.29,"fcr":null,"sla":null,"calls":181,"tickets":876,"sales":null,"sph":null,"res_time":0.3,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":0.0,"absence":27.3}},{"campaign_key":"VETNIQUE","campaign_name":"VETNIQUE","section":"Customer Services","week":"W17, 2026","fte":11,"metrics":{"csat":90.4,"qa":97.7,"cph":7.38,"cpd":null,"adherence":null,"billable":314.1,"aht":null,"acw":49.89,"fcr":null,"sla":null,"calls":616,"tickets":1869,"sales":null,"sph":null,"res_time":20.5,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":0.0,"absence":18.2}},{"campaign_key":"VETNIQUE","campaign_name":"VETNIQUE","section":"Customer Services","week":"W18, 2026","fte":13,"metrics":{"csat":94.1,"qa":96.2,"cph":6.94,"cpd":null,"adherence":null,"billable":384.8,"aht":null,"acw":65.53,"fcr":null,"sla":null,"calls":513,"tickets":1597,"sales":null,"sph":null,"res_time":22.0,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":0.0,"absence":46.2}},{"campaign_key":"VETNIQUE","campaign_name":"VETNIQUE","section":"Customer Services","week":"W19, 2026","fte":13,"metrics":{"csat":83.0,"qa":93.9,"cph":7.85,"cpd":null,"adherence":null,"billable":331.8,"aht":null,"acw":62.7,"fcr":null,"sla":null,"calls":379,"tickets":1899,"sales":null,"sph":null,"res_time":9.4,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":0.0,"absence":23.1}},{"campaign_key":"VETNIQUE","campaign_name":"VETNIQUE","section":"Customer Services","week":"W20, 2026","fte":14,"metrics":{"csat":100.0,"qa":null,"cph":null,"cpd":null,"adherence":null,"billable":394.6,"aht":null,"acw":59.55,"fcr":null,"sla":null,"calls":480,"tickets":1066,"sales":null,"sph":null,"res_time":8.5,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":0.0,"absence":57.1}},{"campaign_key":"JUSTPARK_usa","campaign_name":"JUSTPARK USA","section":"Customer Services","week":"W17, 2026","fte":8,"metrics":{"csat":null,"qa":null,"cph":null,"cpd":null,"adherence":null,"billable":32.5,"aht":null,"acw":null,"fcr":null,"sla":null,"calls":0,"tickets":0,"sales":null,"sph":null,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":null,"absence":0.0}},{"campaign_key":"JUSTPARK_usa","campaign_name":"JUSTPARK USA","section":"Customer Services","week":"W18, 2026","fte":9,"metrics":{"csat":null,"qa":null,"cph":null,"cpd":null,"adherence":null,"billable":288.0,"aht":null,"acw":null,"fcr":null,"sla":null,"calls":0,"tickets":0,"sales":null,"sph":null,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":null,"absence":0.0}},{"campaign_key":"JUSTPARK_usa","campaign_name":"JUSTPARK USA","section":"Customer Services","week":"W19, 2026","fte":8,"metrics":{"csat":null,"qa":null,"cph":null,"cpd":null,"adherence":null,"billable":216.5,"aht":null,"acw":null,"fcr":null,"sla":null,"calls":0,"tickets":0,"sales":null,"sph":null,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":null,"absence":0.0}},{"campaign_key":"JUSTPARK_usa","campaign_name":"JUSTPARK USA","section":"Customer Services","week":"W20, 2026","fte":8,"metrics":{"csat":null,"qa":null,"cph":null,"cpd":null,"adherence":null,"billable":291.4,"aht":null,"acw":null,"fcr":null,"sla":null,"calls":0,"tickets":0,"sales":null,"sph":null,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":null,"absence":0.0}},{"campaign_key":"JUSTPARK_uk","campaign_name":"JUSTPARK UK","section":"Customer Services","week":"W16, 2026","fte":23,"metrics":{"csat":75.7,"qa":93.3,"cph":5.64,"cpd":45.1,"adherence":null,"billable":799.2,"aht":null,"acw":null,"fcr":81.5,"sla":null,"calls":1286,"tickets":3590,"sales":null,"sph":null,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":0.0,"absence":52.2}},{"campaign_key":"JUSTPARK_uk","campaign_name":"JUSTPARK UK","section":"Customer Services","week":"W17, 2026","fte":22,"metrics":{"csat":74.7,"qa":92.0,"cph":5.85,"cpd":46.8,"adherence":null,"billable":582.8,"aht":null,"acw":null,"fcr":82.7,"sla":null,"calls":1087,"tickets":2988,"sales":null,"sph":null,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":0.0,"absence":86.4}},{"campaign_key":"JUSTPARK_uk","campaign_name":"JUSTPARK UK","section":"Customer Services","week":"W18, 2026","fte":20,"metrics":{"csat":72.4,"qa":93.3,"cph":5.66,"cpd":45.3,"adherence":null,"billable":863.8,"aht":null,"acw":null,"fcr":82.9,"sla":null,"calls":1293,"tickets":3055,"sales":null,"sph":null,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":0.0,"absence":55.0}},{"campaign_key":"JUSTPARK_uk","campaign_name":"JUSTPARK UK","section":"Customer Services","week":"W19, 2026","fte":21,"metrics":{"csat":71.3,"qa":93.1,"cph":5.84,"cpd":46.8,"adherence":null,"billable":854.8,"aht":null,"acw":null,"fcr":83.9,"sla":null,"calls":1151,"tickets":2870,"sales":null,"sph":null,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":0.0,"absence":42.9}},{"campaign_key":"JUSTPARK_uk","campaign_name":"JUSTPARK UK","section":"Customer Services","week":"W20, 2026","fte":20,"metrics":{"csat":null,"qa":92.1,"cph":5.84,"cpd":46.7,"adherence":null,"billable":777.7,"aht":null,"acw":null,"fcr":null,"sla":null,"calls":818,"tickets":2452,"sales":null,"sph":null,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":0.0,"absence":20.0}},{"campaign_key":"JUSTPARK_so","campaign_name":"JUSTPARK SP","section":"Customer Services","week":"W16, 2026","fte":8,"metrics":{"csat":70.6,"qa":95.9,"cph":1.96,"cpd":15.7,"adherence":100.0,"billable":279.5,"aht":null,"acw":null,"fcr":85.8,"sla":null,"calls":199,"tickets":396,"sales":null,"sph":null,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":0.0,"absence":0.0}},{"campaign_key":"JUSTPARK_so","campaign_name":"JUSTPARK SP","section":"Customer Services","week":"W17, 2026","fte":8,"metrics":{"csat":60.8,"qa":95.4,"cph":1.32,"cpd":10.6,"adherence":100.0,"billable":225.5,"aht":null,"acw":null,"fcr":80.1,"sla":null,"calls":135,"tickets":246,"sales":null,"sph":null,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":0.0,"absence":0.0}},{"campaign_key":"JUSTPARK_so","campaign_name":"JUSTPARK SP","section":"Customer Services","week":"W18, 2026","fte":8,"metrics":{"csat":60.8,"qa":95.6,"cph":1.55,"cpd":12.4,"adherence":100.0,"billable":296.0,"aht":null,"acw":null,"fcr":82.5,"sla":null,"calls":138,"tickets":271,"sales":null,"sph":null,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":0.0,"absence":0.0}},{"campaign_key":"JUSTPARK_so","campaign_name":"JUSTPARK SP","section":"Customer Services","week":"W19, 2026","fte":8,"metrics":{"csat":73.0,"qa":95.7,"cph":2.9,"cpd":23.2,"adherence":100.1,"billable":312.0,"aht":null,"acw":null,"fcr":73.9,"sla":null,"calls":183,"tickets":630,"sales":null,"sph":null,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":0.0,"absence":0.0}},{"campaign_key":"JUSTPARK_so","campaign_name":"JUSTPARK SP","section":"Customer Services","week":"W20, 2026","fte":8,"metrics":{"csat":null,"qa":null,"cph":2.02,"cpd":16.2,"adherence":100.0,"billable":226.9,"aht":null,"acw":null,"fcr":null,"sla":null,"calls":127,"tickets":278,"sales":null,"sph":null,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":0.0,"absence":0.0}},{"campaign_key":"BUTTERNUTBOX","campaign_name":"BUTTERNUT BOX","section":"Customer Services","week":"W16, 2026","fte":21,"metrics":{"csat":null,"qa":null,"cph":null,"cpd":null,"adherence":null,"billable":545.9,"aht":null,"acw":null,"fcr":null,"sla":null,"calls":0,"tickets":0,"sales":null,"sph":null,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":null,"absence":33.3}},{"campaign_key":"BUTTERNUTBOX","campaign_name":"BUTTERNUT BOX","section":"Customer Services","week":"W17, 2026","fte":19,"metrics":{"csat":null,"qa":null,"cph":null,"cpd":null,"adherence":null,"billable":501.1,"aht":null,"acw":null,"fcr":null,"sla":null,"calls":0,"tickets":0,"sales":null,"sph":null,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":null,"absence":31.6}},{"campaign_key":"BUTTERNUTBOX","campaign_name":"BUTTERNUT BOX","section":"Customer Services","week":"W18, 2026","fte":22,"metrics":{"csat":80.0,"qa":null,"cph":null,"cpd":36.0,"adherence":100.0,"billable":595.0,"aht":null,"acw":null,"fcr":null,"sla":null,"calls":0,"tickets":0,"sales":null,"sph":null,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":null,"absence":90.9}},{"campaign_key":"BUTTERNUTBOX","campaign_name":"BUTTERNUT BOX","section":"Customer Services","week":"W19, 2026","fte":20,"metrics":{"csat":94.3,"qa":null,"cph":null,"cpd":32.3,"adherence":100.0,"billable":601.7,"aht":null,"acw":null,"fcr":null,"sla":null,"calls":0,"tickets":0,"sales":null,"sph":null,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":null,"absence":145.0}},{"campaign_key":"BUTTERNUTBOX","campaign_name":"BUTTERNUT BOX","section":"Customer Services","week":"W20, 2026","fte":20,"metrics":{"csat":null,"qa":null,"cph":null,"cpd":null,"adherence":null,"billable":659.9,"aht":null,"acw":null,"fcr":null,"sla":null,"calls":0,"tickets":0,"sales":null,"sph":null,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":null,"absence":35.0}},{"campaign_key":"Medexpress","campaign_name":"MEDEXPRESS","section":"Customer Services","week":"W16, 2026","fte":166,"metrics":{"csat":87.7,"qa":null,"cph":null,"cpd":null,"adherence":null,"billable":4791.9,"aht":5.2,"acw":null,"fcr":null,"sla":null,"calls":125,"tickets":14958,"sales":null,"sph":null,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":0.0,"absence":24.7}},{"campaign_key":"Medexpress","campaign_name":"MEDEXPRESS","section":"Customer Services","week":"W17, 2026","fte":154,"metrics":{"csat":86.0,"qa":null,"cph":null,"cpd":null,"adherence":null,"billable":3543.6,"aht":5.0,"acw":null,"fcr":null,"sla":null,"calls":1,"tickets":14764,"sales":null,"sph":null,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":0.0,"absence":69.5}},{"campaign_key":"Medexpress","campaign_name":"MEDEXPRESS","section":"Customer Services","week":"W18, 2026","fte":159,"metrics":{"csat":87.5,"qa":null,"cph":null,"cpd":null,"adherence":null,"billable":4353.3,"aht":5.2,"acw":null,"fcr":null,"sla":null,"calls":0,"tickets":12926,"sales":null,"sph":null,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":null,"absence":66.0}},{"campaign_key":"Medexpress","campaign_name":"MEDEXPRESS","section":"Customer Services","week":"W19, 2026","fte":163,"metrics":{"csat":91.1,"qa":null,"cph":null,"cpd":null,"adherence":null,"billable":4171.2,"aht":5.3,"acw":null,"fcr":null,"sla":null,"calls":0,"tickets":13485,"sales":null,"sph":null,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":null,"absence":68.1}},{"campaign_key":"Medexpress","campaign_name":"MEDEXPRESS","section":"Customer Services","week":"W20, 2026","fte":162,"metrics":{"csat":93.0,"qa":null,"cph":null,"cpd":null,"adherence":null,"billable":4525.8,"aht":5.4,"acw":null,"fcr":null,"sla":null,"calls":0,"tickets":12860,"sales":null,"sph":null,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":null,"absence":33.3}},{"campaign_key":"PICKNPAY","campaign_name":"PICKNPAY","section":"Customer Services","week":"W16, 2026","fte":125,"metrics":{"csat":75.0,"qa":86.8,"cph":null,"cpd":11.6,"adherence":null,"billable":2091.6,"aht":null,"acw":null,"fcr":91.6,"sla":80.6,"calls":2552,"tickets":2300,"sales":null,"sph":null,"res_time":11.5,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":80.6,"calls_abn":null,"abandon_rate":20.1,"absence":11.2}},{"campaign_key":"PICKNPAY","campaign_name":"PICKNPAY","section":"Customer Services","week":"W17, 2026","fte":117,"metrics":{"csat":null,"qa":88.9,"cph":null,"cpd":6.6,"adherence":null,"billable":2126.6,"aht":null,"acw":null,"fcr":null,"sla":71.6,"calls":2793,"tickets":0,"sales":null,"sph":null,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":71.6,"calls_abn":null,"abandon_rate":19.0,"absence":23.9}},{"campaign_key":"PICKNPAY","campaign_name":"PICKNPAY","section":"Customer Services","week":"W18, 2026","fte":132,"metrics":{"csat":null,"qa":89.4,"cph":null,"cpd":5.7,"adherence":null,"billable":3049.0,"aht":null,"acw":null,"fcr":null,"sla":58.0,"calls":2679,"tickets":0,"sales":null,"sph":null,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":58.0,"calls_abn":null,"abandon_rate":24.3,"absence":26.5}},{"campaign_key":"PICKNPAY","campaign_name":"PICKNPAY","section":"Customer Services","week":"W19, 2026","fte":138,"metrics":{"csat":null,"qa":89.4,"cph":null,"cpd":5.2,"adherence":null,"billable":3441.8,"aht":null,"acw":null,"fcr":null,"sla":73.8,"calls":3164,"tickets":0,"sales":null,"sph":null,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":73.8,"calls_abn":null,"abandon_rate":23.6,"absence":21.0}},{"campaign_key":"PICKNPAY","campaign_name":"PICKNPAY","section":"Customer Services","week":"W20, 2026","fte":136,"metrics":{"csat":null,"qa":90.7,"cph":null,"cpd":6.2,"adherence":null,"billable":3334.7,"aht":null,"acw":null,"fcr":null,"sla":80.5,"calls":3153,"tickets":0,"sales":null,"sph":null,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":80.5,"calls_abn":null,"abandon_rate":18.4,"absence":11.8}},{"campaign_key":"PICKNPAY","campaign_name":"PICKNPAY","section":"Customer Services","week":"W21, 2026","fte":1,"metrics":{"csat":null,"qa":null,"cph":null,"cpd":null,"adherence":null,"billable":0.0,"aht":null,"acw":null,"fcr":null,"sla":null,"calls":0,"tickets":0,"sales":null,"sph":null,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":null,"absence":0.0}},{"campaign_key":"ROYALCANIN","campaign_name":"ROYAL CANIN","section":"Customer Services","week":"W16, 2026","fte":16,"metrics":{"csat":null,"qa":97.8,"cph":4.69,"cpd":null,"adherence":null,"billable":505.9,"aht":null,"acw":null,"fcr":null,"sla":null,"calls":0,"tickets":2438,"sales":266871,"sph":null,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":null,"absence":0.0}},{"campaign_key":"ROYALCANIN","campaign_name":"ROYAL CANIN","section":"Customer Services","week":"W17, 2026","fte":16,"metrics":{"csat":null,"qa":91.6,"cph":4.02,"cpd":null,"adherence":null,"billable":312.9,"aht":null,"acw":null,"fcr":null,"sla":null,"calls":0,"tickets":1705,"sales":6014,"sph":null,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":null,"absence":25.0}},{"campaign_key":"ROYALCANIN","campaign_name":"ROYAL CANIN","section":"Customer Services","week":"W18, 2026","fte":15,"metrics":{"csat":null,"qa":97.0,"cph":4.48,"cpd":null,"adherence":null,"billable":494.5,"aht":null,"acw":null,"fcr":null,"sla":null,"calls":0,"tickets":2152,"sales":59711,"sph":null,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":null,"absence":13.3}},{"campaign_key":"ROYALCANIN","campaign_name":"ROYAL CANIN","section":"Customer Services","week":"W19, 2026","fte":15,"metrics":{"csat":null,"qa":96.6,"cph":4.3,"cpd":null,"adherence":null,"billable":468.9,"aht":null,"acw":null,"fcr":null,"sla":null,"calls":0,"tickets":2168,"sales":60919,"sph":null,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":null,"absence":33.3}},{"campaign_key":"ROYALCANIN","campaign_name":"ROYAL CANIN","section":"Customer Services","week":"W20, 2026","fte":15,"metrics":{"csat":null,"qa":null,"cph":4.32,"cpd":null,"adherence":null,"billable":461.0,"aht":null,"acw":null,"fcr":null,"sla":null,"calls":0,"tickets":1761,"sales":285233,"sph":null,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":null,"absence":0.0}},{"campaign_key":"HUNZAG","campaign_name":"HUNZAG","section":"Customer Services","week":"W16, 2026","fte":7,"metrics":{"csat":null,"qa":97.4,"cph":null,"cpd":18.6,"adherence":null,"billable":117.0,"aht":null,"acw":null,"fcr":50.2,"sla":null,"calls":0,"tickets":363,"sales":null,"sph":null,"res_time":15.3,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":null,"absence":14.3}},{"campaign_key":"HUNZAG","campaign_name":"HUNZAG","section":"Customer Services","week":"W17, 2026","fte":6,"metrics":{"csat":null,"qa":95.8,"cph":null,"cpd":19.0,"adherence":null,"billable":105.0,"aht":null,"acw":null,"fcr":59.7,"sla":null,"calls":0,"tickets":289,"sales":null,"sph":null,"res_time":5.0,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":null,"absence":0.0}},{"campaign_key":"HUNZAG","campaign_name":"HUNZAG","section":"Customer Services","week":"W18, 2026","fte":7,"metrics":{"csat":null,"qa":94.8,"cph":null,"cpd":17.9,"adherence":null,"billable":141.9,"aht":null,"acw":null,"fcr":null,"sla":null,"calls":0,"tickets":366,"sales":null,"sph":null,"res_time":4.8,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":null,"absence":28.6}},{"campaign_key":"HUNZAG","campaign_name":"HUNZAG","section":"Customer Services","week":"W19, 2026","fte":5,"metrics":{"csat":null,"qa":91.0,"cph":null,"cpd":20.3,"adherence":null,"billable":123.4,"aht":null,"acw":null,"fcr":null,"sla":null,"calls":0,"tickets":356,"sales":null,"sph":null,"res_time":9.2,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":null,"absence":0.0}},{"campaign_key":"HUNZAG","campaign_name":"HUNZAG","section":"Customer Services","week":"W20, 2026","fte":4,"metrics":{"csat":null,"qa":null,"cph":null,"cpd":12.8,"adherence":null,"billable":128.1,"aht":null,"acw":null,"fcr":null,"sla":null,"calls":0,"tickets":0,"sales":null,"sph":null,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":null,"absence":25.0}},{"campaign_key":"GOODLIFESORTED","campaign_name":"GOOD LIFE SORTED","section":"Customer Services","week":"W16, 2026","fte":9,"metrics":{"csat":85.5,"qa":92.6,"cph":3.93,"cpd":null,"adherence":null,"billable":161.9,"aht":205.4,"acw":null,"fcr":null,"sla":null,"calls":415,"tickets":202,"sales":null,"sph":null,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":0.0,"absence":0.0}},{"campaign_key":"GOODLIFESORTED","campaign_name":"GOOD LIFE SORTED","section":"Customer Services","week":"W17, 2026","fte":5,"metrics":{"csat":97.1,"qa":92.9,"cph":3.58,"cpd":null,"adherence":null,"billable":125.5,"aht":211.5,"acw":null,"fcr":null,"sla":null,"calls":280,"tickets":200,"sales":null,"sph":null,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":0.0,"absence":20.0}},{"campaign_key":"GOODLIFESORTED","campaign_name":"GOOD LIFE SORTED","section":"Customer Services","week":"W18, 2026","fte":5,"metrics":{"csat":93.9,"qa":93.4,"cph":3.87,"cpd":null,"adherence":null,"billable":139.3,"aht":178.5,"acw":null,"fcr":null,"sla":null,"calls":239,"tickets":76,"sales":null,"sph":null,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":0.0,"absence":0.0}},{"campaign_key":"GOODLIFESORTED","campaign_name":"GOOD LIFE SORTED","section":"Customer Services","week":"W19, 2026","fte":4,"metrics":{"csat":94.0,"qa":92.2,"cph":3.22,"cpd":null,"adherence":null,"billable":152.1,"aht":259.2,"acw":null,"fcr":null,"sla":null,"calls":335,"tickets":166,"sales":null,"sph":null,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":0.0,"absence":25.0}},{"campaign_key":"GOODLIFESORTED","campaign_name":"GOOD LIFE SORTED","section":"Customer Services","week":"W20, 2026","fte":4,"metrics":{"csat":null,"qa":null,"cph":null,"cpd":null,"adherence":null,"billable":150.0,"aht":null,"acw":null,"fcr":null,"sla":null,"calls":0,"tickets":0,"sales":null,"sph":null,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":null,"absence":0.0}},{"campaign_key":"PINTER","campaign_name":"PINTER","section":"Sales","week":"W16, 2026","fte":21,"metrics":{"csat":4.0,"qa":94.4,"cph":4.58,"cpd":null,"adherence":null,"billable":690.1,"aht":null,"acw":null,"fcr":null,"sla":null,"calls":0,"tickets":1522,"sales":null,"sph":null,"res_time":13.7,"avg_resp_time":14.3,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":null,"absence":47.6}},{"campaign_key":"PINTER","campaign_name":"PINTER","section":"Sales","week":"W17, 2026","fte":21,"metrics":{"csat":3.8,"qa":89.7,"cph":5.68,"cpd":null,"adherence":null,"billable":438.3,"aht":null,"acw":null,"fcr":null,"sla":null,"calls":0,"tickets":1511,"sales":null,"sph":null,"res_time":16.8,"avg_resp_time":17.6,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":null,"absence":90.5}},{"campaign_key":"PINTER","campaign_name":"PINTER","section":"Sales","week":"W18, 2026","fte":20,"metrics":{"csat":3.8,"qa":91.4,"cph":5.77,"cpd":null,"adherence":null,"billable":702.2,"aht":null,"acw":null,"fcr":null,"sla":null,"calls":0,"tickets":1955,"sales":null,"sph":null,"res_time":22.6,"avg_resp_time":17.1,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":null,"absence":40.0}},{"campaign_key":"PINTER","campaign_name":"PINTER","section":"Sales","week":"W19, 2026","fte":22,"metrics":{"csat":4.0,"qa":93.0,"cph":5.15,"cpd":null,"adherence":null,"billable":577.9,"aht":null,"acw":null,"fcr":null,"sla":null,"calls":0,"tickets":1579,"sales":null,"sph":null,"res_time":22.8,"avg_resp_time":11.9,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":null,"absence":45.5}},{"campaign_key":"PINTER","campaign_name":"PINTER","section":"Sales","week":"W20, 2026","fte":21,"metrics":{"csat":3.8,"qa":94.8,"cph":5.65,"cpd":null,"adherence":null,"billable":426.5,"aht":null,"acw":null,"fcr":null,"sla":null,"calls":0,"tickets":1165,"sales":null,"sph":null,"res_time":16.8,"avg_resp_time":4.8,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":null,"absence":4.8}},{"campaign_key":"BEER52","campaign_name":"BEER52","section":"Sales","week":"W16, 2026","fte":6,"metrics":{"csat":83.2,"qa":91.4,"cph":null,"cpd":null,"adherence":null,"billable":174.5,"aht":4.0,"acw":null,"fcr":null,"sla":null,"calls":6737,"tickets":118,"sales":82,"sph":1.33,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":0.0,"absence":0.0}},{"campaign_key":"BEER52","campaign_name":"BEER52","section":"Sales","week":"W17, 2026","fte":6,"metrics":{"csat":83.3,"qa":75.4,"cph":null,"cpd":null,"adherence":null,"billable":122.5,"aht":2.6,"acw":null,"fcr":null,"sla":null,"calls":5775,"tickets":76,"sales":68,"sph":1.28,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":0.0,"absence":16.7}},{"campaign_key":"BEER52","campaign_name":"BEER52","section":"Sales","week":"W18, 2026","fte":6,"metrics":{"csat":83.5,"qa":80.4,"cph":null,"cpd":null,"adherence":null,"billable":129.2,"aht":5.1,"acw":null,"fcr":null,"sla":null,"calls":5117,"tickets":23,"sales":66,"sph":1.17,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":0.0,"absence":50.0}},{"campaign_key":"BEER52","campaign_name":"BEER52","section":"Sales","week":"W19, 2026","fte":6,"metrics":{"csat":65.7,"qa":93.0,"cph":null,"cpd":null,"adherence":null,"billable":167.5,"aht":5.4,"acw":null,"fcr":null,"sla":null,"calls":6079,"tickets":101,"sales":79,"sph":1.2,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":0.0,"absence":16.7}},{"campaign_key":"BEER52","campaign_name":"BEER52","section":"Sales","week":"W20, 2026","fte":11,"metrics":{"csat":50.0,"qa":null,"cph":null,"cpd":null,"adherence":null,"billable":175.0,"aht":3.6,"acw":null,"fcr":null,"sla":null,"calls":6191,"tickets":95,"sales":94,"sph":1.22,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":0.0,"absence":0.0}},{"campaign_key":"1LIFE","campaign_name":"1LIFE","section":"Sales","week":"W16, 2026","fte":23,"metrics":{"csat":85.5,"qa":97.6,"cph":null,"cpd":null,"adherence":null,"billable":554.2,"aht":5.8,"acw":null,"fcr":null,"sla":null,"calls":0,"tickets":109,"sales":151,"sph":null,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":null,"absence":21.7}},{"campaign_key":"1LIFE","campaign_name":"1LIFE","section":"Sales","week":"W17, 2026","fte":22,"metrics":{"csat":100.0,"qa":94.7,"cph":null,"cpd":null,"adherence":null,"billable":262.7,"aht":4.0,"acw":null,"fcr":null,"sla":null,"calls":0,"tickets":31,"sales":9,"sph":null,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":null,"absence":200.0}},{"campaign_key":"1LIFE","campaign_name":"1LIFE","section":"Sales","week":"W18, 2026","fte":22,"metrics":{"csat":100.0,"qa":96.1,"cph":null,"cpd":null,"adherence":null,"billable":569.8,"aht":12.0,"acw":null,"fcr":null,"sla":null,"calls":0,"tickets":11,"sales":97,"sph":null,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":null,"absence":50.0}},{"campaign_key":"1LIFE","campaign_name":"1LIFE","section":"Sales","week":"W19, 2026","fte":25,"metrics":{"csat":73.7,"qa":95.2,"cph":null,"cpd":null,"adherence":null,"billable":453.9,"aht":4.0,"acw":null,"fcr":null,"sla":null,"calls":0,"tickets":54,"sales":69,"sph":null,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":null,"absence":108.0}},{"campaign_key":"1LIFE","campaign_name":"1LIFE","section":"Sales","week":"W20, 2026","fte":22,"metrics":{"csat":91.7,"qa":88.6,"cph":null,"cpd":null,"adherence":null,"billable":553.3,"aht":6.1,"acw":null,"fcr":null,"sla":null,"calls":0,"tickets":125,"sales":94,"sph":null,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":null,"absence":63.6}},{"campaign_key":"1LIFE","campaign_name":"1LIFE","section":"Sales","week":"W21, 2026","fte":1,"metrics":{"csat":null,"qa":null,"cph":null,"cpd":null,"adherence":null,"billable":0.0,"aht":null,"acw":null,"fcr":null,"sla":null,"calls":0,"tickets":0,"sales":null,"sph":null,"res_time":null,"avg_resp_time":null,"error_rate":null,"compliance":null,"talk_sla":null,"calls_abn":null,"abandon_rate":null,"absence":100.0}}],"targets":{"Gousto":{"csat":88,"qa":90,"cph":5.5,"adherence":95,"billable":17,"absence":5},"VETNIQUE":{"csat":90,"qa":95,"cph":6,"res_time":48,"acw":1.25,"billable":10,"absence":5},"JUSTPARK_usa":{"csat":80,"qa":85,"fcr":90,"sla":90,"billable":8,"absence":5},"JUSTPARK_uk":{"csat":80,"qa":90,"cph":6,"fcr":85,"billable":18,"absence":5},"JUSTPARK_so":{"csat":75,"qa":90,"sla":90,"billable":4,"absence":5},"BUTTERNUTBOX":{"csat":90,"qa":90,"cpd":50,"billable":24,"absence":5},"Medexpress":{"csat":85,"qa":90,"compliance":100,"productivity":90,"billable":150,"absence":5},"PICKNPAY":{"csat":85,"qa":80,"talk_sla":90,"calls_abn":5,"billable":66,"absence":5},"ROYALCANIN":{"qa":95,"cph":4,"error_rate":2,"billable":14,"absence":5},"HUNZAG":{"qa":95,"cpd":20,"res_time":24,"billable":3,"absence":5},"GOODLIFESORTED":{"qa":95,"cph":4,"aht":3,"calls_abn":8,"billable":5,"absence":5},"PINTER":{"csat":80,"qa":90,"res_time":24,"avg_resp_time":4,"billable":10,"absence":5},"BEER52":{"qa":90,"sph":1.25,"billable":6,"absence":5},"1LIFE":{"qa":90,"sales":350,"billable":30,"absence":5}},"kpi_config":{"Gousto":[["csat","CSAT","higher"],["qa","QA","higher"],["cph","CPH","higher"],["adherence","Adherence","higher"],["billable","Billable hrs","higher"],["absence","Absence","lower"]],"VETNIQUE":[["csat","CSAT","higher"],["qa","QA","higher"],["cph","CPH","higher"],["res_time","Res. time","lower"],["billable","Billable hrs","higher"],["absence","Absence","lower"]],"JUSTPARK_usa":[["csat","CSAT","higher"],["qa","QA","higher"],["fcr","FCR","higher"],["sla","SLA","higher"],["billable","Billable hrs","higher"],["absence","Absence","lower"]],"JUSTPARK_uk":[["csat","CSAT","higher"],["qa","QA","higher"],["cph","CPH","higher"],["fcr","FCR","higher"],["tickets","Tickets","none"],["billable","Billable hrs","higher"],["absence","Absence","lower"]],"JUSTPARK_so":[["csat","CSAT","higher"],["qa","QA","higher"],["sla","SLA","higher"],["billable","Billable hrs","higher"],["absence","Absence","lower"]],"BUTTERNUTBOX":[["csat","CSAT","higher"],["qa","QA","higher"],["cpd","CPD","higher"],["billable","Billable hrs","higher"],["absence","Absence","lower"]],"Medexpress":[["csat","CSAT","higher"],["qa","QA","higher"],["aht","AHT","lower"],["tickets","Tickets","none"],["billable","Billable hrs","higher"],["absence","Absence","lower"]],"PICKNPAY":[["qa","QA","higher"],["sla","Talk SLA","higher"],["calls","Calls","none"],["abandon_rate","Abandoned","lower"],["billable","Billable hrs","higher"],["absence","Absence","lower"]],"ROYALCANIN":[["qa","QA","higher"],["cph","CPH","higher"],["tickets","Tickets","none"],["billable","Billable hrs","higher"],["absence","Absence","lower"]],"HUNZAG":[["qa","QA","higher"],["cpd","CPD","higher"],["res_time","Res. time","lower"],["tickets","Tickets","none"],["billable","Billable hrs","higher"],["absence","Absence","lower"]],"GOODLIFESORTED":[["qa","QA","higher"],["cph","CPH","higher"],["aht","AHT","lower"],["calls","Calls","none"],["billable","Billable hrs","higher"],["absence","Absence","lower"]],"PINTER":[["csat","CSAT","higher"],["qa","QA","higher"],["res_time","Res. time","lower"],["tickets","Tickets","none"],["billable","Billable hrs","higher"],["absence","Absence","lower"]],"BEER52":[["qa","QA","higher"],["sph","SPH","higher"],["calls","Calls","none"],["sales","Sales","none"],["billable","Billable hrs","higher"],["absence","Absence","lower"]],"1LIFE":[["qa","QA","higher"],["sales","Sales","higher"],["tickets","Tickets","none"],["billable","Billable hrs","higher"],["absence","Absence","lower"]]},"weeks":["W16, 2026","W17, 2026","W18, 2026","W19, 2026","W20, 2026","W21, 2026"]};
+
+
+// ════════════════════════════════════════════════════════════════════════
+// DATA FETCHING — Zoho Analytics API via Google Apps Script proxy
+// ════════════════════════════════════════════════════════════════════════
+
+let DASHBOARD_DATA = null;
+let dataSource = 'static';
+
+async function fetchLiveData() {
+    // Step 1: Get access token from Google Apps Script proxy
+    const tokenRes = await fetch(CONFIG.PROXY_URL, { method: 'POST' });
+    if (!tokenRes.ok) throw new Error(`Proxy error: ${tokenRes.status}`);
+    const tokenData = await tokenRes.json();
+    const accessToken = tokenData.access_token;
+    if (!accessToken) throw new Error('No access token returned from proxy');
+
+    // Step 2: Export data from qt_ceo_scorecard via Zoho Analytics API
+    const exportUrl = `${CONFIG.ZOHO_API_BASE}/restapi/v2/workspaces/${encodeURIComponent(CONFIG.WORKSPACE)}/views/${encodeURIComponent(CONFIG.VIEW_NAME)}/data`;
+
+    const zohoRes = await fetch(exportUrl, {
+        method: 'GET',
+        headers: {
+            'Authorization': `Zoho-oauthtoken ${accessToken}`,
+            'ZANALYTICS-ORGID': CONFIG.ORG_ID,
+        }
+    });
+
+    if (!zohoRes.ok) {
+        const errText = await zohoRes.text();
+        throw new Error(`Zoho API error ${zohoRes.status}: ${errText}`);
+    }
+
+    const zohoData = await zohoRes.json();
+    return transformZohoResponse(zohoData);
+}
+
+function transformZohoResponse(zohoData) {
+    // Zoho Analytics API returns: { data: { columns: [...], rows: [[...], ...] } }
+    // or for v2: { data: [ { col1: val1, col2: val2, ... }, ... ] }
+
+    let rows;
+    if (Array.isArray(zohoData.data)) {
+        // V2 format: array of objects
+        rows = zohoData.data;
+    } else if (zohoData.data && zohoData.data.rows) {
+        // Alternate format: columns + rows arrays
+        const cols = zohoData.data.columns;
+        rows = zohoData.data.rows.map(row => {
+            const obj = {};
+            cols.forEach((col, i) => { obj[col] = row[i]; });
+            return obj;
+        });
+    } else {
+        throw new Error('Unexpected Zoho API response format');
+    }
+
+    // Transform each row into dashboard format
+    const allWeeks = new Set();
+    const dataRows = [];
+
+    rows.forEach(row => {
+        const campaignKey = row.campaign_key;
+        const week = row.week_label;
+        allWeeks.add(week);
+
+        const metrics = {};
+        for (const [zohoCol, metricKey] of Object.entries(COL_MAP)) {
+            if (['campaign_key','campaign_name','section','week_label','fte_count'].includes(zohoCol)) continue;
+            const val = row[zohoCol];
+            metrics[metricKey] = (val === null || val === '' || val === undefined) ? null : parseFloat(val);
+        }
+
+        dataRows.push({
+            campaign_key: campaignKey,
+            campaign_name: row.campaign_name,
+            section: row.section,
+            week: week,
+            fte: parseInt(row.fte_count) || 0,
+            metrics: metrics,
+        });
+    });
+
+    // Sort weeks chronologically
+    const weeks = [...allWeeks].sort((a, b) => {
+        const [wa, ya] = a.match(/\d+/g).map(Number);
+        const [wb, yb] = b.match(/\d+/g).map(Number);
+        return ya - yb || wa - wb;
+    });
+
+    return {
+        data: dataRows,
+        targets: TARGETS,
+        kpi_config: KPI_CONFIG,
+        weeks: weeks,
+    };
+}
+
+
+// ════════════════════════════════════════════════════════════════════════
+// DASHBOARD LOGIC
+// ════════════════════════════════════════════════════════════════════════
+
+const LOWER_BETTER = new Set(['aht','absence','abandon_rate','error_rate','res_time','acw','avg_resp_time','calls_abn']);
+
+function rag(val, tgt, direction) {
+    if (val == null || val === 0) return 'grey';
+    if (tgt == null || direction === 'none') return 'grey';
+    if (direction === 'lower' || LOWER_BETTER.has(direction)) {
+        if (val <= tgt) return 'green';
+        if (val <= tgt * 1.10) return 'amber';
+        return 'red';
+    }
+    if (val >= tgt) return 'green';
+    if (val >= tgt * 0.95) return 'amber';
+    return 'red';
+}
+
+function fmtVal(val, kpi) {
+    if (val == null) return '—';
+    if (['calls','tickets','sales'].includes(kpi)) return Math.round(val).toLocaleString();
+    if (['billable'].includes(kpi)) return Math.round(val).toLocaleString();
+    if (['csat','qa','adherence','fcr','sla','talk_sla'].includes(kpi)) return val > 10 ? val.toFixed(1)+'%' : val.toFixed(2);
+    if (['absence','abandon_rate','error_rate'].includes(kpi)) return val.toFixed(1)+'%';
+    return val.toFixed(1);
+}
+
+function fmtTgt(tgt, kpi) {
+    if (tgt == null) return '';
+    if (['csat','qa','adherence','fcr','sla','talk_sla','absence','abandon_rate','error_rate','calls_abn','compliance','productivity'].includes(kpi)) return tgt+'%';
+    return tgt;
+}
+
+function overallRag(metrics, targets, kpiConfig) {
+    let hasRed = false, hasAmber = false;
+    for (const [kpiKey, , direction] of kpiConfig) {
+        if (direction === 'none') continue;
+        const val = metrics[kpiKey];
+        const tgt = targets[kpiKey];
+        if (val == null || tgt == null) continue;
+        const r = rag(val, tgt, direction);
+        if (r === 'red') hasRed = true;
+        if (r === 'amber') hasAmber = true;
+    }
+    if (hasRed) return 'red';
+    if (hasAmber) return 'amber';
+    return 'green';
+}
+
+function getSparkData(campaignKey, weeks, allData) {
+    return weeks.map(w => {
+        const row = allData.find(r => r.campaign_key === campaignKey && r.week === w);
+        return row ? row.metrics.billable : 0;
+    });
+}
+
+let selectedWeek = null;
+
+function render() {
+    const D = DASHBOARD_DATA;
+    if (!D || !D.weeks || D.weeks.length === 0) {
+        document.getElementById('app').innerHTML = '<div class="loading-overlay"><div>No data available</div></div>';
+        return;
+    }
+
+    if (!selectedWeek || !D.weeks.includes(selectedWeek)) {
+        selectedWeek = D.weeks[D.weeks.length - 2] || D.weeks[D.weeks.length - 1];
+    }
+
+    const weekData = D.data.filter(r => r.week === selectedWeek);
+    const totalFTE = weekData.reduce((s, r) => s + r.fte, 0);
+    const totalBillable = weekData.reduce((s, r) => s + (r.metrics.billable || 0), 0);
+    const campaignCount = weekData.length;
+
+    let greenCount = 0, amberCount = 0, redCount = 0;
+    weekData.forEach(r => {
+        const tgts = D.targets[r.campaign_key] || {};
+        const config = D.kpi_config[r.campaign_key] || [];
+        const o = overallRag(r.metrics, tgts, config);
+        if (o === 'green') greenCount++;
+        if (o === 'amber') amberCount++;
+        if (o === 'red') redCount++;
+    });
+
+    const sections = {};
+    weekData.forEach(r => {
+        if (!sections[r.section]) sections[r.section] = [];
+        sections[r.section].push(r);
+    });
+
+    let html = '';
+
+    // Header
+    const badge = dataSource === 'live'
+        ? '<span class="data-source-badge live">● LIVE</span>'
+        : '<span class="data-source-badge static">● OFFLINE</span>';
+    html += `<div class="header">
+        <div class="header-left">
+            <h1>Operations weekly performance review ${badge}</h1>
+            <p>Boomerang BPO · ${selectedWeek.replace(', ', ' · ')}</p>
+        </div>
+        <div class="week-nav">`;
+    D.weeks.forEach(w => {
+        const label = w.replace(', 2026', '');
+        html += `<button class="wk-btn${w === selectedWeek ? ' act' : ''}" onclick="selectedWeek='${w}';render()">${label}</button>`;
+    });
+    html += `</div></div>`;
+
+    // Summary
+    html += `<div class="summary">
+        <div class="sum-card"><div class="sum-label">Total FTE</div><div class="sum-val">${totalFTE}</div></div>
+        <div class="sum-card"><div class="sum-label">Billable hours</div><div class="sum-val">${Math.round(totalBillable).toLocaleString()}</div></div>
+        <div class="sum-card"><div class="sum-label">Campaigns</div><div class="sum-val">${campaignCount}</div></div>
+        <div class="sum-card">
+            <div class="sum-label">Health</div>
+            <div class="sum-val" style="display:flex;align-items:center;gap:10px">
+                <span style="color:var(--green-text)">${greenCount}</span>
+                <span style="font-size:14px;color:var(--text3)">/</span>
+                <span style="color:var(--amber-text)">${amberCount}</span>
+                <span style="font-size:14px;color:var(--text3)">/</span>
+                <span style="color:var(--red-text)">${redCount}</span>
+            </div>
+            <div class="sum-sub">green / amber / red</div>
+        </div>
+    </div>`;
+
+    // Campaign cards
+    for (const [sec, camps] of Object.entries(sections)) {
+        html += `<div class="sec-title"><span class="sec-dot"></span>${sec}</div>`;
+        html += `<div class="camp-grid">`;
+        camps.sort((a, b) => a.campaign_name.localeCompare(b.campaign_name));
+
+        camps.forEach(r => {
+            const tgts = D.targets[r.campaign_key] || {};
+            const config = D.kpi_config[r.campaign_key] || [];
+            const overall = overallRag(r.metrics, tgts, config);
+            const sparkVals = getSparkData(r.campaign_key, D.weeks, D.data);
+            const sparkMax = Math.max(...sparkVals, 1);
+
+            html += `<div class="camp-card">`;
+            html += `<div class="camp-head">
+                <div style="display:flex;align-items:center;gap:8px">
+                    <span class="camp-overall ${overall}"></span>
+                    <span class="camp-name">${r.campaign_name}</span>
+                </div>
+                <span class="camp-fte">${r.fte} FTE</span>
+            </div>`;
+
+            html += `<div class="kpi-grid">`;
+            config.forEach(([kpiKey, kpiLabel, direction]) => {
+                const val = r.metrics[kpiKey];
+                const tgt = tgts[kpiKey];
+                const ragStatus = (direction === 'none') ? 'grey' : rag(val, tgt, direction);
+                html += `<div class="kpi ${ragStatus}">
+                    <div class="kpi-label">${kpiLabel}</div>
+                    <div class="kpi-val">${fmtVal(val, kpiKey)}</div>
+                    ${tgt != null ? `<div class="kpi-tgt">tgt ${fmtTgt(tgt, kpiKey)}</div>` : ''}
+                </div>`;
+            });
+            html += `</div>`;
+
+            // Sparkline
+            html += `<div class="trend-row">
+                <span class="trend-label">Billable trend</span>
+                <div class="spark">`;
+            sparkVals.forEach((v, i) => {
+                const h = Math.max(2, (v / sparkMax) * 20);
+                const isSelected = D.weeks[i] === selectedWeek;
+                const color = isSelected ? 'var(--accent)' : 'var(--border)';
+                html += `<div class="spark-bar" style="height:${Math.round(h)}px;background:${color}"></div>`;
+            });
+            html += `</div></div>`;
+            html += `</div>`;
+        });
+        html += `</div>`;
+    }
+
+    // Footer
+    const now = new Date();
+    html += `<div class="last-updated">
+        Last rendered: ${now.toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'})} ${now.toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'})}
+        · Data: ${dataSource === 'live' ? 'Zoho Analytics API (live)' : 'Embedded snapshot (offline)'}
+        · Source: qt_ceo_scorecard
+    </div>`;
+
+    document.getElementById('app').innerHTML = html;
+}
+
+
+// ════════════════════════════════════════════════════════════════════════
+// INITIALIZATION — try live data first, fall back to embedded snapshot
+// ════════════════════════════════════════════════════════════════════════
+
+async function init() {
+    const bar = document.getElementById('refreshBar');
+    const errEl = document.getElementById('errorBanner');
+
+    // Try live data
+    if (CONFIG.ORG_ID !== 'YOUR_ORG_ID_HERE') {
+        bar.classList.add('loading');
+        try {
+            DASHBOARD_DATA = await fetchLiveData();
+            dataSource = 'live';
+            errEl.style.display = 'none';
+            bar.classList.remove('loading');
+            bar.classList.add('done');
+            setTimeout(() => bar.classList.remove('done'), 500);
+            render();
+
+            // Set up auto-refresh
+            setInterval(async () => {
+                bar.classList.add('loading');
+                try {
+                    DASHBOARD_DATA = await fetchLiveData();
+                    dataSource = 'live';
+                    render();
+                } catch (e) {
+                    console.warn('Auto-refresh failed, keeping last data:', e);
+                }
+                bar.classList.remove('loading');
+                bar.classList.add('done');
+                setTimeout(() => bar.classList.remove('done'), 500);
+            }, CONFIG.REFRESH_INTERVAL_MS);
+
+            return;
+        } catch (e) {
+            console.error('Live data fetch failed:', e);
+            errEl.textContent = `⚠ Live data unavailable (${e.message}). Showing offline snapshot.`;
+            errEl.style.display = 'block';
+            bar.classList.remove('loading');
+        }
+    } else {
+        errEl.textContent = '⚠ ORG_ID not configured — showing offline snapshot. Set CONFIG.ORG_ID in the HTML to enable live data.';
+        errEl.style.display = 'block';
+    }
+
+    // Fallback to embedded data
+    DASHBOARD_DATA = FALLBACK_DATA;
+    dataSource = 'static';
+    render();
+}
+
+init();
+</script>
+</body>
+</html>
