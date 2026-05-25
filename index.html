@@ -18,7 +18,7 @@
 --accent:#2c5aa0;--accent-light:#e8eff8;
 }
 body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(--text);-webkit-font-smoothing:antialiased}
-.dash{max-width:1200px;margin:0 auto;padding:24px 20px 60px}
+.dash{width:100%;padding:16px 16px 40px}
 .header{display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:24px;flex-wrap:wrap;gap:12px}
 .header-left h1{font-size:20px;font-weight:600;letter-spacing:-0.3px;color:var(--text)}
 .header-left p{font-size:13px;color:var(--text3);margin-top:2px}
@@ -36,7 +36,7 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
 .sum-sub{font-size:11px;color:var(--text3);margin-top:1px}
 .sec-title{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:1px;color:var(--text3);margin:28px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border-light);display:flex;align-items:center;gap:6px}
 .sec-dot{width:6px;height:6px;border-radius:50%;background:var(--accent)}
-.camp-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:12px}
+.camp-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
 .camp-card{background:var(--card);border:1px solid var(--border-light);border-radius:14px;padding:16px 18px;transition:border-color .15s}
 .camp-card:hover{border-color:var(--border)}
 .camp-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
@@ -79,6 +79,9 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
 .loading-overlay{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:80px 20px;color:var(--text3)}
 .loading-spinner{width:32px;height:32px;border:3px solid var(--border-light);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite;margin-bottom:12px}
 @keyframes spin{to{transform:rotate(360deg)}}
+@media(max-width:900px){
+.camp-grid{grid-template-columns:repeat(2,1fr)}
+}
 @media(max-width:600px){
 .camp-grid{grid-template-columns:1fr}
 .summary{grid-template-columns:repeat(2,1fr)}
@@ -550,4 +553,3 @@ init();
 </script>
 </body>
 </html>
-
