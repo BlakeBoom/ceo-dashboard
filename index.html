@@ -100,14 +100,17 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
 
 const CONFIG = {
     // Google Apps Script proxy URL (exchanges refresh token for access token)
-    PROXY_URL: 'https://script.google.com/macros/s/AKfycbwJkB4op7PW5ZSZ_OksNXYFUFjzP5E26j8cJ7atLnST77wn5df-hpy2mYgD1i0e_XyA/exec',
+    PROXY_URL: 'https://script.google.com/macros/s/AKfycbxyaBQ7tDpJ9R53mQnX2PQ-5ea8NjaZes6b540ji43iaeXlgpSVUK0BRdTJzp6FgQPQ/exec',
 
     // Zoho Analytics settings
     ZOHO_API_BASE: 'https://analyticsapi.zoho.com',
     WORKSPACE: 'Alpha_BI',
     VIEW_NAME: 'qt_ceo_scorecard',
 
-    ORG_ID: '723580241',
+    // ⚠️ REPLACE THIS with your actual Zoho Org ID
+    // Find it at: Zoho Analytics → Setup (gear icon) → Organization
+    // Or check your URL: https://analytics.zoho.com/orgs/XXXXXXX/...
+    ORG_ID: 'YOUR_ORG_ID_HERE',
 
     // Auto-refresh every 30 minutes (picks up 06:00/13:00/18:00 syncs)
     REFRESH_INTERVAL_MS: 30 * 60 * 1000,
@@ -203,7 +206,7 @@ let dataSource = 'static';
 
 async function fetchLiveData() {
     // Step 1: Get access token from Google Apps Script proxy
-    const tokenRes = await fetch(CONFIG.PROXY_URL, { method: 'POST' });
+    const tokenRes = await fetch(CONFIG.PROXY_URL, { method: 'GET', redirect: 'follow' });
     if (!tokenRes.ok) throw new Error(`Proxy error: ${tokenRes.status}`);
     const tokenData = await tokenRes.json();
     const accessToken = tokenData.access_token;
