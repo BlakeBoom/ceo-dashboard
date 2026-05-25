@@ -155,39 +155,6 @@ const KPI_CONFIG = {
     '1LIFE':          [['qa','QA','higher'],['sales','Sales','higher'],['tickets','Tickets','none'],['billable','Billable hrs','higher'],['absence','Absence','lower']],
 };
 
-// Column mapping: qt_ceo_scorecard columns → internal metric keys
-const COL_MAP = {
-    'campaign_key': 'campaign_key',
-    'campaign_name': 'campaign_name',
-    'section': 'section',
-    'week_label': 'week',
-    'fte_count': 'fte',
-    'csat_achieved': 'csat',
-    'qa_achieved': 'qa',
-    'cph_achieved': 'cph',
-    'cpd_achieved': 'cpd',
-    'adherence_achieved': 'adherence',
-    'billable_hours_total': 'billable',
-    'aht_achieved': 'aht',
-    'acw_achieved': 'acw',
-    'fcr_achieved': 'fcr',
-    'sla_achieved': 'sla',
-    'calls_total': 'calls',
-    'abandoned_total': 'abandoned',
-    'abandon_rate_pct': 'abandon_rate',
-    'tickets_total': 'tickets',
-    'sales_total': 'sales',
-    'sph_achieved': 'sph',
-    'resolution_time_avg': 'res_time',
-    'avg_response_time': 'avg_resp_time',
-    'compliance_achieved': 'compliance',
-    'absence_rate_pct': 'absence',
-    'error_rate_avg': 'error_rate',
-    'talk_time_avg': 'talk_time',
-    'conversion_achieved': 'conversion',
-    'recruitment_count': 'recruitment',
-    'retentions_total': 'retentions',
-};
 
 
 // ════════════════════════════════════════════════════════════════════════
@@ -247,15 +214,14 @@ async function fetchLiveData() {
 }
 
 function transformZohoResponse(zohoData) {
-    // Zoho Analytics API returns: { data: { columns: [...], rows: [[...], ...] } }
-    // or for v2: { data: [ { col1: val1, col2: val2, ... }, ... ] }
+    // Zoho bulk export returns: { data: [ { "agg.week_label": "W10, 2026", ... }, ... ] }
+    // Column names are prefixed with "agg." or "tgt."
+    // Values are strings (need parsing to numbers)
 
     let rows;
     if (Array.isArray(zohoData.data)) {
-        // V2 format: array of objects
         rows = zohoData.data;
     } else if (zohoData.data && zohoData.data.rows) {
-        // Alternate format: columns + rows arrays
         const cols = zohoData.data.columns;
         rows = zohoData.data.rows.map(row => {
             const obj = {};
@@ -266,28 +232,56 @@ function transformZohoResponse(zohoData) {
         throw new Error('Unexpected Zoho API response format');
     }
 
-    // Transform each row into dashboard format
+    // Column mapping: Zoho prefixed names → internal metric keys
+    const ZOHO_COL_MAP = {
+        'agg.csat_achieved': 'csat',
+        'agg.qa_achieved': 'qa',
+        'agg.cph_achieved': 'cph',
+        'agg.cpd_achieved': 'cpd',
+        'agg.adherence_achieved': 'adherence',
+        'agg.billable_hours_total': 'billable',
+        'agg.aht_achieved': 'aht',
+        'agg.acw_achieved': 'acw',
+        'agg.fcr_achieved': 'fcr',
+        'agg.sla_achieved': 'sla',
+        'agg.calls_total': 'calls',
+        'agg.abandoned_total': 'abandoned',
+        'agg.abandon_rate_pct': 'abandon_rate',
+        'agg.tickets_total': 'tickets',
+        'agg.sales_total': 'sales',
+        'agg.sph_achieved': 'sph',
+        'agg.resolution_time_avg': 'res_time',
+        'agg.avg_response_time': 'avg_resp_time',
+        'agg.compliance_achieved': 'compliance',
+        'agg.absence_rate_pct': 'absence',
+        'agg.error_rate_avg': 'error_rate',
+        'agg.talk_time_avg': 'talk_time',
+        'agg.conversion_achieved': 'conversion',
+        'agg.recruitment_count': 'recruitment',
+        'agg.retentions_total': 'retentions',
+    };
+
     const allWeeks = new Set();
     const dataRows = [];
 
     rows.forEach(row => {
-        const campaignKey = row.campaign_key;
-        const week = row.week_label;
+        const campaignKey = row['agg.campaign_key'];
+        const week = row['agg.week_label'];
+        if (!campaignKey || !week) return;
         allWeeks.add(week);
 
         const metrics = {};
-        for (const [zohoCol, metricKey] of Object.entries(COL_MAP)) {
-            if (['campaign_key','campaign_name','section','week_label','fte_count'].includes(zohoCol)) continue;
+        for (const [zohoCol, metricKey] of Object.entries(ZOHO_COL_MAP)) {
             const val = row[zohoCol];
             metrics[metricKey] = (val === null || val === '' || val === undefined) ? null : parseFloat(val);
         }
 
         dataRows.push({
             campaign_key: campaignKey,
-            campaign_name: row.campaign_name,
-            section: row.section,
+            campaign_name: row['agg.campaign_name'],
+            section: row['agg.section'],
             week: week,
-            fte: parseInt(row.fte_count) || 0,
+            fte: parseInt(row['agg.fte_count']) || 0,
             metrics: metrics,
         });
     });
