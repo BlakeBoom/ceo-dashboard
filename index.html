@@ -100,7 +100,7 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
 
 const CONFIG = {
     // Google Apps Script proxy URL (exchanges refresh token for access token)
-    PROXY_URL: 'https://script.google.com/macros/s/AKfycbwmkJqvoBNe77XvWhg9mi9rexNqJR1uXYvzqBkhgBzZMODzdl74ceis977ulRnm8IT9/exec',
+    PROXY_URL: 'https://script.google.com/macros/s/AKfycbxwc9MgMSKv3UaPg-M8zf0XQCEBKVkSdE7gU9c9sV-r0oqDBgbq_qxF7tjcCkP6J0_-/exec',
 
     // Zoho Analytics settings
     ZOHO_API_BASE: 'https://analyticsapi.zoho.com',
@@ -180,9 +180,10 @@ async function fetchLiveData() {
     return new Promise((resolve, reject) => {
         const callbackName = '_zohoCallback_' + Date.now();
         const timeout = setTimeout(() => {
-            delete window[callbackName];
-            reject(new Error('Proxy request timed out (30s)'));
-        }, 30000);
+            // Don't delete callback — let late responses still work
+            window[callbackName] = function() {};
+            reject(new Error('Proxy request timed out (90s)'));
+        }, 90000);
 
         window[callbackName] = function(data) {
             clearTimeout(timeout);
@@ -549,3 +550,4 @@ init();
 </script>
 </body>
 </html>
+
