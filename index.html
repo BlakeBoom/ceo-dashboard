@@ -54,6 +54,9 @@ body{font-family:'DM Sans',system-ui,sans-serif;color:var(--text);-webkit-font-s
 .modal-head-right{display:flex;align-items:center;gap:14px}
 .modal-month-lbl{display:flex;align-items:center;gap:6px;font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--text3)}
 .modal-month{font-family:inherit;font-size:12px;padding:5px 8px;border-radius:6px;border:1px solid var(--border-light);background:var(--bg-2);color:var(--text);cursor:pointer}
+.modal-addbtn{font-family:inherit;font-size:11.5px;padding:5px 10px;border-radius:6px;border:1px solid var(--border-light);background:var(--bg-2);color:var(--text2);cursor:pointer}
+.modal-addbtn:hover{color:var(--text);border-color:var(--accent)}
+.modal-delbtn:hover{color:#ff6b6b;border-color:#ff6b6b}
 .modal-x{background:none;border:none;color:var(--text3);font-size:16px;cursor:pointer;padding:2px 6px;border-radius:6px}
 .modal-x:hover{color:var(--text);background:var(--bg-2)}
 .modal-sub{margin:0;padding:0 22px 12px;font-size:11.5px;line-height:1.5;color:var(--text3)}
@@ -316,6 +319,8 @@ body{font-family:'DM Sans',system-ui,sans-serif;color:var(--text);-webkit-font-s
           <label class="modal-month-lbl">Effective month
             <select id="targetsMonth" class="modal-month"></select>
           </label>
+          <button class="modal-addbtn" id="targetsAddMonth" title="Add a new effective month">+ Add month</button>
+          <button class="modal-addbtn modal-delbtn" id="targetsDelMonth" title="Delete the selected month">Delete</button>
           <button class="modal-x" id="targetsClose">✕</button>
         </div>
       </div>
@@ -722,8 +727,11 @@ const COL_MAP = {
 };
 
 // ════════════════════════════════════════════════════════════════════════
-// FALLBACK DATA — agent-week aggregates from User_metrics_3 (W19-W22)
+// FALLBACK DATA — empty. The embedded W19-W22 snapshot was removed; live
+// Supabase data is the source of truth. If live load fails the dashboard
+// degrades to an empty "no data" state rather than showing a stale snapshot.
 // ════════════════════════════════════════════════════════════════════════
+const FALLBACK_RAW = [];
 
 // ════════════════════════════════════════════════════════════════════════
 // STATE
@@ -1406,20 +1414,62 @@ function _readEditorInputs() {
     if (!isNaN(hrs)) ver[c].req_hrs_month = hrs;
   });
 }
+// Re-render the month dropdown from the working buffer, selecting _editorMonth.
+function _renderEditorMonthSelect() {
+  const months = Object.keys(_editorBuf).sort();
+  $('targetsMonth').innerHTML = months.map(mo =>
+    `<option value="${mo}"${mo === _editorMonth ? ' selected' : ''}>${ymLabel(mo)}</option>`).join('');
+}
+// 'YYYY-MM' → the following month, rolling the year over.
+function _nextYearMonth(ym) {
+  let [y, m] = ym.split('-').map(Number);
+  m += 1; if (m > 12) { m = 1; y += 1; }
+  return `${y}-${String(m).padStart(2, '0')}`;
+}
 function openTargetsEditor() {
   _editorBuf = JSON.parse(JSON.stringify(TARGET_VERSIONS));
   const months = Object.keys(_editorBuf).sort();
   if (!months.length) return;
   // Default to the version effective for the period currently in view.
   _editorMonth = chosenVersionMonth(STATE.selectedWeek) || months[months.length - 1];
-  $('targetsMonth').innerHTML = months.map(mo =>
-    `<option value="${mo}"${mo === _editorMonth ? ' selected' : ''}>${ymLabel(mo)}</option>`).join('');
+  _renderEditorMonthSelect();
   _renderEditorTable();
   $('targetsModal').style.display = 'flex';
 }
 function changeTargetsMonth(mo) {
   _readEditorInputs();      // preserve edits on the month we're leaving
   _editorMonth = mo;
+  _renderEditorTable();
+}
+// Add a new effective-month version, pre-filled from the latest version on or
+// before it (carry-forward), so you only adjust what changed.
+function addTargetsMonth() {
+  _readEditorInputs();
+  const months = Object.keys(_editorBuf).sort();
+  const suggested = months.length ? _nextYearMonth(months[months.length - 1]) : '2026-06';
+  const input = prompt('New effective month (YYYY-MM):', suggested);
+  if (input == null) return;
+  const mo = input.trim();
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(mo)) { alert('Please enter a month as YYYY-MM, e.g. 2026-06.'); return; }
+  if (_editorBuf[mo]) { _editorMonth = mo; _renderEditorMonthSelect(); _renderEditorTable(); return; }
+  // Carry forward the latest version effective on/before the new month.
+  let src = null;
+  for (const m of months) if (m <= mo) src = m;
+  if (!src) src = months[0];
+  _editorBuf[mo] = src ? JSON.parse(JSON.stringify(_editorBuf[src])) : {};
+  _editorMonth = mo;
+  _renderEditorMonthSelect();
+  _renderEditorTable();
+}
+// Delete the currently selected month version (keeps at least one).
+function deleteTargetsMonth() {
+  const months = Object.keys(_editorBuf).sort();
+  if (months.length <= 1) { alert('At least one target month must remain.'); return; }
+  if (!confirm(`Delete the ${ymLabel(_editorMonth)} target version?`)) return;
+  delete _editorBuf[_editorMonth];
+  const rest = Object.keys(_editorBuf).sort();
+  _editorMonth = rest[rest.length - 1];
+  _renderEditorMonthSelect();
   _renderEditorTable();
 }
 function closeTargetsEditor() { $('targetsModal').style.display = 'none'; }
@@ -2231,6 +2281,8 @@ async function init() {
   // Wire targets editor
   $('targetsBtn').onclick = openTargetsEditor;
   $('targetsMonth').onchange = (e) => changeTargetsMonth(e.target.value);
+  $('targetsAddMonth').onclick = addTargetsMonth;
+  $('targetsDelMonth').onclick = deleteTargetsMonth;
   $('targetsClose').onclick = closeTargetsEditor;
   $('targetsCancel').onclick = closeTargetsEditor;
   $('targetsSave').onclick = saveTargetsEditor;
@@ -2272,12 +2324,12 @@ async function init() {
       return;
     } catch (e) {
       console.error('Live data failed:', e);
-      showErr(`Live data unavailable (${e.message}) — showing embedded snapshot (W19–W22).`);
+      showErr(`Live data unavailable (${e.message}) — no embedded data to fall back on.`);
       setBadge('static', 'Offline');
       bar.classList.remove('loading');
     }
   } else {
-    showErr('ORG_ID not configured — showing embedded snapshot.');
+    showErr('ORG_ID not configured — no data to display.');
     setBadge('static', 'Offline');
   }
 
