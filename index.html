@@ -45,6 +45,27 @@ body{font-family:'DM Sans',system-ui,sans-serif;color:var(--text);-webkit-font-s
 .gran-btn{font-size:11px;font-weight:500;padding:6px 13px;border-radius:7px;cursor:pointer;border:none;background:none;color:var(--text2);transition:all .15s;font-family:inherit}
 .gran-btn:hover{color:var(--text)}
 .gran-btn.act{background:var(--accent);color:#fff}
+.targets-btn{margin-left:auto;font-size:11px;font-weight:500;padding:6px 12px;border-radius:7px;cursor:pointer;border:1px solid var(--border-light);background:transparent;color:var(--text2);transition:all .15s;font-family:inherit}
+.targets-btn:hover{color:var(--text);border-color:var(--border-strong)}
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);display:flex;align-items:flex-start;justify-content:center;z-index:50;padding:48px 16px;overflow:auto}
+.modal{background:var(--card);border:1px solid var(--border);border-radius:14px;width:100%;max-width:560px;box-shadow:0 20px 60px rgba(0,0,0,.5)}
+.modal-head{display:flex;align-items:center;justify-content:space-between;padding:18px 22px 6px}
+.modal-head h3{margin:0;font-size:15px;font-weight:600;color:var(--text)}
+.modal-x{background:none;border:none;color:var(--text3);font-size:16px;cursor:pointer;padding:2px 6px;border-radius:6px}
+.modal-x:hover{color:var(--text);background:var(--bg-2)}
+.modal-sub{margin:0;padding:0 22px 12px;font-size:11.5px;line-height:1.5;color:var(--text3)}
+.modal-body{max-height:52vh;overflow:auto;padding:0 22px}
+.modal-foot{display:flex;align-items:center;gap:8px;padding:14px 22px 18px}
+.targets-tbl{width:100%;border-collapse:collapse;font-size:12px}
+.targets-tbl th{text-align:left;color:var(--text3);font-weight:500;font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;padding:6px 8px;border-bottom:1px solid var(--border-light);position:sticky;top:0;background:var(--card)}
+.targets-tbl th.numeric,.targets-tbl td.numeric{text-align:right}
+.targets-tbl td{padding:5px 8px;border-bottom:1px solid var(--border-light);color:var(--text)}
+.targets-tbl input{width:96px;text-align:right;font-family:var(--mono);font-size:12px;padding:5px 8px;border:1px solid var(--border-light);border-radius:6px;background:var(--bg-2);color:var(--text)}
+.targets-tbl input:focus{outline:none;border-color:var(--accent)}
+.btn-primary{font-size:12px;font-weight:600;padding:8px 16px;border-radius:8px;border:none;background:var(--accent);color:#fff;cursor:pointer}
+.btn-primary:hover{filter:brightness(1.08)}
+.btn-ghost{font-size:12px;font-weight:500;padding:8px 14px;border-radius:8px;border:1px solid var(--border-light);background:transparent;color:var(--text2);cursor:pointer}
+.btn-ghost:hover{color:var(--text);border-color:var(--border-strong)}
 .weeks{display:flex;gap:3px;flex-wrap:wrap}
 .wk-btn{font-size:11px;font-weight:500;padding:5px 11px;border-radius:6px;cursor:pointer;border:1px solid var(--border-light);background:transparent;color:var(--text3);transition:all .15s;font-family:var(--mono)}
 .wk-btn:hover{color:var(--text);border-color:var(--border-strong)}
@@ -280,6 +301,24 @@ body{font-family:'DM Sans',system-ui,sans-serif;color:var(--text);-webkit-font-s
         <button class="gran-btn" data-gran="month">Month</button>
       </div>
       <div class="weeks" id="weekNav"></div>
+      <button class="targets-btn" id="targetsBtn" title="Edit monthly FTE & required-hours targets">⚙ Targets</button>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="targetsModal" style="display:none">
+    <div class="modal">
+      <div class="modal-head">
+        <h3>Monthly targets</h3>
+        <button class="modal-x" id="targetsClose">✕</button>
+      </div>
+      <p class="modal-sub">Target FTE and required billable hours per campaign, per month — the inputs that drive Slippage. Edits are saved in this browser and persist across reloads. Seeded from Automation_Rules_2026.xlsx (rows 76 &amp; 78).</p>
+      <div class="modal-body" id="targetsBody"></div>
+      <div class="modal-foot">
+        <button class="btn-ghost" id="targetsReset">Reset to defaults</button>
+        <span style="flex:1"></span>
+        <button class="btn-ghost" id="targetsCancel">Cancel</button>
+        <button class="btn-primary" id="targetsSave">Save targets</button>
+      </div>
     </div>
   </div>
 
@@ -400,9 +439,38 @@ const AUTOMATION_RULES = {
   'GOODLIFESORTED': { req_fte: 4,   req_hrs_month: 585 },
   '1LIFE':          { req_fte: 14,  req_hrs_month: 2427.04 },
 };
-// Pre-compute weekly target
-for (const k in AUTOMATION_RULES) {
-  AUTOMATION_RULES[k].req_hrs_week = AUTOMATION_RULES[k].req_hrs_month / WEEKS_PER_MONTH;
+// Defaults seeded from Automation_Rules_2026.xlsx (sheet 20260501, rows 76 & 78).
+// Editable in-app via the Targets editor; overrides are saved per-browser.
+const DEFAULT_RULES = JSON.parse(JSON.stringify(AUTOMATION_RULES));
+const TARGET_LS_KEY = 'ceo_target_overrides';
+
+function recomputeReqWeekly() {
+  for (const k in AUTOMATION_RULES) {
+    AUTOMATION_RULES[k].req_hrs_week = AUTOMATION_RULES[k].req_hrs_month / WEEKS_PER_MONTH;
+  }
+}
+
+// Merge any saved per-campaign target overrides (localStorage) onto the defaults.
+function applyTargetOverrides() {
+  let ov = {};
+  try { ov = JSON.parse(localStorage.getItem(TARGET_LS_KEY) || '{}') || {}; } catch (e) { ov = {}; }
+  for (const k in AUTOMATION_RULES) {
+    const o = ov[k];
+    if (!o) continue;
+    if (o.req_fte != null && !isNaN(+o.req_fte)) AUTOMATION_RULES[k].req_fte = +o.req_fte;
+    if (o.req_hrs_month != null && !isNaN(+o.req_hrs_month)) AUTOMATION_RULES[k].req_hrs_month = +o.req_hrs_month;
+  }
+  recomputeReqWeekly();
+}
+applyTargetOverrides();
+
+// Required billable hours for ONE period at the current granularity. The rules
+// are monthly, so week/day are pro-rated. Used by slippage.
+function reqHrsForPeriod(ar) {
+  if (!ar) return 0;
+  if (STATE.granularity === 'month') return ar.req_hrs_month;
+  if (STATE.granularity === 'day')   return ar.req_hrs_month / (WEEKS_PER_MONTH * 7);
+  return ar.req_hrs_week;  // week
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -1226,6 +1294,51 @@ function setGranularity(g) {
   render();
 }
 
+// ─── Targets editor (FTE & required hours per campaign) ───────────
+function openTargetsEditor() {
+  const camps = Object.keys(AUTOMATION_RULES)
+    .sort((a, b) => (CAMP_DISPLAY[a] || a).localeCompare(CAMP_DISPLAY[b] || b));
+  $('targetsBody').innerHTML = `
+    <table class="targets-tbl">
+      <thead><tr><th>Campaign</th><th class="numeric">Target FTE</th><th class="numeric">Target hrs / month</th></tr></thead>
+      <tbody>${camps.map(c => `
+        <tr data-camp="${c}">
+          <td>${CAMP_DISPLAY[c] || c}</td>
+          <td class="numeric"><input type="number" step="1" min="0" class="t-fte" value="${AUTOMATION_RULES[c].req_fte ?? ''}"></td>
+          <td class="numeric"><input type="number" step="0.01" min="0" class="t-hrs" value="${AUTOMATION_RULES[c].req_hrs_month ?? ''}"></td>
+        </tr>`).join('')}
+      </tbody>
+    </table>`;
+  $('targetsModal').style.display = 'flex';
+}
+function closeTargetsEditor() { $('targetsModal').style.display = 'none'; }
+function saveTargetsEditor() {
+  const ov = {};
+  $('targetsBody').querySelectorAll('tr[data-camp]').forEach(tr => {
+    const c = tr.dataset.camp;
+    const fte = parseFloat(tr.querySelector('.t-fte').value);
+    const hrs = parseFloat(tr.querySelector('.t-hrs').value);
+    const o = {};
+    if (!isNaN(fte)) o.req_fte = fte;
+    if (!isNaN(hrs)) o.req_hrs_month = hrs;
+    if (Object.keys(o).length) ov[c] = o;
+  });
+  try { localStorage.setItem(TARGET_LS_KEY, JSON.stringify(ov)); } catch (e) {}
+  applyTargetOverrides();
+  closeTargetsEditor();
+  render();
+}
+function resetTargetsEditor() {
+  try { localStorage.removeItem(TARGET_LS_KEY); } catch (e) {}
+  for (const k in AUTOMATION_RULES) {
+    AUTOMATION_RULES[k].req_fte = DEFAULT_RULES[k].req_fte;
+    AUTOMATION_RULES[k].req_hrs_month = DEFAULT_RULES[k].req_hrs_month;
+  }
+  recomputeReqWeekly();
+  openTargetsEditor();  // refresh inputs to the restored defaults
+  render();
+}
+
 function render() {
   $('loadingView').style.display = 'none';
   // Footer
@@ -1273,7 +1386,7 @@ function renderSummary() {
     absentSum += m.absent_days || 0;
     presentSum += m.ftes_present || 0;
     const ar = AUTOMATION_RULES[c];
-    if (ar) reqHrsTotal += ar.req_hrs_week;
+    if (ar) reqHrsTotal += reqHrsForPeriod(ar);
     const o = overallRag(m, TARGETS[c]||{}, KPI_CONFIG[c]||[]);
     overalls[c] = o;
     if (o === 'green') green++;
@@ -1303,7 +1416,7 @@ function renderSummary() {
   if (prevWk) {
     let prevReqHrs = 0;
     for (const c of camps) {
-      if (STATE.campaignWeek[c][prevWk] && AUTOMATION_RULES[c]) prevReqHrs += AUTOMATION_RULES[c].req_hrs_week;
+      if (STATE.campaignWeek[c][prevWk] && AUTOMATION_RULES[c]) prevReqHrs += reqHrsForPeriod(AUTOMATION_RULES[c]);
     }
     prevSlippage = prevReqHrs > 0 ? ((prevReqHrs - prevBillable) / prevReqHrs) * 100 : null;
   }
@@ -2013,6 +2126,13 @@ async function init() {
   document.querySelectorAll('.tab').forEach(t => t.onclick = () => setView(t.dataset.view));
   // Wire granularity toggle (Day / Week / Month)
   document.querySelectorAll('#granNav .gran-btn').forEach(b => b.onclick = () => setGranularity(b.dataset.gran));
+  // Wire targets editor
+  $('targetsBtn').onclick = openTargetsEditor;
+  $('targetsClose').onclick = closeTargetsEditor;
+  $('targetsCancel').onclick = closeTargetsEditor;
+  $('targetsSave').onclick = saveTargetsEditor;
+  $('targetsReset').onclick = resetTargetsEditor;
+  $('targetsModal').onclick = (e) => { if (e.target.id === 'targetsModal') closeTargetsEditor(); };
 
   const bar = $('refreshBar');
 
