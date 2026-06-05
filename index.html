@@ -97,6 +97,7 @@ body{font-family:'DM Sans',system-ui,sans-serif;color:var(--text);-webkit-font-s
 .sum-grid{display:grid;grid-template-columns:1.4fr 1fr 1fr;gap:14px;margin-bottom:14px}
 .sum-card{background:var(--card);border:1px solid var(--border-light);border-radius:12px;padding:18px 20px}
 .sum-card h3{font-size:10px;font-weight:600;letter-spacing:1.4px;text-transform:uppercase;color:var(--text3);margin-bottom:14px;font-family:var(--mono)}
+.mtd-badge{display:inline-block;margin-left:8px;padding:2px 7px;border-radius:10px;background:var(--accent-soft,rgba(90,150,255,.15));color:var(--accent,#5a96ff);letter-spacing:.4px;font-size:9px;vertical-align:middle}
 
 .headline-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
 .headline{padding:10px 12px;background:var(--bg-2);border-radius:8px;border-left:2px solid var(--border-light);transition:border-color .15s}
@@ -427,6 +428,10 @@ const KPI_CONFIG = {
 };
 
 const LOWER_BETTER = new Set(['aht','absence','abandon_rate','error_rate','res_time','acw','avg_resp_time','calls_abn']);
+// KPIs that accumulate over the period (totals), so their targets must be
+// pro-rated to the elapsed fraction of an in-progress month/week. Rate-based
+// KPIs (csat, qa, sph, absence, …) are period-agnostic and never scaled.
+const CUMULATIVE_KPIS = new Set(['sales','billable','calls','tickets']);
 
 // ════════════════════════════════════════════════════════════════════════
 // AUTOMATION RULES — target FTE & target monthly hours per campaign
@@ -541,6 +546,47 @@ function chosenVersionMonth(periodLabel) {
 function rulesForPeriod(periodLabel) {
   const mo = chosenVersionMonth(periodLabel);
   return mo ? TARGET_VERSIONS[mo] : {};
+}
+
+// [start,end] UTC dates spanned by a period label at a given granularity.
+function periodDateRange(label, gran) {
+  if (label == null) return null;
+  if (gran === 'day') { const d = parseDate(label); return d ? { start: d, end: d } : null; }
+  if (gran === 'month') {
+    const m = String(label).match(/^([A-Za-z]{3})\s+(\d{4})$/);
+    if (!m) return null;
+    const mi = _MONTH_NAMES.indexOf(m[1]);
+    if (mi < 0) return null;
+    const y = +m[2];
+    return { start: new Date(Date.UTC(y, mi, 1)), end: new Date(Date.UTC(y, mi + 1, 0)) };
+  }
+  // week: "W##, YYYY" → Monday..Sunday of that ISO week
+  const m = String(label).match(/^W(\d+),\s*(\d{4})$/);
+  if (!m) return null;
+  const week = +m[1], year = +m[2];
+  const jan4 = new Date(Date.UTC(year, 0, 4));
+  const jan4Dow = (jan4.getUTCDay() + 6) % 7;  // Monday=0
+  const monday = new Date(jan4);
+  monday.setUTCDate(jan4.getUTCDate() - jan4Dow + (week - 1) * 7);
+  const sunday = new Date(monday);
+  sunday.setUTCDate(monday.getUTCDate() + 6);
+  return { start: monday, end: sunday };
+}
+
+// Fraction of a period elapsed as of today (1 for complete or past periods).
+// Used to pro-rate cumulative targets/expectations for the in-progress
+// month/week so run-rate comparisons (slippage, sales targets) are fair.
+function periodElapsedFraction(label, gran) {
+  const r = periodDateRange(label, gran);
+  if (!r) return 1;
+  const now = new Date();
+  const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  if (today >= r.end) return 1;     // period already complete
+  if (today < r.start) return 1;    // future period — don't scale
+  const DAY = 86400000;
+  const total = Math.round((r.end - r.start) / DAY) + 1;
+  const elapsed = Math.round((today - r.start) / DAY) + 1;  // count today as elapsed
+  return Math.max(1 / total, Math.min(1, elapsed / total));
 }
 
 // Required billable hours for ONE period at the current granularity. Rules are
@@ -1017,12 +1063,14 @@ function rag(val, tgt, direction) {
   return 'red';
 }
 
-function overallRag(metrics, targets, config) {
+function overallRag(metrics, targets, config, frac = 1) {
   let r = false, a = false;
   for (const [k,,dir] of config) {
     if (dir === 'none') continue;
-    const v = metrics[k], t = targets[k];
+    const v = metrics[k];
+    let t = targets[k];
     if (v == null || t == null) continue;
+    if (frac !== 1 && CUMULATIVE_KPIS.has(k)) t = t * frac;  // run-rate target for partial period
     const x = rag(v, t, dir);
     if (x === 'red') r = true;
     else if (x === 'amber') a = true;
@@ -1524,6 +1572,9 @@ function renderSummary() {
   let prevAbsentSum = 0, prevPresentSum = 0;
   let reqHrsTotal = 0;
   const curRules = rulesForPeriod(wk);          // target version effective for this period
+  const frac = periodElapsedFraction(wk, STATE.granularity);  // <1 for in-progress period
+  const isPartial = frac < 1;
+  const pctElapsed = Math.round(frac * 100);
 
   const overalls = {};
   for (const c of camps) {
@@ -1536,7 +1587,7 @@ function renderSummary() {
     presentSum += m.ftes_present || 0;
     const ar = curRules[c];
     if (ar) reqHrsTotal += reqHrsForPeriod(ar);
-    const o = overallRag(m, TARGETS[c]||{}, KPI_CONFIG[c]||[]);
+    const o = overallRag(m, TARGETS[c]||{}, KPI_CONFIG[c]||[], frac);
     overalls[c] = o;
     if (o === 'green') green++;
     else if (o === 'amber') amber++;
@@ -1559,10 +1610,14 @@ function renderSummary() {
     { val: absenceRate - prevAbsenceRate, dir: absenceRate < prevAbsenceRate ? 'up' : (absenceRate > prevAbsenceRate ? 'down' : 'flat') } : null;
   // Note: absence is "lower is better" so down=bad (red), up=good (green)
 
-  // Slippage % = (required - delivered) / required × 100
+  // Slippage % = (required - delivered) / required × 100. For an in-progress
+  // period the required hours are pro-rated to the elapsed fraction so we
+  // compare delivered-so-far against expected-so-far (run-rate), not the whole
+  // month/week's target.
   const tgtVerMonth = chosenVersionMonth(wk);
   const tgtVerLabel = tgtVerMonth ? ymLabel(tgtVerMonth) : null;
-  const slippage = reqHrsTotal > 0 ? ((reqHrsTotal - totalBillable) / reqHrsTotal) * 100 : null;
+  const reqHrsExpected = reqHrsTotal * frac;
+  const slippage = reqHrsExpected > 0 ? ((reqHrsExpected - totalBillable) / reqHrsExpected) * 100 : null;
   let prevSlippage = null;
   if (prevWk) {
     let prevReqHrs = 0;
@@ -1607,8 +1662,12 @@ function renderSummary() {
     }
   }
 
-  const fteDelta = fmtDelta(totalFTE, prevFTE);
-  const billDelta = fmtDelta(totalBillable, prevBillable);
+  // FTE is a unique-headcount, not a time total, so its delta vs a full prior
+  // period is meaningless mid-period — suppress it and show an MTD note instead.
+  const fteDelta = isPartial ? null : fmtDelta(totalFTE, prevFTE);
+  // Billable is cumulative: compare current-to-date against the prior period
+  // scaled to the same elapsed span.
+  const billDelta = fmtDelta(totalBillable, prevBillable * frac);
 
   // Flags: find most impactful issues / movers
   const flags = buildFlags(wk, prevWk, camps);
@@ -1625,12 +1684,12 @@ function renderSummary() {
   $('summaryView').innerHTML = `
     <div class="sum-grid">
       <div class="sum-card">
-        <h3>Headline</h3>
+        <h3>Headline${isPartial ? ` <span class="mtd-badge" title="${pLbl(wk)} is still in progress — cumulative figures and targets are pro-rated to the elapsed portion">${periodNoun()}-to-date · ${pctElapsed}% elapsed</span>` : ''}</h3>
         <div class="headline-grid">
           <div class="headline">
             <div class="headline-lbl">FTE</div>
             <div class="headline-val">${totalFTE}</div>
-            ${fteDelta ? `<div class="headline-delta ${fteDelta.dir}">${fteDelta.str} vs ${prevWk ? pLbl(prevWk) : 'prev'}</div>` : '<div class="headline-sub">—</div>'}
+            ${fteDelta ? `<div class="headline-delta ${fteDelta.dir}">${fteDelta.str} vs ${prevWk ? pLbl(prevWk) : 'prev'}</div>` : `<div class="headline-sub">${isPartial ? `${periodNoun()}-to-date` : '—'}</div>`}
           </div>
           <div class="headline">
             <div class="headline-lbl">Billable hrs</div>
@@ -1656,10 +1715,10 @@ function renderSummary() {
             <div class="headline-val">${absenceRate != null ? absenceRate.toFixed(1)+'%' : '—'}</div>
             ${absDelta ? `<div class="headline-delta ${absDelta.dir}">${absDelta.val>0?'+':''}${absDelta.val.toFixed(1)}pt vs ${prevWk ? pLbl(prevWk) : 'prev'}</div>` : '<div class="headline-sub">target ≤5%</div>'}
           </div>
-          <div class="headline ${slippage != null ? (slippage > 15 ? 'danger' : slippage > 5 ? 'warn' : 'good') : ''}" title="${Math.round(reqHrsTotal).toLocaleString()} hrs required${tgtVerLabel ? ` · targets: ${tgtVerLabel}` : ''}">
+          <div class="headline ${slippage != null ? (slippage > 15 ? 'danger' : slippage > 5 ? 'warn' : 'good') : ''}" title="${Math.round(reqHrsExpected).toLocaleString()} hrs required${isPartial ? ` so far (${pctElapsed}% of ${Math.round(reqHrsTotal).toLocaleString()} full-${periodNoun()})` : ''}${tgtVerLabel ? ` · targets: ${tgtVerLabel}` : ''}">
             <div class="headline-lbl">Slippage</div>
             <div class="headline-val">${slippage != null ? slippage.toFixed(1)+'%' : '—'}</div>
-            ${slipDelta ? `<div class="headline-delta ${slipDelta.dir}">${slipDelta.val>0?'+':''}${slipDelta.val.toFixed(1)}pt vs ${prevWk ? pLbl(prevWk) : 'prev'}</div>` : `<div class="headline-sub">${Math.round(reqHrsTotal).toLocaleString()} hrs req${tgtVerLabel ? ` · ${tgtVerLabel}` : ''}</div>`}
+            ${slipDelta ? `<div class="headline-delta ${slipDelta.dir}">${slipDelta.val>0?'+':''}${slipDelta.val.toFixed(1)}pt vs ${prevWk ? pLbl(prevWk) : 'prev'}</div>` : `<div class="headline-sub">${Math.round(reqHrsExpected).toLocaleString()} hrs req${isPartial ? ' to date' : ''}${tgtVerLabel ? ` · ${tgtVerLabel}` : ''}</div>`}
           </div>
           <div class="headline">
             <div class="headline-lbl">Campaigns</div>
@@ -1725,6 +1784,7 @@ function prevWeek(wk) {
 
 function buildFlags(wk, prevWk, camps) {
   const flags = [];
+  const frac = periodElapsedFraction(wk, STATE.granularity);  // <1 for in-progress period
   // Pass 1: failing KPIs (red overall)
   for (const c of camps) {
     const m = STATE.campaignWeek[c][wk];
@@ -1735,7 +1795,10 @@ function buildFlags(wk, prevWk, camps) {
       if (dir === 'none') continue;
       const v = m[k], t = tgts[k];
       if (v == null || t == null) continue;
-      if (rag(v, t, dir) === 'red') reds.push({ k, lbl, v, t, dir });
+      // Decide RAG against the run-rate (pro-rated) target for cumulative KPIs,
+      // but report the full target in the message.
+      const ragT = (frac !== 1 && CUMULATIVE_KPIS.has(k)) ? t * frac : t;
+      if (rag(v, ragT, dir) === 'red') reds.push({ k, lbl, v, t, dir });
     }
     if (reds.length) {
       const worst = reds[0];
@@ -1750,7 +1813,9 @@ function buildFlags(wk, prevWk, camps) {
     const drops = [];
     for (const c of camps) {
       const curr = STATE.campaignWeek[c][wk]?.billable || 0;
-      const prev = STATE.campaignWeek[c][prevWk]?.billable || 0;
+      // Compare against the prior period scaled to the same elapsed span, so a
+      // partial current month/week isn't flagged as a drop just for being early.
+      const prev = (STATE.campaignWeek[c][prevWk]?.billable || 0) * frac;
       if (prev > 50 && curr < prev * 0.85) {
         drops.push({ camp: c, drop: prev - curr, pct: ((curr - prev) / prev) * 100 });
       }
