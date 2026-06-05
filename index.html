@@ -41,6 +41,10 @@ body{font-family:'DM Sans',system-ui,sans-serif;color:var(--text);-webkit-font-s
 .tab{font-size:12px;font-weight:500;padding:7px 16px;border-radius:7px;cursor:pointer;border:none;background:none;color:var(--text2);transition:all .15s;font-family:inherit}
 .tab:hover{color:var(--text)}
 .tab.act{background:var(--card);color:var(--text);box-shadow:0 1px 0 var(--border)}
+.gran-toggle{display:flex;gap:2px;background:var(--bg-2);padding:3px;border-radius:10px;border:1px solid var(--border-light)}
+.gran-btn{font-size:11px;font-weight:500;padding:6px 13px;border-radius:7px;cursor:pointer;border:none;background:none;color:var(--text2);transition:all .15s;font-family:inherit}
+.gran-btn:hover{color:var(--text)}
+.gran-btn.act{background:var(--accent);color:#fff}
 .weeks{display:flex;gap:3px;flex-wrap:wrap}
 .wk-btn{font-size:11px;font-weight:500;padding:5px 11px;border-radius:6px;cursor:pointer;border:1px solid var(--border-light);background:transparent;color:var(--text3);transition:all .15s;font-family:var(--mono)}
 .wk-btn:hover{color:var(--text);border-color:var(--border-strong)}
@@ -270,6 +274,11 @@ body{font-family:'DM Sans',system-ui,sans-serif;color:var(--text);-webkit-font-s
         <button class="tab" data-view="campaigns">Campaigns</button>
         <button class="tab" data-view="trends">Trends</button>
       </div>
+      <div class="gran-toggle" id="granNav">
+        <button class="gran-btn" data-gran="day">Day</button>
+        <button class="gran-btn act" data-gran="week">Week</button>
+        <button class="gran-btn" data-gran="month">Month</button>
+      </div>
       <div class="weeks" id="weekNav"></div>
     </div>
   </div>
@@ -295,6 +304,8 @@ const CONFIG = {
   VIEW_NAME: 'User_metrics_3',
   ORG_ID: '723580241',
   REFRESH_INTERVAL_MS: 30 * 60 * 1000,
+  // Name of the per-day date column in the live view. Leave '' to auto-detect.
+  DATE_COL: '',
 };
 
 // Workgroup → campaign key (matches Python aggregation)
@@ -587,8 +598,9 @@ let STATE = {
   shrinkageCampaignWeek: null,// {[camp]:{[week]:{...derived metrics}}}
   shrinkageTeamWeek: null,    // {[camp||team]:{[week]:{...}}}
   shrinkageAvailable: false,
-  weeks: [],
-  selectedWeek: null,
+  granularity: 'week',   // 'day' | 'week' | 'month' — re-aggregation grain
+  weeks: [],             // period labels for the current granularity
+  selectedWeek: null,    // selected period label
   selectedCampaign: null,
   selectedTeam: null,
   view: 'summary',
@@ -665,8 +677,110 @@ function rollup(rows) {
   return r;
 }
 
-function buildAggregates(rows) {
-  // Index of records by campaign / week / team / user
+// ════════════════════════════════════════════════════════════════════════
+// PERIOD DIMENSION — day / week / month bucketing
+// The dashboard buckets every metric by a "period". Week is the native grain
+// (rows carry a precomputed `Weeks` label); day and month are derived from the
+// per-row date column (auto-detected, or CONFIG.DATE_COL).
+// ════════════════════════════════════════════════════════════════════════
+let _DATE_COL = null;  // resolved per dataset in applyData()
+
+const _DATE_COL_CANDIDATES = ['date','Date','DATE','call_date','Call_Date','metric_date',
+  'Metric_Date','activity_date','report_date','Report_Date','log_date','day','Day','datetime',
+  'date_time','Date_Time','created_date','Created_Date'];
+
+// Find the per-row date column: explicit config → known names → scan for a
+// column whose values parse as dates for the overwhelming majority of rows.
+function detectDateCol(rows) {
+  if (CONFIG.DATE_COL) return CONFIG.DATE_COL;
+  if (!rows || !rows.length) return null;
+  const sample = rows.find(r => r) || {};
+  for (const c of _DATE_COL_CANDIDATES) {
+    if (sample[c] != null && sample[c] !== '' && parseDate(sample[c])) return c;
+  }
+  const probe = rows.slice(0, 40);
+  for (const k of Object.keys(sample)) {
+    if (k === 'Weeks' || typeof sample[k] === 'number') continue;
+    let ok = 0, tot = 0;
+    for (const r of probe) {
+      const v = r[k];
+      if (v == null || v === '') continue;
+      tot++;
+      if (parseDate(v)) ok++;
+    }
+    if (tot >= 3 && ok / tot >= 0.8) return k;
+  }
+  return null;
+}
+
+function rowDate(r) {
+  return _DATE_COL ? parseDate(r[_DATE_COL]) : null;
+}
+
+// Derive the bucket key for a row at the given granularity.
+function periodKeyFor(r, gran) {
+  if (gran === 'week') return r.Weeks || null;
+  const d = rowDate(r);
+  if (gran === 'month') {
+    if (d) return `${_MONTH_NAMES[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
+    // Fallback: derive the month from the ISO-week label (use its Thursday).
+    return weekLabelToMonth(r.Weeks);
+  }
+  // day
+  if (d) return d.toISOString().slice(0, 10);
+  return r.Weeks || null;  // no date available → cannot split below week
+}
+
+// "W23, 2026" → "Jun 2026" (month containing that ISO week's Thursday).
+function weekLabelToMonth(wk) {
+  if (!wk) return null;
+  const m = wk.match(/W(\d+),\s*(\d+)/);
+  if (!m) return wk;
+  const week = +m[1], year = +m[2];
+  const jan4 = new Date(Date.UTC(year, 0, 4));
+  const jan4Dow = (jan4.getUTCDay() + 6) % 7;  // Mon=0
+  const thursday = new Date(jan4);
+  thursday.setUTCDate(jan4.getUTCDate() - jan4Dow + 3 + (week - 1) * 7);
+  return `${_MONTH_NAMES[thursday.getUTCMonth()]} ${thursday.getUTCFullYear()}`;
+}
+
+// Chronological sort value for a period label.
+function periodSortVal(label, gran) {
+  if (label == null) return -Infinity;
+  if (gran === 'week') {
+    const [wk, yr] = (label.match(/\d+/g) || [0, 0]).map(Number);
+    return yr * 100 + wk;
+  }
+  if (gran === 'month') {
+    const m = label.match(/^([A-Za-z]{3})\s+(\d{4})$/);
+    if (!m) return 0;
+    return +m[2] * 12 + _MONTH_NAMES.indexOf(m[1]);
+  }
+  // day: "YYYY-MM-DD"
+  const t = Date.parse(label + 'T00:00:00Z');
+  return isNaN(t) ? 0 : t;
+}
+
+// Compact, human-friendly label for the period nav / captions.
+function fmtPeriodLabel(label, gran) {
+  if (label == null) return '';
+  if (gran === 'day') {
+    const d = parseDate(label);
+    if (d) return `${d.getUTCDate()} ${_MONTH_NAMES[d.getUTCMonth()]}`;
+    return label.replace(', 2026', '');  // no date column → bucket is a week label
+  }
+  if (gran === 'month') return label;          // already "Jun 2026"
+  return label.replace(', 2026', '');          // week: "W20, 2026" → "W20"
+}
+
+// Convenience wrappers that read the live granularity from STATE.
+function pLbl(w) { return fmtPeriodLabel(w, STATE.granularity); }
+function periodNoun() {
+  return STATE.granularity === 'day' ? 'day' : STATE.granularity === 'month' ? 'month' : 'week';
+}
+
+function buildAggregates(rows, gran = 'week') {
+  // Index of records by campaign / period / team / user
   const weeks = new Set();
   const campWeekRows = {};   // camp -> week -> rows[]
   const teamWeekRows = {};   // camp -> team -> week -> rows[]
@@ -680,7 +794,7 @@ function buildAggregates(rows) {
       if (!camp && r.workgroup === 'HYVE' && r.shift_WG === 'Beer52') camp = 'BEER52';
     }
     if (!camp) continue;
-    const week = r.Weeks;
+    const week = periodKeyFor(r, gran);
     if (!week) continue;
     weeks.add(week);
     const team = r.team_name || '— Unassigned';
@@ -733,11 +847,7 @@ function buildAggregates(rows) {
     }
   }
 
-  const sortedWeeks = [...weeks].sort((a,b) => {
-    const [wa,ya] = a.match(/\d+/g).map(Number);
-    const [wb,yb] = b.match(/\d+/g).map(Number);
-    return ya - yb || wa - wb;
-  });
+  const sortedWeeks = [...weeks].sort((a,b) => periodSortVal(a, gran) - periodSortVal(b, gran));
 
   return { campaignWeek, teamWeek, agentWeek, agentMeta, weeks: sortedWeeks };
 }
@@ -904,25 +1014,43 @@ function extractEmployeeProfileRows(zoho) {
 
 // Parse "4-Jun-26" or "2026-06-04" etc. → "Wnn, 2026"
 const _MONTH_3 = {jan:1,feb:2,mar:3,apr:4,may:5,jun:6,jul:7,aug:8,sep:9,oct:10,nov:11,dec:12};
-function dateToWeekLabel(s) {
-  if (!s) return null;
-  let d;
-  if (s instanceof Date) d = s;
-  else {
-    const str = String(s).trim();
-    // Try "4-Jun-26" format
-    const m = str.match(/^(\d{1,2})-([a-z]{3})-(\d{2,4})$/i);
-    if (m) {
-      const day = +m[1];
-      const mon = _MONTH_3[m[2].toLowerCase()];
-      let yr = +m[3];
-      if (yr < 100) yr += 2000;
-      d = new Date(Date.UTC(yr, mon - 1, day));
-    } else {
-      d = new Date(str);
-    }
+const _MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+// Parse common date string formats → UTC Date, or null. Deliberately strict
+// (rejects bare numbers / unknown formats) so date-column auto-detection is safe.
+function parseDate(s) {
+  if (s == null || s === '') return null;
+  if (s instanceof Date) return isNaN(s.getTime()) ? null : s;
+  const str = String(s).trim();
+  if (!str) return null;
+  // "4-Jun-26" / "04-Jun-2026"
+  let m = str.match(/^(\d{1,2})-([a-z]{3})-(\d{2,4})$/i);
+  if (m) {
+    const mon = _MONTH_3[m[2].toLowerCase()];
+    if (!mon) return null;
+    let yr = +m[3]; if (yr < 100) yr += 2000;
+    const d = new Date(Date.UTC(yr, mon - 1, +m[1]));
+    return isNaN(d.getTime()) ? null : d;
   }
-  if (!d || isNaN(d.getTime())) return null;
+  // "YYYY-MM-DD" (optionally followed by a time component)
+  m = str.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (m) {
+    const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
+    return isNaN(d.getTime()) ? null : d;
+  }
+  // "DD/MM/YYYY" (UK ordering)
+  m = str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+  if (m) {
+    let yr = +m[3]; if (yr < 100) yr += 2000;
+    const d = new Date(Date.UTC(yr, +m[2] - 1, +m[1]));
+    return isNaN(d.getTime()) ? null : d;
+  }
+  return null;
+}
+
+function dateToWeekLabel(s) {
+  const d = parseDate(s);
+  if (!d) return null;
   // ISO week number
   const target = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
   const dayNum = (target.getUTCDay() + 6) % 7;  // Monday=0
@@ -1073,6 +1201,31 @@ function setWeek(wk) {
   render();
 }
 
+// Re-aggregate the already-loaded raw rows at the current granularity and pick
+// a sensible default period. Shrinkage stays week-grained, so it only surfaces
+// when granularity === 'week'.
+function rebuildAggregates() {
+  if (!STATE.rawAgentWeek) return;
+  const agg = buildAggregates(STATE.rawAgentWeek, STATE.granularity);
+  STATE.campaignWeek = agg.campaignWeek;
+  STATE.teamWeek = agg.teamWeek;
+  STATE.agentWeek = agg.agentWeek;
+  STATE.agentMeta = agg.agentMeta;
+  STATE.weeks = agg.weeks;
+  if (!STATE.selectedWeek || !STATE.weeks.includes(STATE.selectedWeek)) {
+    // Latest period is often partial → default to penultimate when available.
+    STATE.selectedWeek = STATE.weeks[STATE.weeks.length - 2] || STATE.weeks[STATE.weeks.length - 1];
+  }
+}
+
+function setGranularity(g) {
+  if (g === STATE.granularity) return;
+  STATE.granularity = g;
+  STATE.selectedWeek = null;   // force re-pick within the new period set
+  rebuildAggregates();
+  render();
+}
+
 function render() {
   $('loadingView').style.display = 'none';
   // Footer
@@ -1081,10 +1234,14 @@ function render() {
     <span>Boomerang BPO · Operations Dashboard v2</span>
     <span>Source: ${STATE.dataSource === 'live' ? 'Zoho User_metrics_3 (live)' : 'Embedded W19–W22 snapshot'} · Rendered ${now.toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})}</span>
   `;
-  // Week nav
+  // Granularity toggle active state
+  document.querySelectorAll('#granNav .gran-btn').forEach(b =>
+    b.classList.toggle('act', b.dataset.gran === STATE.granularity));
+
+  // Period nav (day / week / month buckets for the current granularity)
   const wn = $('weekNav');
   wn.innerHTML = STATE.weeks.map(w =>
-    `<button class="wk-btn${w === STATE.selectedWeek ? ' act' : ''}" data-wk="${w}">${w.replace(', 2026','')}</button>`
+    `<button class="wk-btn${w === STATE.selectedWeek ? ' act' : ''}" data-wk="${w}">${pLbl(w)}</button>`
   ).join('');
   wn.querySelectorAll('.wk-btn').forEach(b => b.onclick = () => setWeek(b.dataset.wk));
 
@@ -1208,7 +1365,7 @@ function renderSummary() {
           <div class="headline">
             <div class="headline-lbl">FTE</div>
             <div class="headline-val">${totalFTE}</div>
-            ${fteDelta ? `<div class="headline-delta ${fteDelta.dir}">${fteDelta.str} vs ${prevWk ? prevWk.replace(', 2026','') : 'prev'}</div>` : '<div class="headline-sub">—</div>'}
+            ${fteDelta ? `<div class="headline-delta ${fteDelta.dir}">${fteDelta.str} vs ${prevWk ? pLbl(prevWk) : 'prev'}</div>` : '<div class="headline-sub">—</div>'}
           </div>
           <div class="headline">
             <div class="headline-lbl">Billable hrs</div>
@@ -1232,12 +1389,12 @@ function renderSummary() {
           <div class="headline ${absenceRate != null ? (absenceRate > 10 ? 'danger' : absenceRate > 5 ? 'warn' : 'good') : ''}">
             <div class="headline-lbl">Absence</div>
             <div class="headline-val">${absenceRate != null ? absenceRate.toFixed(1)+'%' : '—'}</div>
-            ${absDelta ? `<div class="headline-delta ${absDelta.dir}">${absDelta.val>0?'+':''}${absDelta.val.toFixed(1)}pt vs ${prevWk ? prevWk.replace(', 2026','') : 'prev'}</div>` : '<div class="headline-sub">target ≤5%</div>'}
+            ${absDelta ? `<div class="headline-delta ${absDelta.dir}">${absDelta.val>0?'+':''}${absDelta.val.toFixed(1)}pt vs ${prevWk ? pLbl(prevWk) : 'prev'}</div>` : '<div class="headline-sub">target ≤5%</div>'}
           </div>
           <div class="headline ${slippage != null ? (slippage > 15 ? 'danger' : slippage > 5 ? 'warn' : 'good') : ''}">
             <div class="headline-lbl">Slippage</div>
             <div class="headline-val">${slippage != null ? slippage.toFixed(1)+'%' : '—'}</div>
-            ${slipDelta ? `<div class="headline-delta ${slipDelta.dir}">${slipDelta.val>0?'+':''}${slipDelta.val.toFixed(1)}pt vs ${prevWk ? prevWk.replace(', 2026','') : 'prev'}</div>` : `<div class="headline-sub">${Math.round(reqHrsTotal).toLocaleString()} hrs req</div>`}
+            ${slipDelta ? `<div class="headline-delta ${slipDelta.dir}">${slipDelta.val>0?'+':''}${slipDelta.val.toFixed(1)}pt vs ${prevWk ? pLbl(prevWk) : 'prev'}</div>` : `<div class="headline-sub">${Math.round(reqHrsTotal).toLocaleString()} hrs req</div>`}
           </div>
           <div class="headline">
             <div class="headline-lbl">Campaigns</div>
@@ -1271,7 +1428,7 @@ function renderSummary() {
       <div class="sum-card">
         <h3>Watch list</h3>
         <div class="flag-list">
-          ${flags.length === 0 ? `<div class="flag-empty">No flags this week. Everything is on track.</div>` :
+          ${flags.length === 0 ? `<div class="flag-empty">No flags this ${periodNoun()}. Everything is on track.</div>` :
             flags.map(f => `
               <button class="flag ${f.severity}" data-camp="${f.camp}">
                 <span class="flag-icon">${f.icon}</span>
@@ -1338,7 +1495,7 @@ function buildFlags(wk, prevWk, camps) {
       if (!flags.find(f => f.camp === d.camp)) {
         flags.push({
           camp: d.camp, severity: 'amber', icon: '↓',
-          msg: `Billable hrs down ${d.pct.toFixed(0)}% (${Math.round(d.drop)} hrs) vs ${prevWk.replace(', 2026','')}`,
+          msg: `Billable hrs down ${d.pct.toFixed(0)}% (${Math.round(d.drop)} hrs) vs ${pLbl(prevWk)}`,
         });
       }
     }
@@ -1611,7 +1768,7 @@ function renderAgentList(root) {
     <div class="agent-tbl-wrap">
       <div class="agent-tbl-head">
         <div class="agent-tbl-title">${t} — agent breakdown</div>
-        <div class="agent-tbl-sub">${rows.length} agent${rows.length===1?'':'s'} · ${wk.replace(', 2026','')}</div>
+        <div class="agent-tbl-sub">${rows.length} agent${rows.length===1?'':'s'} · ${pLbl(wk)}</div>
       </div>
       <table class="agent-tbl">
         <thead><tr>
@@ -1621,7 +1778,7 @@ function renderAgentList(root) {
   `;
 
   if (rows.length === 0) {
-    html += `<tr><td colspan="${cols.length}" style="text-align:center;color:var(--text3);padding:32px">No agent activity for this team in ${wk.replace(', 2026','')}.</td></tr>`;
+    html += `<tr><td colspan="${cols.length}" style="text-align:center;color:var(--text3);padding:32px">No agent activity for this team in ${pLbl(wk)}.</td></tr>`;
   } else {
     for (const r of rows) {
       html += `<tr>`;
@@ -1697,7 +1854,7 @@ function renderTrends() {
   const qaDown = [...qaMovers].filter(m => m.delta < 0).sort((a,b) => a.delta - b.delta).slice(0, 5);
 
   const moverHtml = (list, dirKind) => list.length === 0 ?
-    `<div class="flag-empty">${prevWk ? 'No movers' : 'Need 2+ weeks of data for movers'}</div>` :
+    `<div class="flag-empty">${prevWk ? 'No movers' : `Need 2+ ${periodNoun()}s of data for movers`}</div>` :
     list.map(m => `
       <div class="mover">
         <span class="mover-arrow ${dirKind}">${dirKind==='up'?'▲':'▼'}</span>
@@ -1755,33 +1912,33 @@ function renderTrends() {
   $('trendsView').innerHTML = `
     <div class="trends-grid">
       <div class="trend-card">
-        <h3>Top growers <span class="h3-kpi">Billable hrs vs ${prevWk ? prevWk.replace(', 2026','') : 'prev'}</span></h3>
+        <h3>Top growers <span class="h3-kpi">Billable hrs vs ${prevWk ? pLbl(prevWk) : 'prev'}</span></h3>
         <div class="mover-list">${moverHtml(upMovers, 'up')}</div>
       </div>
       <div class="trend-card">
-        <h3>Biggest drops <span class="h3-kpi">Billable hrs vs ${prevWk ? prevWk.replace(', 2026','') : 'prev'}</span></h3>
+        <h3>Biggest drops <span class="h3-kpi">Billable hrs vs ${prevWk ? pLbl(prevWk) : 'prev'}</span></h3>
         <div class="mover-list">${moverHtml(downMovers, 'down')}</div>
       </div>
       <div class="trend-card">
-        <h3>QA improving <span class="h3-kpi">vs ${prevWk ? prevWk.replace(', 2026','') : 'prev'}</span></h3>
+        <h3>QA improving <span class="h3-kpi">vs ${prevWk ? pLbl(prevWk) : 'prev'}</span></h3>
         <div class="mover-list">${qaMoverHtml(qaUp, 'up')}</div>
       </div>
       <div class="trend-card">
-        <h3>QA slipping <span class="h3-kpi">vs ${prevWk ? prevWk.replace(', 2026','') : 'prev'}</span></h3>
+        <h3>QA slipping <span class="h3-kpi">vs ${prevWk ? pLbl(prevWk) : 'prev'}</span></h3>
         <div class="mover-list">${qaMoverHtml(qaDown, 'down')}</div>
       </div>
     </div>
     <div class="trend-tbl-wrap">
       <div class="trend-tbl-head">
-        <div class="trend-tbl-title">Week-over-week direction</div>
-        <div class="agent-tbl-sub">All ${camps.length} campaigns · ${wk.replace(', 2026','')}</div>
+        <div class="trend-tbl-title">${periodNoun()[0].toUpperCase()}${periodNoun().slice(1)}-over-${periodNoun()} direction</div>
+        <div class="agent-tbl-sub">All ${camps.length} campaigns · ${pLbl(wk)}</div>
       </div>
       <table class="trend-tbl">
         <thead><tr>
           <th>Campaign</th>
           <th class="numeric">FTE</th>
           <th class="numeric">Billable</th>
-          <th>Trend (4w)</th>
+          <th>Trend</th>
           <th class="numeric">Δ vs prev</th>
           <th class="numeric">KPIs at risk</th>
         </tr></thead>
@@ -1796,7 +1953,8 @@ function renderTrends() {
 // ════════════════════════════════════════════════════════════════════════
 function applyData(rows, attendanceRows, empProfileRows) {
   STATE.rawAgentWeek = rows;
-  const agg = buildAggregates(rows);
+  _DATE_COL = detectDateCol(rows);
+  const agg = buildAggregates(rows, STATE.granularity);
   STATE.campaignWeek = agg.campaignWeek;
   STATE.teamWeek = agg.teamWeek;
   STATE.agentWeek = agg.agentWeek;
@@ -1853,6 +2011,8 @@ async function fetchAll() {
 async function init() {
   // Wire tab nav
   document.querySelectorAll('.tab').forEach(t => t.onclick = () => setView(t.dataset.view));
+  // Wire granularity toggle (Day / Week / Month)
+  document.querySelectorAll('#granNav .gran-btn').forEach(b => b.onclick = () => setGranularity(b.dataset.gran));
 
   const bar = $('refreshBar');
 
