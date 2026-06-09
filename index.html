@@ -285,11 +285,58 @@ body{font-family:'DM Sans',system-ui,sans-serif;color:var(--text);-webkit-font-s
   .agent-tbl th,.agent-tbl td{padding:8px 10px}
   .agent-tbl .hide-mobile{display:none}
 }
+
+/* ─── Auth / login gate ────────────────────────────────────────── */
+.auth-gate{position:fixed;inset:0;background:var(--bg);display:flex;align-items:center;justify-content:center;z-index:1000;padding:24px}
+.auth-card{background:var(--card);border:1px solid var(--border-light);border-radius:14px;padding:32px;width:100%;max-width:380px;box-shadow:0 8px 32px rgba(0,0,0,.4)}
+.auth-card h2{font-size:18px;font-weight:600;margin-bottom:4px;letter-spacing:-0.3px}
+.auth-card .auth-sub{font-size:12px;color:var(--text3);margin-bottom:22px;font-family:var(--mono);text-transform:uppercase;letter-spacing:0.8px}
+.auth-field{display:flex;flex-direction:column;gap:5px;margin-bottom:14px}
+.auth-field label{font-size:11px;color:var(--text2);font-family:var(--mono);text-transform:uppercase;letter-spacing:0.6px}
+.auth-field input{font:inherit;font-size:13px;padding:9px 12px;border-radius:7px;border:1px solid var(--border);background:var(--bg-2);color:var(--text);outline:none;transition:border-color .15s}
+.auth-field input:focus{border-color:var(--accent)}
+.auth-submit{width:100%;padding:10px 14px;border-radius:8px;border:none;background:var(--accent);color:#fff;font:inherit;font-size:13px;font-weight:600;cursor:pointer;margin-top:6px;transition:background .15s}
+.auth-submit:hover{background:var(--accent-2)}
+.auth-submit:disabled{opacity:.5;cursor:not-allowed}
+.auth-err{font-size:12px;color:var(--red-text);background:var(--red-bg);border:1px solid var(--red-border);padding:8px 10px;border-radius:6px;margin-bottom:12px;display:none}
+.auth-err.show{display:block}
+
+/* ─── User chip (top-right) ───────────────────────────────────── */
+.user-chip{display:flex;align-items:center;gap:8px;padding:5px 10px 5px 5px;border-radius:999px;background:var(--bg-2);border:1px solid var(--border-light);font-size:12px;color:var(--text2);cursor:pointer;position:relative}
+.user-chip:hover{border-color:var(--border-strong);color:var(--text)}
+.user-chip .avatar{width:22px;height:22px;border-radius:50%;background:var(--accent-dim);color:var(--accent-2);display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:600;font-family:var(--mono)}
+.user-chip .role-tag{font-size:9px;font-family:var(--mono);text-transform:uppercase;letter-spacing:0.6px;color:var(--text3);padding-left:6px;border-left:1px solid var(--border)}
+.user-menu{position:absolute;top:calc(100% + 6px);right:0;background:var(--card);border:1px solid var(--border);border-radius:8px;padding:4px;min-width:160px;box-shadow:0 4px 16px rgba(0,0,0,.4);z-index:30;display:none}
+.user-menu.open{display:block}
+.user-menu button{display:block;width:100%;text-align:left;padding:7px 10px;border:none;background:none;color:var(--text2);font:inherit;font-size:12px;border-radius:5px;cursor:pointer}
+.user-menu button:hover{background:var(--bg-2);color:var(--text)}
+
+/* Hide elements until auth resolves — prevents flicker of CEO data behind the gate. */
+.shell.pre-auth{visibility:hidden}
 </style>
 </head>
 <body>
+
+<!-- Login gate: shown until /api/auth/me succeeds. Wraps the entire dashboard. -->
+<div class="auth-gate" id="authGate" style="display:none">
+  <form class="auth-card" id="loginForm" autocomplete="on">
+    <h2>Boomerang BPO</h2>
+    <div class="auth-sub">Operations dashboard · sign in</div>
+    <div class="auth-err" id="loginErr"></div>
+    <div class="auth-field">
+      <label for="loginEmail">Email</label>
+      <input id="loginEmail" type="email" name="email" autocomplete="username" required>
+    </div>
+    <div class="auth-field">
+      <label for="loginPw">Password</label>
+      <input id="loginPw" type="password" name="password" autocomplete="current-password" required>
+    </div>
+    <button type="submit" class="auth-submit" id="loginBtn">Sign in</button>
+  </form>
+</div>
+
 <div class="refresh-bar" id="refreshBar"></div>
-<div class="shell">
+<div class="shell pre-auth" id="appShell">
   <div class="topbar">
     <div class="brand">
       <h1>Boomerang BPO</h1>
@@ -297,10 +344,11 @@ body{font-family:'DM Sans',system-ui,sans-serif;color:var(--text);-webkit-font-s
       <span id="srcBadge" class="src-badge static"><span class="dot"></span>Loading</span>
     </div>
     <div class="tabs-row">
-      <div class="tabs">
-        <button class="tab act" data-view="summary">Summary</button>
-        <button class="tab" data-view="campaigns">Campaigns</button>
-        <button class="tab" data-view="trends">Trends</button>
+      <div class="tabs" id="mainTabs">
+        <button class="tab act" data-view="summary" data-min-role="tm">Summary</button>
+        <button class="tab" data-view="campaigns" data-min-role="tm">Campaigns</button>
+        <button class="tab" data-view="trends" data-min-role="tm">Trends</button>
+        <button class="tab" data-view="bonus" data-min-role="agent">Bonus</button>
       </div>
       <div class="gran-toggle" id="granNav">
         <button class="gran-btn" data-gran="day">Day</button>
@@ -309,6 +357,14 @@ body{font-family:'DM Sans',system-ui,sans-serif;color:var(--text);-webkit-font-s
       </div>
       <div class="weeks" id="weekNav"></div>
       <button class="targets-btn" id="targetsBtn" title="Edit monthly FTE & required-hours targets">⚙ Targets</button>
+      <div class="user-chip" id="userChip" style="display:none">
+        <span class="avatar" id="userAvatar">??</span>
+        <span id="userName">—</span>
+        <span class="role-tag" id="userRole">—</span>
+        <div class="user-menu" id="userMenu">
+          <button id="logoutBtn">Sign out</button>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -343,6 +399,7 @@ body{font-family:'DM Sans',system-ui,sans-serif;color:var(--text);-webkit-font-s
   <div id="summaryView" class="view"></div>
   <div id="campaignsView" class="view"></div>
   <div id="trendsView" class="view"></div>
+  <div id="bonusView" class="view"></div>
 
   <div class="footer" id="footer"></div>
 </div>
@@ -1557,6 +1614,30 @@ function render() {
   if (STATE.view === 'summary') renderSummary();
   else if (STATE.view === 'campaigns') renderCampaigns();
   else if (STATE.view === 'trends') renderTrends();
+  else if (STATE.view === 'bonus') renderBonus();
+}
+
+// ─── Bonus view (Phase 2 will wire live data) ───────────────────
+function renderBonus() {
+  const u = AUTH.user;
+  if (!u) { $('bonusView').innerHTML = ''; return; }
+  const scopeLabel =
+    u.role === 'admin'         ? 'All campaigns' :
+    u.role === 'campaign_lead' ? `Campaign ${u.campaign_id ?? '—'}` :
+    u.role === 'tm'            ? `Team ${u.team_id ?? '—'}` :
+                                 'My bonus';
+  $('bonusView').innerHTML = `
+    <div class="sum-card" style="padding:24px">
+      <h3 style="font-size:15px;font-weight:600;margin-bottom:6px">Bonus tracker</h3>
+      <div style="font-size:12px;color:var(--text3);font-family:var(--mono);text-transform:uppercase;letter-spacing:.6px;margin-bottom:18px">${scopeLabel}</div>
+      <div style="font-size:13px;color:var(--text2);line-height:1.5;max-width:640px">
+        Phase 2 wires this view to live Zoho data and the bonus rules engine.
+        Scope is enforced by your role — agents see only their own row,
+        TMs see their team, campaign leads see the full campaign,
+        admins see everything.
+      </div>
+    </div>
+  `;
 }
 
 // ─── Summary view ────────────────────────────────────────────────
@@ -2404,7 +2485,145 @@ async function init() {
   render();
 }
 
-init();
+// ════════════════════════════════════════════════════════════════════════
+// Auth bootstrap — runs before init() and gates the entire dashboard.
+// ════════════════════════════════════════════════════════════════════════
+const AUTH = { user: null };
+const ROLE_RANK = { agent: 0, tm: 1, campaign_lead: 2, admin: 3 };
+
+async function apiFetch(path, opts = {}) {
+  const r = await fetch(path, {
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json', ...(opts.headers || {}) },
+    ...opts,
+  });
+  return r;
+}
+
+function showLoginGate(errMsg) {
+  $('appShell').classList.add('pre-auth');
+  $('authGate').style.display = 'flex';
+  const errEl = $('loginErr');
+  if (errMsg) { errEl.textContent = errMsg; errEl.classList.add('show'); }
+  else { errEl.classList.remove('show'); errEl.textContent = ''; }
+  setTimeout(() => $('loginEmail')?.focus(), 30);
+}
+
+function hideLoginGate() {
+  $('authGate').style.display = 'none';
+  $('appShell').classList.remove('pre-auth');
+}
+
+function applyRoleVisibility() {
+  const rank = AUTH.user ? (ROLE_RANK[AUTH.user.role] ?? 0) : -1;
+  document.querySelectorAll('[data-min-role]').forEach(el => {
+    const need = ROLE_RANK[el.dataset.minRole] ?? 0;
+    el.style.display = rank >= need ? '' : 'none';
+  });
+  // Targets editor is admin/campaign_lead only
+  const targetsBtn = $('targetsBtn');
+  if (targetsBtn) targetsBtn.style.display = rank >= ROLE_RANK.campaign_lead ? '' : 'none';
+
+  // If the active tab was hidden for this role, switch to the first visible one.
+  const activeTab = document.querySelector('.tab.act');
+  if (activeTab && activeTab.style.display === 'none') {
+    const firstVisible = Array.from(document.querySelectorAll('.tab'))
+      .find(t => t.style.display !== 'none');
+    if (firstVisible) {
+      STATE.view = firstVisible.dataset.view;
+      document.querySelectorAll('.tab').forEach(t =>
+        t.classList.toggle('act', t === firstVisible));
+      document.querySelectorAll('.view').forEach(v => v.classList.remove('act'));
+      const viewEl = $(firstVisible.dataset.view + 'View');
+      if (viewEl) viewEl.classList.add('act');
+    }
+  }
+}
+
+function renderUserChip() {
+  if (!AUTH.user) return;
+  const u = AUTH.user;
+  const initials = (u.name || u.email || '?').split(/\s+/).map(s => s[0]).slice(0,2).join('').toUpperCase();
+  $('userAvatar').textContent = initials;
+  $('userName').textContent = u.name || u.email;
+  $('userRole').textContent = u.role.replace('_', ' ');
+  $('userChip').style.display = '';
+}
+
+function wireUserMenu() {
+  const chip = $('userChip');
+  const menu = $('userMenu');
+  chip.onclick = (e) => {
+    e.stopPropagation();
+    menu.classList.toggle('open');
+  };
+  document.addEventListener('click', () => menu.classList.remove('open'));
+  $('logoutBtn').onclick = async (e) => {
+    e.stopPropagation();
+    try { await apiFetch('/api/auth/logout', { method: 'POST' }); } catch {}
+    AUTH.user = null;
+    location.reload();
+  };
+}
+
+function wireLoginForm() {
+  const form = $('loginForm');
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const btn = $('loginBtn');
+    const errEl = $('loginErr');
+    errEl.classList.remove('show');
+    btn.disabled = true; btn.textContent = 'Signing in…';
+    try {
+      const r = await apiFetch('/api/auth/login', {
+        method: 'POST',
+        body: JSON.stringify({
+          email: $('loginEmail').value.trim(),
+          password: $('loginPw').value,
+        }),
+      });
+      if (r.status === 429) {
+        errEl.textContent = 'Too many attempts — wait 15 minutes and try again.'; errEl.classList.add('show');
+      } else if (!r.ok) {
+        errEl.textContent = 'Invalid email or password.'; errEl.classList.add('show');
+      } else {
+        const { user } = await r.json();
+        AUTH.user = user;
+        hideLoginGate();
+        renderUserChip();
+        applyRoleVisibility();
+        await init();
+        return;
+      }
+    } catch (err) {
+      errEl.textContent = 'Sign-in failed — check your connection.'; errEl.classList.add('show');
+    } finally {
+      btn.disabled = false; btn.textContent = 'Sign in';
+    }
+  };
+}
+
+async function bootstrap() {
+  wireLoginForm();
+  wireUserMenu();
+  try {
+    const r = await apiFetch('/api/auth/me');
+    if (r.ok) {
+      const { user } = await r.json();
+      AUTH.user = user;
+      hideLoginGate();
+      renderUserChip();
+      applyRoleVisibility();
+      await init();
+      return;
+    }
+  } catch {
+    // network failure — fall through to login gate
+  }
+  showLoginGate();
+}
+
+bootstrap();
 </script>
 </body>
 </html>
