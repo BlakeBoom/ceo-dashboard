@@ -1,8 +1,7 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "rewrites": [
-    { "source": "/api/cron/zoho-sync", "destination": "/api/cron/zoho-sync" },
-    { "source": "/api/(.*)", "destination": "/api/$1" }
+    { "source": "/api/((?!cron/).*)", "destination": "/api/index" }
   ],
   "crons": [
     {
@@ -11,7 +10,7 @@
     }
   ],
   "functions": {
-    "api/[...path].js": {
+    "api/index.js": {
       "maxDuration": 10
     },
     "api/cron/zoho-sync.js": {
