@@ -1,8 +1,9 @@
 {
   "name": "boomerang-dashboard",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Boomerang BPO operations dashboard with RBAC for multi-team rollout",
+  "type": "module",
   "main": "server/src/index.js",
   "scripts": {
     "start": "node server/src/index.js",
