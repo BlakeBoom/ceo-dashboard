@@ -1,0 +1,68 @@
+name: Database setup
+
+# Manual trigger only. Run via GitHub UI:
+#   Repo → Actions → "Database setup" → "Run workflow"
+#
+# Required repository secrets (Settings → Secrets and variables → Actions):
+#   DATABASE_URL          - Neon pooled connection string
+#   JWT_SECRET            - any non-empty value (not used by these scripts but
+#                           validated by env.js on import)
+#   SEED_ADMIN_EMAIL      - email of the bootstrap admin user
+#   SEED_ADMIN_PASSWORD   - password for the bootstrap admin (>= 10 chars)
+#   SEED_ADMIN_NAME       - display name for the bootstrap admin
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'What to run'
+        required: true
+        default: 'migrate-and-seed'
+        type: choice
+        options:
+          - migrate-and-seed
+          - migrate-only
+          - seed-only
+          - reset-admin-password
+      reset_email:
+        description: '(reset-admin-password only) Email of the user to reset'
+        required: false
+        type: string
+      reset_password:
+        description: '(reset-admin-password only) New password (>=10 chars)'
+        required: false
+        type: string
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      JWT_SECRET: ${{ secrets.JWT_SECRET }}
+      SEED_ADMIN_EMAIL: ${{ secrets.SEED_ADMIN_EMAIL }}
+      SEED_ADMIN_PASSWORD: ${{ secrets.SEED_ADMIN_PASSWORD }}
+      SEED_ADMIN_NAME: ${{ secrets.SEED_ADMIN_NAME }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund --omit=dev
+
+      - name: Run migrations
+        if: ${{ inputs.action == 'migrate-and-seed' || inputs.action == 'migrate-only' }}
+        run: node server/src/migrate.js
+
+      - name: Seed admin user
+        if: ${{ inputs.action == 'migrate-and-seed' || inputs.action == 'seed-only' }}
+        run: node server/src/seed.js
+
+      - name: Reset admin password
+        if: ${{ inputs.action == 'reset-admin-password' }}
+        env:
+          RESET_EMAIL: ${{ inputs.reset_email }}
+          RESET_PASSWORD: ${{ inputs.reset_password }}
+        run: node server/src/reset-password.js
