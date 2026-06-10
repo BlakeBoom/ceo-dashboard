@@ -1163,35 +1163,19 @@ function fmtDelta(curr, prev) {
 // DATA FETCH — Zoho Analytics via Apps Script proxy
 // ════════════════════════════════════════════════════════════════════════
 
-// Generic JSONP fetcher — used by all three data sources.
-function fetchView(viewName, extraParams = {}) {
-  return new Promise((resolve, reject) => {
-    const cb = '_zCb_' + Date.now() + '_' + Math.random().toString(36).slice(2,7);
-    const to = setTimeout(() => {
-      window[cb] = () => {};
-      reject(new Error(`Proxy timed out fetching ${viewName} (90s)`));
-    }, 90000);
-
-    window[cb] = (data) => {
-      clearTimeout(to);
-      delete window[cb];
-      if (data && data.error) reject(new Error(`${viewName}: ${data.error}`));
-      else resolve(data);
-    };
-
-    const params = new URLSearchParams({
-      callback: cb,
-      workspace: CONFIG.WORKSPACE,
-      view: viewName,
-      orgId: CONFIG.ORG_ID,
-      ...extraParams,
-    });
-    const s = document.createElement('script');
-    s.src = CONFIG.PROXY_URL + '?' + params.toString();
-    s.onerror = () => { clearTimeout(to); delete window[cb]; reject(new Error(`Proxy load failed for ${viewName}`)); };
-    document.head.appendChild(s);
-    s.onload = () => document.head.removeChild(s);
-  });
+// Fetches a Zoho Analytics view through our authenticated backend
+// (/api/zoho/view/:key). The legacy Google Apps Script proxy is no longer
+// used — single Zoho-auth source lives in Vercel env vars.
+async function fetchView(viewName, extraParams = {}) {
+  const url = new URL(`/api/zoho/view/${encodeURIComponent(viewName)}`, location.origin);
+  if (extraParams.since) url.searchParams.set('since', extraParams.since);
+  const r = await fetch(url, { credentials: 'include' });
+  if (!r.ok) {
+    let detail = '';
+    try { detail = (await r.json()).error || ''; } catch {}
+    throw new Error(`${viewName}: ${r.status}${detail ? ' ' + detail : ''}`);
+  }
+  return r.json();
 }
 
 // Compute YYYY-MM-DD for "N weeks ago" — used to filter Attendance server-side
