@@ -1,17 +1,50 @@
-// Zoho Analytics v2 API client.
-// Token refresh is in-memory and survives within a single warm Vercel function
-// instance; cold starts re-fetch. Access tokens are 1h-lived.
+// Zoho Analytics v2 API client with shared (DB-backed) access-token cache.
+//
+// Why: Zoho rate-limits /oauth/v2/token aggressively (a few requests per
+// minute will trigger "Access Denied — too many requests"). In a serverless
+// environment, each cold-start function instance would do its own refresh,
+// blowing through the limit fast. We store the access token in Neon so
+// every instance shares it, and only refresh when actually expired.
 
 import { env } from './env.js';
+import { pool, query } from './db.js';
 
-const ACCOUNTS_BASE   = () => `https://accounts.zoho.${env.ZOHO_REGION}`;
-const ANALYTICS_BASE  = () => `https://analyticsapi.zoho.${env.ZOHO_REGION}`;
+const ACCOUNTS_BASE  = () => `https://accounts.zoho.${env.ZOHO_REGION}`;
+const ANALYTICS_BASE = () => `https://analyticsapi.zoho.${env.ZOHO_REGION}`;
 
-let _token = null; // { access_token, expires_at_ms }
+let _local = null;     // { access_token, expires_at_ms } — per-instance cache
+let _inFlight = null;  // singleflight to avoid duplicate refresh within an instance
 
-async function getAccessToken() {
-  if (_token && _token.expires_at_ms > Date.now() + 30_000) return _token.access_token;
+async function readDbCache() {
+  try {
+    const { rows } = await query(
+      `SELECT access_token, expires_at FROM zoho_tokens WHERE id = 1`
+    );
+    if (!rows[0]) return null;
+    const expiresMs = new Date(rows[0].expires_at).getTime();
+    return { access_token: rows[0].access_token, expires_at_ms: expiresMs };
+  } catch {
+    return null; // table doesn't exist yet, fall through to live refresh
+  }
+}
 
+async function writeDbCache(accessToken, expiresAtMs) {
+  try {
+    await query(
+      `INSERT INTO zoho_tokens (id, access_token, expires_at, refreshed_at)
+       VALUES (1, $1, $2, NOW())
+       ON CONFLICT (id) DO UPDATE SET
+         access_token = EXCLUDED.access_token,
+         expires_at   = EXCLUDED.expires_at,
+         refreshed_at = NOW()`,
+      [accessToken, new Date(expiresAtMs)]
+    );
+  } catch (err) {
+    console.warn('[zoho] failed to persist token cache:', err.message);
+  }
+}
+
+async function refreshFromZoho() {
   const body = new URLSearchParams({
     refresh_token: env.ZOHO_REFRESH_TOKEN,
     client_id:     env.ZOHO_CLIENT_ID,
@@ -23,23 +56,43 @@ async function getAccessToken() {
   if (!r.ok) throw new Error(`Zoho token refresh ${r.status}: ${text}`);
   const data = JSON.parse(text);
   if (!data.access_token) throw new Error(`Zoho token refresh returned no access_token: ${text}`);
-  _token = {
-    access_token: data.access_token,
-    expires_at_ms: Date.now() + ((data.expires_in || 3600) - 60) * 1000,
-  };
-  return _token.access_token;
+  const expiresAtMs = Date.now() + ((data.expires_in || 3600) - 60) * 1000;
+  return { access_token: data.access_token, expires_at_ms: expiresAtMs };
 }
 
-// View IDs for the Boomerang workspace. Hard-coded since they're stable and
-// stored in env.ZOHO_ANALYTICS_WORKSPACE_ID is the parent workspace.
+async function getAccessToken() {
+  // 1. Per-instance cache (fastest)
+  if (_local && _local.expires_at_ms > Date.now() + 30_000) return _local.access_token;
+
+  // 2. Shared DB cache (avoids duplicate refresh across function instances)
+  const dbCached = await readDbCache();
+  if (dbCached && dbCached.expires_at_ms > Date.now() + 30_000) {
+    _local = dbCached;
+    return dbCached.access_token;
+  }
+
+  // 3. Singleflight refresh (avoids duplicate refresh within one instance)
+  if (_inFlight) return _inFlight;
+  _inFlight = (async () => {
+    try {
+      const fresh = await refreshFromZoho();
+      _local = fresh;
+      await writeDbCache(fresh.access_token, fresh.expires_at_ms);
+      return fresh.access_token;
+    } finally {
+      _inFlight = null;
+    }
+  })();
+  return _inFlight;
+}
+
+// View IDs for the Boomerang workspace.
 export const VIEW = {
-  userMetrics: '2292884000018755200', // User_metrics_3   (CSAT, QA, productivity)
-  attendance:  '2292884000019604651', // AttendanceUserReport (Status → callouts)
-  employee:    '2292884000019602125', // EmployeeProfile
+  userMetrics: '2292884000018755200',
+  attendance:  '2292884000019604651',
+  employee:    '2292884000019602125',
 };
 
-// Fetch a view as an array of row objects. Optionally filtered with a
-// criteria string in Zoho's syntax, e.g. `"Date" >= '2026-06-01'`.
 export async function fetchView(viewId, { criteria = null } = {}) {
   const token = await getAccessToken();
   const config = { responseFormat: 'json', keyValueFormat: true };
@@ -50,15 +103,13 @@ export async function fetchView(viewId, { criteria = null } = {}) {
 
   const r = await fetch(url, {
     headers: {
-      'Authorization':     `Zoho-oauthtoken ${token}`,
-      'ZANALYTICS-ORGID':  env.ZOHO_ANALYTICS_ORG_ID,
+      'Authorization':    `Zoho-oauthtoken ${token}`,
+      'ZANALYTICS-ORGID': env.ZOHO_ANALYTICS_ORG_ID,
     },
   });
   const text = await r.text();
   if (!r.ok) throw new Error(`Zoho fetch view ${viewId} ${r.status}: ${text.slice(0, 500)}`);
   const json = JSON.parse(text);
-  // v2 with keyValueFormat returns: { data: [{col1: val, col2: val}, ...] }
-  // Older format: { data: { rows: [[]], columns: [{name}] } }
   if (Array.isArray(json.data)) return json.data;
   if (json.data?.rows && json.data?.columns) {
     const cols = json.data.columns.map(c => c.name || c);
@@ -67,7 +118,6 @@ export async function fetchView(viewId, { criteria = null } = {}) {
   return [];
 }
 
-// "YYYY-MM" → ["YYYY-MM-01", "YYYY-MM-DD-last"]
 export function monthBounds(yyyyMm) {
   const [y, m] = yyyyMm.split('-').map(Number);
   const start = `${yyyyMm}-01`;
@@ -75,3 +125,6 @@ export function monthBounds(yyyyMm) {
   const end = `${yyyyMm}-${String(lastDay).padStart(2, '0')}`;
   return { start, end };
 }
+
+// Silence unused-import warning if pool is later removed.
+void pool;
