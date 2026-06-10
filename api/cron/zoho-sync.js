@@ -1,21 +1,25 @@
-// Hourly Zoho sync. Phase 2 wires this up to pull bonus_metrics from
-// Zoho People + Analytics into Neon. For now: a stub that validates the
-// Vercel-Cron signature and returns 202 so the cron config is valid.
+// Daily Zoho → Neon sync at 06:00 UTC (08:00 SAST).
+// Refreshes bonus_metrics and bonus_awards for the current calendar month
+// across every campaign that has an active bonus_rules row.
 //
-// Vercel sends a CRON_SECRET in the Authorization header on scheduled
-// invocations. Reject anything else to prevent public re-triggering.
+// Auth: Vercel injects Authorization: Bearer <CRON_SECRET> on cron invocations.
+// We reject anything else so the endpoint isn't publicly re-triggerable.
 
-export default function handler(req, res) {
+import { syncAll, currentYearMonth } from '../../server/src/sync.js';
+
+export default async function handler(req, res) {
   const auth = req.headers.authorization || '';
   const expected = `Bearer ${process.env.CRON_SECRET || ''}`;
   if (!process.env.CRON_SECRET || auth !== expected) {
     return res.status(401).json({ error: 'unauthorized' });
   }
 
-  // Phase 2 will replace this with:
-  //   1. Refresh Zoho access token via ZOHO_REFRESH_TOKEN
-  //   2. Page through User_metrics_3 (Analytics) for current period
-  //   3. Page through Attendance form (People) for callouts
-  //   4. UPSERT bonus_metrics rows, recompute bonus_awards
-  return res.status(202).json({ ok: true, status: 'phase-2-stub' });
+  const yearMonth = req.query?.year_month || currentYearMonth();
+  try {
+    const results = await syncAll(yearMonth);
+    return res.status(200).json({ ok: true, year_month: yearMonth, results });
+  } catch (err) {
+    console.error('[cron/zoho-sync] failed', err);
+    return res.status(500).json({ ok: false, error: err.message });
+  }
 }

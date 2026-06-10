@@ -27,6 +27,14 @@ export const env = {
   SEED_ADMIN_EMAIL: opt('SEED_ADMIN_EMAIL', null),
   SEED_ADMIN_PASSWORD: opt('SEED_ADMIN_PASSWORD', null),
   SEED_ADMIN_NAME: opt('SEED_ADMIN_NAME', 'Platform Admin'),
+
+  // --- Zoho (Phase 2) ---
+  ZOHO_REGION:                 opt('ZOHO_REGION', 'com'),
+  ZOHO_CLIENT_ID:              opt('ZOHO_CLIENT_ID', ''),
+  ZOHO_CLIENT_SECRET:          opt('ZOHO_CLIENT_SECRET', ''),
+  ZOHO_REFRESH_TOKEN:          opt('ZOHO_REFRESH_TOKEN', ''),
+  ZOHO_ANALYTICS_WORKSPACE_ID: opt('ZOHO_ANALYTICS_WORKSPACE_ID', '2292884000018741001'),
+  ZOHO_ANALYTICS_ORG_ID:       opt('ZOHO_ANALYTICS_ORG_ID', '723580241'),
 };
 
 export const isProd = env.NODE_ENV === 'production';

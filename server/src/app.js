@@ -16,6 +16,8 @@ import { authRequired } from './auth.js';
 import authRoutes from './routes/auth.js';
 import userRoutes from './routes/users.js';
 import teamRoutes from './routes/teams.js';
+import bonusRoutes from './routes/bonus.js';
+import syncRoutes from './routes/sync.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
@@ -49,6 +51,8 @@ app.use('/api/auth', authRoutes);
 app.use('/api', authRequired);
 app.use('/api/users', userRoutes);
 app.use('/api/teams', teamRoutes);
+app.use('/api/bonus', bonusRoutes);
+app.use('/api/sync', syncRoutes);
 
 // Local-dev only: serve the static dashboard from repo root.
 // On Vercel, static files are served directly by the CDN (vercel.json routes

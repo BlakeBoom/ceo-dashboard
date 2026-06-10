@@ -1617,27 +1617,133 @@ function render() {
   else if (STATE.view === 'bonus') renderBonus();
 }
 
-// ─── Bonus view (Phase 2 will wire live data) ───────────────────
+// ─── Bonus view ─────────────────────────────────────────────────
+const BONUS_STATE = {
+  periods: [], selectedPeriodId: null,
+  awards: [],
+  loaded: false, loading: false, syncing: false, error: null,
+};
+
+async function loadBonusPeriods() {
+  const r = await apiFetch('/api/bonus/periods');
+  if (!r.ok) { BONUS_STATE.error = 'Could not load periods'; return; }
+  const { periods } = await r.json();
+  BONUS_STATE.periods = periods;
+  if (periods.length && !BONUS_STATE.selectedPeriodId) BONUS_STATE.selectedPeriodId = periods[0].id;
+}
+
+async function loadBonusAwards() {
+  if (!BONUS_STATE.selectedPeriodId) { BONUS_STATE.awards = []; renderBonus(); return; }
+  BONUS_STATE.loading = true; renderBonus();
+  const r = await apiFetch(`/api/bonus/awards?period_id=${BONUS_STATE.selectedPeriodId}`);
+  if (r.ok) {
+    const data = await r.json();
+    BONUS_STATE.awards = data.rows;
+    BONUS_STATE.error = null;
+  } else {
+    BONUS_STATE.error = `Could not load awards (${r.status})`;
+  }
+  BONUS_STATE.loading = false; renderBonus();
+}
+
+async function triggerBonusSync() {
+  const p = BONUS_STATE.periods.find(x => x.id === BONUS_STATE.selectedPeriodId);
+  if (!p) return;
+  BONUS_STATE.syncing = true; BONUS_STATE.error = null; renderBonus();
+  const r = await apiFetch('/api/sync/now', {
+    method: 'POST', body: JSON.stringify({ campaign_id: p.campaign_id }),
+  });
+  BONUS_STATE.syncing = false;
+  if (r.ok) {
+    // Period may not have existed before sync — reload periods too.
+    await loadBonusPeriods();
+    await loadBonusAwards();
+  } else {
+    const body = await r.text();
+    BONUS_STATE.error = `Sync failed: ${body.slice(0, 300)}`;
+    renderBonus();
+  }
+}
+
+function fmtZAR(n) { return (n == null || n === 0) ? '—' : 'R' + Math.round(n).toLocaleString(); }
+function fmtPctBonus(p) { return p == null ? '—' : (p * 100).toFixed(0) + '%'; }
+
 function renderBonus() {
   const u = AUTH.user;
   if (!u) { $('bonusView').innerHTML = ''; return; }
-  const scopeLabel =
-    u.role === 'admin'         ? 'All campaigns' :
-    u.role === 'campaign_lead' ? `Campaign ${u.campaign_id ?? '—'}` :
-    u.role === 'tm'            ? `Team ${u.team_id ?? '—'}` :
-                                 'My bonus';
+
+  if (!BONUS_STATE.loaded) {
+    BONUS_STATE.loaded = true;
+    loadBonusPeriods().then(loadBonusAwards);
+  }
+
+  const canSync = ROLE_RANK[u.role] >= ROLE_RANK.tm;
+  const periodOpts = BONUS_STATE.periods.map(p => {
+    const label = `${p.campaign_name} · ${p.period_start.slice(0,7)}${p.locked ? ' · 🔒' : ''}`;
+    return `<option value="${p.id}"${p.id === BONUS_STATE.selectedPeriodId ? ' selected' : ''}>${label}</option>`;
+  }).join('');
+
+  const rowsHtml = BONUS_STATE.awards.map(r => {
+    const c = r.components || {};
+    const calloutsRag = r.callouts === 0 ? 'green-cell' : r.callouts != null ? 'red-cell' : 'dim';
+    const prodRag     = r.productivity == null ? 'dim' : r.productivity >= 1470 ? 'green-cell' : 'red-cell';
+    const csatRag     = r.csat_pct == null ? 'dim' : r.csat_pct >= 0.9 ? 'green-cell' : 'red-cell';
+    const qaRag       = r.qa_pct   == null ? 'dim' : r.qa_pct   >= 0.9 ? 'green-cell' : 'red-cell';
+    return `<tr>
+      <td class="name">${r.full_name}</td>
+      <td class="dim">${r.team_name || '—'}</td>
+      <td class="dim">${r.tm_name || '—'}</td>
+      <td class="numeric ${calloutsRag}">${r.callouts ?? '—'}</td>
+      <td class="numeric ${prodRag}">${r.productivity != null ? Math.round(r.productivity).toLocaleString() : '—'}</td>
+      <td class="numeric ${csatRag}">${fmtPctBonus(r.csat_pct)}</td>
+      <td class="numeric ${qaRag}">${fmtPctBonus(r.qa_pct)}</td>
+      <td class="numeric ${c.sa           ? 'green-cell' : 'dim'}">${fmtZAR(c.sa)}</td>
+      <td class="numeric ${c.productivity ? 'green-cell' : 'dim'}">${fmtZAR(c.productivity)}</td>
+      <td class="numeric ${c.csat         ? 'green-cell' : 'dim'}">${fmtZAR(c.csat)}</td>
+      <td class="numeric ${c.qa           ? 'green-cell' : 'dim'}">${fmtZAR(c.qa)}</td>
+      <td class="numeric"><b>${fmtZAR(r.kpi_bonus)}</b></td>
+      <td class="numeric"><b style="color:${r.final_bonus > 0 ? 'var(--green-text)' : 'var(--text3)'}">${fmtZAR(r.final_bonus)}</b></td>
+    </tr>`;
+  }).join('');
+
+  const total = BONUS_STATE.awards.reduce((a, r) => a + (Number(r.final_bonus) || 0), 0);
+
   $('bonusView').innerHTML = `
-    <div class="sum-card" style="padding:24px">
-      <h3 style="font-size:15px;font-weight:600;margin-bottom:6px">Bonus tracker</h3>
-      <div style="font-size:12px;color:var(--text3);font-family:var(--mono);text-transform:uppercase;letter-spacing:.6px;margin-bottom:18px">${scopeLabel}</div>
-      <div style="font-size:13px;color:var(--text2);line-height:1.5;max-width:640px">
-        Phase 2 wires this view to live Zoho data and the bonus rules engine.
-        Scope is enforced by your role — agents see only their own row,
-        TMs see their team, campaign leads see the full campaign,
-        admins see everything.
+    <div class="agent-tbl-head" style="background:var(--card);border:1px solid var(--border-light);border-radius:12px 12px 0 0;border-bottom:none">
+      <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;flex:1">
+        <select id="bonusPeriodSelect" class="modal-month" style="font-size:13px;padding:7px 10px">${periodOpts || '<option>No periods yet</option>'}</select>
+        <div class="agent-tbl-sub">${BONUS_STATE.awards.length} agent${BONUS_STATE.awards.length===1?'':'s'} · total payout ${fmtZAR(total)}</div>
       </div>
+      ${canSync ? `<button id="bonusSyncBtn" class="btn-primary" ${BONUS_STATE.syncing ? 'disabled' : ''}>${BONUS_STATE.syncing ? 'Syncing…' : '↻ Refresh from Zoho'}</button>` : ''}
     </div>
+    ${BONUS_STATE.error ? `<div class="err-banner show" style="margin-top:8px">${BONUS_STATE.error}</div>` : ''}
+    ${BONUS_STATE.loading ? '<div class="loading"><div class="spinner"></div><div>Loading bonus data…</div></div>' :
+      BONUS_STATE.awards.length === 0 ?
+        '<div class="agent-tbl-wrap" style="border-radius:0 0 12px 12px"><div class="flag-empty" style="padding:32px">No bonus data for this period yet. Click <b>Refresh from Zoho</b> to pull live metrics.</div></div>' :
+        `<div class="agent-tbl-wrap" style="border-radius:0 0 12px 12px;border-top:none">
+          <table class="agent-tbl">
+            <thead><tr>
+              <th>Agent</th><th>Cohort</th><th>TM</th>
+              <th class="numeric">Callouts</th>
+              <th class="numeric">Productivity</th>
+              <th class="numeric">CSAT</th>
+              <th class="numeric">QA</th>
+              <th class="numeric">S&amp;A</th>
+              <th class="numeric">Prod</th>
+              <th class="numeric">CSAT</th>
+              <th class="numeric">QA</th>
+              <th class="numeric">KPI Bonus</th>
+              <th class="numeric">Final</th>
+            </tr></thead>
+            <tbody>${rowsHtml}</tbody>
+          </table>
+        </div>`}
   `;
+  $('bonusPeriodSelect')?.addEventListener('change', (e) => {
+    BONUS_STATE.selectedPeriodId = parseInt(e.target.value, 10);
+    loadBonusAwards();
+  });
+  $('bonusSyncBtn')?.addEventListener('click', triggerBonusSync);
 }
 
 // ─── Summary view ────────────────────────────────────────────────
