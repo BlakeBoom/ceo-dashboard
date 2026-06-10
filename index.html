@@ -1641,7 +1641,10 @@ async function triggerBonusSync() {
     const cr = await apiFetch('/api/teams/campaigns');
     if (cr.ok) {
       const { campaigns } = await cr.json();
-      if (campaigns?.length) campaignId = campaigns[0].id;
+      // Prefer Medexpress (the only campaign with seeded bonus rules) until
+      // Phase 3 ships a proper admin campaign picker.
+      const mx = campaigns?.find(c => c.slug === 'medexpress');
+      campaignId = mx?.id || campaigns?.[0]?.id || null;
     }
   }
   if (!campaignId) {
