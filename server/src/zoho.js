@@ -126,9 +126,16 @@ export const DATE_COL_CANDIDATES = ['Date', 'date', 'DATE', 'call_date',
   'Report_Date', 'log_date', 'day', 'Day', 'datetime', 'date_time', 'Date_Time',
   'created_date', 'Created_Date'];
 
+// Known date-column names per view, used to skip probing on the common path.
+// Anything not listed here falls back to probing DATE_COL_CANDIDATES.
+export const VIEW_DATE_COL = {
+  [VIEW.userMetrics]: 'metric_date',
+  [VIEW.attendance]:  'Date',
+};
+
 // Resolved date-column name per view, cached for the lifetime of the lambda so
-// we only probe once.
-const _dateColCache = new Map();
+// we only probe once. Seeded with the known mapping above.
+const _dateColCache = new Map(Object.entries(VIEW_DATE_COL));
 
 // Fetch a view filtered to [start, end] (inclusive, 'YYYY-MM-DD') server-side.
 // Since the date column name varies per view, try candidates until one isn't
