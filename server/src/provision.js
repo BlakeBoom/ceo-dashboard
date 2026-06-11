@@ -1,20 +1,24 @@
 // User provisioning from the Zoho EmployeeProfile view.
 //
-// EmployeeProfile gives us, per person:
-//   - Employee Number  → stable HR identity (stored as zoho_employee_no)
-//   - Workgroup        → which client campaign they belong to
-//   - Job Title        → their level (Campaign Manager / Team Leader / Agent)
-//   - Fullname         → display name + the key we match on elsewhere
+// The raw Zoho People EmployeeProfile view stores Job Title (and possibly other
+// fields) as numeric lookup ids into companion tables. We resolve Job Title via
+// the Job Description view, then map:
+//   - Workgroup/Department → which client campaign they belong to
+//   - Job Title (resolved) → their level (Campaign Manager / Team Leader / Agent)
+//   - Employee Name        → display name + the key we match on elsewhere
+//   - Employee ID          → stable HR identity (stored as zoho_employee_no)
 //
-// From this we create/refresh login accounts with the right role + campaign.
-// Team membership (which agents sit under which Team Leader) is NOT in this
-// view — it comes from User_metrics_3.team_name via the bonus sync — so we set
+// Team membership (which agents sit under which Team Leader) is NOT here —
+// it comes from User_metrics_3.team_name via the bonus sync — so we set
 // role + campaign here and leave team_id to the sync / manual assignment.
 
 import crypto from 'node:crypto';
 import { query, withTx } from './db.js';
 import { fetchView, VIEW } from './zoho.js';
 import { hashPassword } from './auth.js';
+
+// Companion table that Job Title lookup ids resolve against.
+const JOB_TITLE_VIEW_ID = '2292884000019602033';
 
 // ── Pure mapping helpers (unit-tested) ──────────────────────────────────────
 
@@ -123,6 +127,50 @@ export function probeFieldValues(rows, names, n = 8) {
   return out;
 }
 
+// Build lookup-id → title-text map from the Job Description companion view.
+// Column names there aren't guaranteed either, so detect: the id column is the
+// one whose values look like lookup ids; the title column is a known name or,
+// failing that, the column with the most distinct human text.
+export function buildJobTitleMap(rows) {
+  const map = new Map();
+  if (!rows?.length) return map;
+  const sample = rows.find(r => r) || {};
+  const keys = Object.keys(sample);
+
+  let idCol = keys.find(k => normKey(k) === 'id');
+  if (!idCol) idCol = keys.find(k => looksLikeLookupId(sample[k]));
+  if (!idCol) return map;
+
+  const titleCands = ['jobtitle', 'title', 'name', 'jobdescription', 'designation', 'jobtitlename', 'description'];
+  let titleCol = null;
+  for (const c of titleCands) {
+    const k = keys.find(k => normKey(k) === c);
+    if (k && k !== idCol) { titleCol = k; break; }
+  }
+  if (!titleCol) {
+    // Fallback: the non-id column with the most distinct non-numeric values.
+    let best = null, bestN = 0;
+    for (const k of keys) {
+      if (k === idCol) continue;
+      const vals = new Set();
+      for (const r of rows.slice(0, 200)) {
+        const v = (r[k] ?? '').toString().trim();
+        if (v && !/^\d+$/.test(v)) vals.add(v);
+      }
+      if (vals.size > bestN) { best = k; bestN = vals.size; }
+    }
+    titleCol = best;
+  }
+  if (!titleCol) return map;
+
+  for (const r of rows) {
+    const id = (r[idCol] ?? '').toString().trim();
+    const title = (r[titleCol] ?? '').toString().trim();
+    if (id && title) map.set(id, title);
+  }
+  return map;
+}
+
 // Read one EmployeeProfile row using the detected column map.
 export function parseEmployeeRow(r, cols) {
   const get = (field) => (cols[field] != null ? r[cols[field]] : undefined);
@@ -161,15 +209,35 @@ function tempPassword() {
 
 // Classify every EmployeeProfile row into the account we'd create. Pure given
 // rows — used by both preview and commit so they can't drift.
-export function planProvisioning(rows, { domain }) {
+export function planProvisioning(rows, { domain, jobTitleMap = new Map() }) {
   const cols = detectProfileColumns(rows);
   const seenEmail = new Map(); // local → count, for collision suffixes
   const plan = [];
   const skipped = [];
+  let titlesResolved = 0, titlesUnresolved = 0;
 
   for (const r of rows) {
-    const { fullname, workgroup, jobTitle, empNo, email: realEmail } = parseEmployeeRow(r, cols);
+    let { fullname, workgroup, jobTitle, empNo, email: realEmail } = parseEmployeeRow(r, cols);
     if (!fullname) { skipped.push({ reason: 'no_name' }); continue; }
+
+    // Only provision current staff: skip Terminated/Resigned/etc. when the
+    // view exposes an employee status.
+    if (cols.status != null) {
+      const status = (r[cols.status] ?? '').toString().trim().toLowerCase();
+      if (status && status !== 'active') { skipped.push({ reason: 'not_active', fullname }); continue; }
+    }
+
+    // Resolve lookup-id Job Titles via the companion table.
+    if (looksLikeLookupId(jobTitle)) {
+      const resolved = jobTitleMap.get(jobTitle);
+      if (resolved) { jobTitle = resolved; titlesResolved++; }
+      else { jobTitle = ''; titlesUnresolved++; }
+    }
+
+    if (looksLikeLookupId(workgroup)) {
+      skipped.push({ reason: 'workgroup_lookup_id', fullname, workgroup });
+      continue;
+    }
     const camp = canonicalCampaign(workgroup);
     if (!camp) {
       skipped.push({ reason: workgroup ? 'internal_admin' : 'no_workgroup', fullname, workgroup });
@@ -188,15 +256,24 @@ export function planProvisioning(rows, { domain }) {
 
     plan.push({ fullname, workgroup, campaign: camp.name, slug: camp.slug, role, jobTitle, empNo, email });
   }
-  return { plan, skipped, cols };
+  return { plan, skipped, cols, titlesResolved, titlesUnresolved };
 }
 
 // Fetch EmployeeProfile, plan accounts, and (unless preview) upsert them.
 // Idempotent: re-running updates role/campaign/title and only issues a temp
 // password to brand-new accounts (so existing users keep their password).
 export async function provisionFromEmployeeProfile({ preview = false, domain = 'boomerang.local', includeRoles = ['campaign_lead', 'tm', 'agent'], viewId = null } = {}) {
-  const rows = await fetchView(viewId || process.env.ZOHO_EMPLOYEE_VIEW_ID || VIEW.employee);
-  const { plan, skipped, cols } = planProvisioning(rows, { domain });
+  const employeeViewId = viewId || process.env.ZOHO_EMPLOYEE_VIEW_ID || VIEW.employee;
+  const jobTitleViewId = process.env.ZOHO_JOB_TITLE_VIEW_ID || JOB_TITLE_VIEW_ID;
+  const [rows, jobTitleRows] = await Promise.all([
+    fetchView(employeeViewId),
+    fetchView(jobTitleViewId).catch(err => {
+      console.warn('[provision] job-title view fetch failed:', err.message);
+      return [];
+    }),
+  ]);
+  const jobTitleMap = buildJobTitleMap(jobTitleRows);
+  const { plan, skipped, cols, titlesResolved, titlesUnresolved } = planProvisioning(rows, { domain, jobTitleMap });
   const filtered = plan.filter(p => includeRoles.includes(p.role));
 
   const summary = {
@@ -204,6 +281,7 @@ export async function provisionFromEmployeeProfile({ preview = false, domain = '
     planned: filtered.length,
     skipped: skipped.length,
     skip_reasons: tally(skipped.map(s => s.reason)),
+    job_titles: { lookup_rows: jobTitleMap.size, resolved: titlesResolved, unresolved: titlesUnresolved },
     by_role: tally(filtered.map(p => p.role)),
     by_campaign: tally(filtered.map(p => p.campaign)),
   };
@@ -225,6 +303,7 @@ export async function provisionFromEmployeeProfile({ preview = false, domain = '
         detected_columns: cols,
         source_columns: Object.keys(sampleRow),
         job_title_is_lookup_id: looksLikeLookupId(jobTitleVal),
+        job_title_samples: [...new Set(jobTitleMap.values())].slice(0, 15),
         field_values: probeFieldValues(rows, probeCols, 10),
       },
       sample: filtered.slice(0, 25),
