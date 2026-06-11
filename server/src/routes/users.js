@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { query } from '../db.js';
 import { hashPassword } from '../auth.js';
 import { requireRole, scopeClause } from '../rbac.js';
+import { provisionFromEmployeeProfile } from '../provision.js';
 
 const router = Router();
 
@@ -15,15 +16,41 @@ router.get('/', async (req, res) => {
   });
   const { rows } = await query(
     `SELECT u.id, u.email, u.full_name, u.role, u.campaign_id, u.team_id,
-            u.active, u.last_login_at, c.name AS campaign_name, t.name AS team_name
+            u.active, u.last_login_at, u.job_title, u.workgroup,
+            u.zoho_employee_no, u.must_change_password,
+            c.name AS campaign_name, t.name AS team_name
        FROM users u
        LEFT JOIN campaigns c ON c.id = u.campaign_id
        LEFT JOIN teams t     ON t.id = u.team_id
       WHERE ${sql}
-      ORDER BY u.full_name`,
+      ORDER BY u.role DESC, c.name NULLS LAST, u.full_name`,
     params
   );
   res.json({ users: rows });
+});
+
+// Admin-only: provision login accounts from the Zoho EmployeeProfile view.
+// `?preview=1` parses + classifies without writing, so the admin can sanity-
+// check the mapping against live data first. On commit, returns the generated
+// temp passwords for any NEW accounts (shown once — never stored in plaintext).
+router.post('/provision', requireRole('admin'), async (req, res) => {
+  const preview = req.query.preview === '1' || req.body?.preview === true;
+  const domain = (req.body?.domain || process.env.LOGIN_EMAIL_DOMAIN || 'boomerang.local')
+    .toString().trim().toLowerCase();
+  try {
+    const result = await provisionFromEmployeeProfile({ preview, domain });
+    if (!preview) {
+      await query(
+        `INSERT INTO audit_log (user_id, action, metadata)
+         VALUES ($1, 'users.provision', $2)`,
+        [req.user.id, { domain, summary: result.summary }]
+      );
+    }
+    res.json(result);
+  } catch (err) {
+    console.error('[users/provision] failed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Admin-only: create a user.
