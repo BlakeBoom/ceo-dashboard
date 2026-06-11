@@ -75,14 +75,16 @@ function normKey(k) {
 }
 
 const COL_CANDIDATES = {
-  fullname:  ['fullname', 'employeename', 'name', 'agentname'],
-  workgroup: ['workgroup', 'workgroupname', 'campaign', 'campaignname'],
-  jobTitle:  ['jobtitle', 'designation', 'title', 'role', 'position'],
-  empNo:     ['employeenumber', 'employeeno', 'employeeid', 'empno', 'empid', 'id', 'staffnumber'],
+  fullname:  ['fullname', 'employeename', 'name', 'agentname', 'fullnamesasperid', 'knownname'],
+  workgroup: ['workgroup', 'workgroupname', 'campaign', 'campaignname', 'department', 'divisionname', 'division', 'businessunit'],
+  jobTitle:  ['jobtitle', 'designation', 'title', 'position'],
+  empNo:     ['employeenumber', 'employeeno', 'employeeid', 'empno', 'empid', 'staffnumber'],
+  email:     ['workemailaddress', 'emailaddress', 'email', 'workemail', 'clientemail'],
+  manager:   ['reportingtoname', 'reportingto', 'managername', 'manager'],
   status:    ['employeestatus', 'status'],
 };
 
-// Map { fullname, workgroup, jobTitle, empNo, status } → actual column key (or null).
+// Map fields → actual column key (or null).
 export function detectProfileColumns(rows) {
   const sample = rows.find(r => r) || {};
   const byNorm = new Map(Object.keys(sample).map(k => [normKey(k), k]));
@@ -96,6 +98,31 @@ export function detectProfileColumns(rows) {
   return out;
 }
 
+// A value looks like an unresolved Zoho lookup id (long all-digit string) rather
+// than human text — e.g. Job Title returning "610962000011338364".
+export function looksLikeLookupId(v) {
+  return /^\d{10,}$/.test(String(v ?? '').trim());
+}
+
+// For diagnostics: up to `n` distinct non-empty sample values for each named
+// column that exists, so we can see which column actually holds the campaign /
+// job title text.
+export function probeFieldValues(rows, names, n = 8) {
+  const out = {};
+  const have = new Set(rows.length ? Object.keys(rows.find(r => r) || {}) : []);
+  for (const name of names) {
+    if (!have.has(name)) continue;
+    const seen = new Set();
+    for (const r of rows) {
+      const v = (r[name] ?? '').toString().trim();
+      if (v) seen.add(v);
+      if (seen.size >= n) break;
+    }
+    out[name] = [...seen];
+  }
+  return out;
+}
+
 // Read one EmployeeProfile row using the detected column map.
 export function parseEmployeeRow(r, cols) {
   const get = (field) => (cols[field] != null ? r[cols[field]] : undefined);
@@ -103,9 +130,12 @@ export function parseEmployeeRow(r, cols) {
   const workgroup = (get('workgroup') ?? '').toString().trim();
   const jobTitle = (get('jobTitle') ?? '').toString().trim();
   const empNoRaw = (get('empNo') ?? '').toString().trim();
+  const manager = (get('manager') ?? '').toString().trim();
+  const emailRaw = (get('email') ?? '').toString().trim().toLowerCase();
+  const email = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(emailRaw) ? emailRaw : null;
   // Drop sentinels that aren't real ids ("0", "#N/A", "").
   const empNo = /^[0-9]+[a-z]?$/i.test(empNoRaw) && empNoRaw !== '0' ? empNoRaw : null;
-  return { fullname, workgroup, jobTitle, empNo };
+  return { fullname, workgroup, jobTitle, empNo, manager, email };
 }
 
 // Build a deterministic login-email local-part from a name, e.g.
@@ -138,7 +168,7 @@ export function planProvisioning(rows, { domain }) {
   const skipped = [];
 
   for (const r of rows) {
-    const { fullname, workgroup, jobTitle, empNo } = parseEmployeeRow(r, cols);
+    const { fullname, workgroup, jobTitle, empNo, email: realEmail } = parseEmployeeRow(r, cols);
     if (!fullname) { skipped.push({ reason: 'no_name' }); continue; }
     const camp = canonicalCampaign(workgroup);
     if (!camp) {
@@ -147,10 +177,14 @@ export function planProvisioning(rows, { domain }) {
     }
 
     const role = jobTitleToRole(jobTitle);
-    const local = emailLocalPart(fullname);
-    const n = (seenEmail.get(local) || 0) + 1;
-    seenEmail.set(local, n);
-    const email = `${local}${n > 1 ? n : ''}@${domain}`;
+    // Prefer the real work email; otherwise generate a deterministic one.
+    let email = realEmail;
+    if (!email) {
+      const local = emailLocalPart(fullname);
+      const n = (seenEmail.get(local) || 0) + 1;
+      seenEmail.set(local, n);
+      email = `${local}${n > 1 ? n : ''}@${domain}`;
+    }
 
     plan.push({ fullname, workgroup, campaign: camp.name, slug: camp.slug, role, jobTitle, empNo, email });
   }
@@ -160,8 +194,8 @@ export function planProvisioning(rows, { domain }) {
 // Fetch EmployeeProfile, plan accounts, and (unless preview) upsert them.
 // Idempotent: re-running updates role/campaign/title and only issues a temp
 // password to brand-new accounts (so existing users keep their password).
-export async function provisionFromEmployeeProfile({ preview = false, domain = 'boomerang.local', includeRoles = ['campaign_lead', 'tm', 'agent'] } = {}) {
-  const rows = await fetchView(VIEW.employee);
+export async function provisionFromEmployeeProfile({ preview = false, domain = 'boomerang.local', includeRoles = ['campaign_lead', 'tm', 'agent'], viewId = null } = {}) {
+  const rows = await fetchView(viewId || process.env.ZOHO_EMPLOYEE_VIEW_ID || VIEW.employee);
   const { plan, skipped, cols } = planProvisioning(rows, { domain });
   const filtered = plan.filter(p => includeRoles.includes(p.role));
 
@@ -175,16 +209,23 @@ export async function provisionFromEmployeeProfile({ preview = false, domain = '
   };
 
   if (preview) {
-    // Diagnostics so the admin can see WHY rows were skipped: the actual
-    // column headers Zoho returned and which we matched to each field.
+    // Diagnostics so the admin can see WHY rows were skipped: the actual columns
+    // Zoho returned, which we matched, whether Job Title came back as an
+    // unresolved lookup id, and distinct sample values for the columns most
+    // likely to hold the campaign / job-title text.
     const sampleRow = rows.find(r => r) || {};
+    const jobTitleVal = cols.jobTitle ? sampleRow[cols.jobTitle] : null;
+    const probeCols = ['Department', 'Division', 'Division Name', 'Location', 'Seating Location',
+      'Job Title', 'Designation', 'Role', 'Work Group', 'Workgroup', 'Business Unit', 'Team',
+      'Reporting To (Name)', 'Employee Status'];
     return {
       preview: true,
       summary,
       diagnostics: {
         detected_columns: cols,
         source_columns: Object.keys(sampleRow),
-        sample_row: sampleRow,
+        job_title_is_lookup_id: looksLikeLookupId(jobTitleVal),
+        field_values: probeFieldValues(rows, probeCols, 10),
       },
       sample: filtered.slice(0, 25),
       skipped_sample: skipped.slice(0, 15),

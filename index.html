@@ -1865,8 +1865,10 @@ function renderUsers() {
         <div style="font-weight:600;font-size:12px;margin-bottom:8px">⚠ Nothing matched — column diagnostics</div>
         <div class="agent-tbl-sub" style="margin-bottom:4px">Skip reasons: ${Object.entries(pv.summary.skip_reasons||{}).map(([r,n])=>`${r}: ${n}`).join(' · ') || '—'}</div>
         <div class="agent-tbl-sub" style="margin-bottom:4px">Detected fields: ${Object.entries(pvDiag.detected_columns||{}).map(([f,c])=>`${f}→${c??'<b style="color:#b45309">none</b>'}`).join(' · ')}</div>
-        <div class="agent-tbl-sub" style="margin-bottom:4px">Columns Zoho returned: <span class="mono">${(pvDiag.source_columns||[]).join(', ')||'—'}</span></div>
-        <div class="agent-tbl-sub">Sample row: <span class="mono" style="word-break:break-all">${JSON.stringify(pvDiag.sample_row||{}).slice(0,600)}</span></div>
+        ${pvDiag.job_title_is_lookup_id ? '<div class="agent-tbl-sub" style="margin-bottom:4px;color:#b45309"><b>Job Title is an unresolved lookup id</b> — this view cannot give role text. Use the resolved Analytics view.</div>' : ''}
+        <div class="agent-tbl-sub" style="margin-bottom:6px">Columns Zoho returned: <span class="mono">${(pvDiag.source_columns||[]).join(', ')||'—'}</span></div>
+        <div style="font-weight:600;font-size:11px;margin:8px 0 4px">Sample values per likely column:</div>
+        ${Object.entries(pvDiag.field_values||{}).map(([c,vals])=>`<div class="agent-tbl-sub" style="margin-bottom:2px"><b>${c}</b>: <span class="mono" style="word-break:break-all">${(vals||[]).join(' | ')}</span></div>`).join('') || '<div class="agent-tbl-sub">—</div>'}
       </div>` : '';
   const previewPanel = pv ? `
     <div class="users-panel">
