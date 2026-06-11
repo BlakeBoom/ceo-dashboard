@@ -75,21 +75,74 @@ export function aggregateCallouts(attRows, { unplannedStatuses = DEFAULT_UNPLANN
   return counts;
 }
 
+// First + last name only, e.g. "john michael smith" → "john smith".
+// Handles middle names being added/dropped between the two views.
+function firstLastKey(s) {
+  const n = normName(s);
+  if (!n) return null;
+  const parts = n.split(' ');
+  return parts.length >= 2 ? `${parts[0]} ${parts[parts.length - 1]}` : null;
+}
+
+// Drop a trailing "(...)" suffix, e.g. "John Smith (MedExpress)" → "John Smith".
+function stripKnownNameSuffix(s) {
+  if (!s) return null;
+  return String(s).replace(/\s*\([^)]+\)\s*$/, '').trim();
+}
+
 // Build employee_id → user_id map by matching names across User_metrics_3
-// agents and EmployeeProfile records.
+// agents and EmployeeProfile records. Mirrors the dashboard's three-pass
+// matcher (buildNameMatcher in index.html): exact normalised name → first+last
+// → prefix (User_metrics_3 truncates names to ~30 chars). Active employees win
+// ties over Terminated. Exact-match-only misses most rows because the two views
+// format names differently (suffixes, truncation), which zeroes out callouts.
 export function buildEmployeeUserMap(empProfileRows, userMetricsByUser) {
-  // Indexed by normalised name
-  const profileByName = new Map();
+  const byFull = new Map();      // normalised full name → { eid, priority }
+  const byFirstLast = new Map(); // "first last" → { eid, priority }
+  const byPrefix = [];           // [{ prefix, eid, priority }] for startsWith
+
   for (const r of empProfileRows) {
-    const name = r['Employee Name'] || r.employee_name;
+    const rawName = r['Employee Name'] || r.employee_name;
     const id = r.ID || r.id || r.employee_id;
-    if (!name || !id) continue;
-    profileByName.set(normName(name), String(id));
+    if (!rawName || !id) continue;
+    const eid = String(id);
+    const cleanName = stripKnownNameSuffix(rawName);
+    const status = r['Employee Status'] || r.employee_status || '';
+    const priority = status === 'Active' ? 0 : 1; // prefer Active on collisions
+
+    const fullKey = normName(cleanName);
+    if (fullKey) {
+      const existing = byFull.get(fullKey);
+      if (!existing || existing.priority > priority) byFull.set(fullKey, { eid, priority });
+      byPrefix.push({ prefix: fullKey, eid, priority });
+    }
+    const flKey = firstLastKey(cleanName);
+    if (flKey) {
+      const existing = byFirstLast.get(flKey);
+      if (!existing || existing.priority > priority) byFirstLast.set(flKey, { eid, priority });
+    }
   }
+  byPrefix.sort((a, b) => a.priority - b.priority); // Active first on ties
+
+  function matchEid(umFullname) {
+    const fullKey = normName(umFullname);
+    if (!fullKey) return null;
+    if (byFull.has(fullKey)) return byFull.get(fullKey).eid;
+    const flKey = firstLastKey(umFullname);
+    if (flKey && byFirstLast.has(flKey)) return byFirstLast.get(flKey).eid;
+    // Prefix fallback: UM name is truncated, so find an EP name starting with it.
+    if (fullKey.length >= 20) {
+      for (const { prefix, eid } of byPrefix) {
+        if (prefix.startsWith(fullKey)) return eid;
+      }
+    }
+    return null;
+  }
+
   const out = new Map(); // employee_id → user_id
   for (const [uid, agg] of userMetricsByUser) {
-    const empId = profileByName.get(normName(agg.fullname));
-    if (empId) out.set(empId, uid);
+    const eid = matchEid(agg.fullname);
+    if (eid) out.set(eid, uid);
   }
   return out;
 }
