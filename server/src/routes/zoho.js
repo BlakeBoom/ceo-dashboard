@@ -4,7 +4,7 @@
 
 import { Router } from 'express';
 import { requireRole } from '../rbac.js';
-import { fetchView, VIEW } from '../zoho.js';
+import { fetchView, fetchViewByDate, VIEW } from '../zoho.js';
 
 const router = Router();
 
@@ -20,10 +20,13 @@ router.get('/view/:key', requireRole('tm'), async (req, res) => {
   if (!viewId) return res.status(400).json({ error: 'unknown_view', detail: req.params.key });
 
   const since = req.query.since;
-  const criteria = since ? `"Date" >= '${since}'` : null;
 
   try {
-    const rows = await fetchView(viewId, { criteria });
+    // When a lower bound is given, filter server-side. The date column name
+    // varies per view, so probe for it (open-ended upper bound).
+    const rows = since
+      ? await fetchViewByDate(viewId, since, '9999-12-31')
+      : await fetchView(viewId);
     // Match the shape the existing extractRows() in index.html expects.
     res.json({ data: rows });
   } catch (err) {

@@ -13,7 +13,7 @@
 // Called from the cron handler and the manual `/api/sync/now` endpoint.
 
 import { query, withTx } from './db.js';
-import { fetchView, VIEW, monthBounds } from './zoho.js';
+import { fetchView, fetchViewByDate, VIEW, monthBounds } from './zoho.js';
 import { aggregateUserMetrics, aggregateCallouts, buildEmployeeUserMap, applyRule } from './bonus.js';
 
 // Campaign slug → list of Zoho "workgroup" values to include. Mirrors the
@@ -62,11 +62,13 @@ export async function syncCampaign(campaignId, yearMonth = currentYearMonth()) {
   const period = periodRows[0];
   if (period.locked) return { campaign_id: campaignId, period_id: period.id, skipped: 'locked' };
 
-  // 3. Fetch from Zoho
-  const dateCriteria = `"Date" >= '${start}' AND "Date" <= '${end}'`;
+  // 3. Fetch from Zoho, filtered to the period server-side. The date column name
+  // differs per view (User_metrics_3's isn't named "Date"), so fetchViewByDate
+  // probes for it. Filtering server-side keeps payloads to a single month —
+  // fetching the full view history times out the lambda.
   const [umRowsRaw, attRows, empRows] = await Promise.all([
-    fetchView(VIEW.userMetrics, { criteria: dateCriteria }),
-    fetchView(VIEW.attendance,  { criteria: dateCriteria }),
+    fetchViewByDate(VIEW.userMetrics, start, end),
+    fetchViewByDate(VIEW.attendance,  start, end),
     fetchView(VIEW.employee),
   ]);
 
