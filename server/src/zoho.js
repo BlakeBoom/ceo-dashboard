@@ -118,6 +118,44 @@ export async function fetchView(viewId, { criteria = null } = {}) {
   return [];
 }
 
+// Candidate names for a view's date column, in priority order. Views don't
+// share a convention (User_metrics_3's date column is not named "Date"), so we
+// probe rather than hardcode. Mirrors the dashboard's detectDateCol list.
+export const DATE_COL_CANDIDATES = ['Date', 'date', 'DATE', 'call_date',
+  'Call_Date', 'metric_date', 'Metric_Date', 'activity_date', 'report_date',
+  'Report_Date', 'log_date', 'day', 'Day', 'datetime', 'date_time', 'Date_Time',
+  'created_date', 'Created_Date'];
+
+// Resolved date-column name per view, cached for the lifetime of the lambda so
+// we only probe once.
+const _dateColCache = new Map();
+
+// Fetch a view filtered to [start, end] (inclusive, 'YYYY-MM-DD') server-side.
+// Since the date column name varies per view, try candidates until one isn't
+// rejected by Zoho as an unknown filter column (errorCode 7330); a bad column
+// returns a fast 400, so probing is cheap. The winner is cached per view.
+export async function fetchViewByDate(viewId, start, end, candidates = DATE_COL_CANDIDATES) {
+  const cached = _dateColCache.get(viewId);
+  const order = cached ? [cached, ...candidates.filter(c => c !== cached)] : candidates;
+  let lastErr;
+  for (const col of order) {
+    const criteria = `"${col}" >= '${start}' AND "${col}" <= '${end}'`;
+    try {
+      const rows = await fetchView(viewId, { criteria });
+      _dateColCache.set(viewId, col);
+      return rows;
+    } catch (err) {
+      // Unknown-column → try the next candidate; anything else is a real error.
+      if (/UNKNOWN_COLUMN_IN_FILTERCRITERIA|\b7330\b/.test(err.message)) {
+        lastErr = err;
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr || new Error(`No usable date column for view ${viewId}`);
+}
+
 export function monthBounds(yyyyMm) {
   const [y, m] = yyyyMm.split('-').map(Number);
   const start = `${yyyyMm}-01`;
