@@ -14,7 +14,7 @@
 
 import { query, withTx } from './db.js';
 import { fetchView, VIEW, monthBounds } from './zoho.js';
-import { aggregateUserMetrics, aggregateCallouts, buildEmployeeUserMap, applyRule } from './bonus.js';
+import { aggregateUserMetrics, aggregateCallouts, buildEmployeeUserMap, applyRule, filterRowsByDateRange } from './bonus.js';
 
 // Campaign slug → list of Zoho "workgroup" values to include. Mirrors the
 // existing dashboard's WG_MAP. Add new campaigns here as they're rolled out.
@@ -62,13 +62,18 @@ export async function syncCampaign(campaignId, yearMonth = currentYearMonth()) {
   const period = periodRows[0];
   if (period.locked) return { campaign_id: campaignId, period_id: period.id, skipped: 'locked' };
 
-  // 3. Fetch from Zoho
+  // 3. Fetch from Zoho.
+  // User_metrics_3 has no column literally named "Date", so it can't be filtered
+  // via Zoho criteria (errorCode 7330). Fetch the full view and filter by its
+  // detected date column in JS — mirroring the dashboard's detectDateCol logic.
+  // AttendanceUserReport does have a "Date" column, so we filter it server-side.
   const dateCriteria = `"Date" >= '${start}' AND "Date" <= '${end}'`;
-  const [umRowsRaw, attRows, empRows] = await Promise.all([
-    fetchView(VIEW.userMetrics, { criteria: dateCriteria }),
+  const [umRowsAll, attRows, empRows] = await Promise.all([
+    fetchView(VIEW.userMetrics),
     fetchView(VIEW.attendance,  { criteria: dateCriteria }),
     fetchView(VIEW.employee),
   ]);
+  const umRowsRaw = filterRowsByDateRange(umRowsAll, start, end);
 
   // 4. Filter to this campaign's workgroups. Empty list = no rows.
   const umRows = validWorkgroups.length
