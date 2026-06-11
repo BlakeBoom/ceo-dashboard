@@ -64,12 +64,45 @@ export function jobTitleToRole(title) {
   return 'agent';
 }
 
-// Read one EmployeeProfile row tolerantly (column names vary across exports).
-export function parseEmployeeRow(r) {
-  const fullname = (r.Fullname ?? r['Employee Name'] ?? r.full_name ?? r.fullname ?? '').toString().trim();
-  const workgroup = (r.Workgroup ?? r.workgroup ?? '').toString().trim();
-  const jobTitle = (r['Job Title'] ?? r.Job_Title ?? r.job_title ?? '').toString().trim();
-  const empNoRaw = (r['Employee Number'] ?? r.ID ?? r.id ?? r.employee_id ?? '').toString().trim();
+// ── Column detection ────────────────────────────────────────────────────────
+// The EmployeeProfile view's column labels vary between exports ("Fullname" vs
+// "Employee Name" vs "Full Name", "Job Title" vs "Designation", …). Detect the
+// actual columns once per batch by normalised header name instead of trusting
+// exact keys.
+
+function normKey(k) {
+  return String(k).toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+const COL_CANDIDATES = {
+  fullname:  ['fullname', 'employeename', 'name', 'agentname'],
+  workgroup: ['workgroup', 'workgroupname', 'campaign', 'campaignname'],
+  jobTitle:  ['jobtitle', 'designation', 'title', 'role', 'position'],
+  empNo:     ['employeenumber', 'employeeno', 'employeeid', 'empno', 'empid', 'id', 'staffnumber'],
+  status:    ['employeestatus', 'status'],
+};
+
+// Map { fullname, workgroup, jobTitle, empNo, status } → actual column key (or null).
+export function detectProfileColumns(rows) {
+  const sample = rows.find(r => r) || {};
+  const byNorm = new Map(Object.keys(sample).map(k => [normKey(k), k]));
+  const out = {};
+  for (const [field, cands] of Object.entries(COL_CANDIDATES)) {
+    out[field] = null;
+    for (const c of cands) {
+      if (byNorm.has(c)) { out[field] = byNorm.get(c); break; }
+    }
+  }
+  return out;
+}
+
+// Read one EmployeeProfile row using the detected column map.
+export function parseEmployeeRow(r, cols) {
+  const get = (field) => (cols[field] != null ? r[cols[field]] : undefined);
+  const fullname = (get('fullname') ?? '').toString().trim();
+  const workgroup = (get('workgroup') ?? '').toString().trim();
+  const jobTitle = (get('jobTitle') ?? '').toString().trim();
+  const empNoRaw = (get('empNo') ?? '').toString().trim();
   // Drop sentinels that aren't real ids ("0", "#N/A", "").
   const empNo = /^[0-9]+[a-z]?$/i.test(empNoRaw) && empNoRaw !== '0' ? empNoRaw : null;
   return { fullname, workgroup, jobTitle, empNo };
@@ -99,15 +132,19 @@ function tempPassword() {
 // Classify every EmployeeProfile row into the account we'd create. Pure given
 // rows — used by both preview and commit so they can't drift.
 export function planProvisioning(rows, { domain }) {
+  const cols = detectProfileColumns(rows);
   const seenEmail = new Map(); // local → count, for collision suffixes
   const plan = [];
   const skipped = [];
 
   for (const r of rows) {
-    const { fullname, workgroup, jobTitle, empNo } = parseEmployeeRow(r);
-    if (!fullname) { skipped.push({ reason: 'no_name', row: r }); continue; }
+    const { fullname, workgroup, jobTitle, empNo } = parseEmployeeRow(r, cols);
+    if (!fullname) { skipped.push({ reason: 'no_name' }); continue; }
     const camp = canonicalCampaign(workgroup);
-    if (!camp) { skipped.push({ reason: 'internal_or_no_campaign', fullname, workgroup }); continue; }
+    if (!camp) {
+      skipped.push({ reason: workgroup ? 'internal_admin' : 'no_workgroup', fullname, workgroup });
+      continue;
+    }
 
     const role = jobTitleToRole(jobTitle);
     const local = emailLocalPart(fullname);
@@ -117,7 +154,7 @@ export function planProvisioning(rows, { domain }) {
 
     plan.push({ fullname, workgroup, campaign: camp.name, slug: camp.slug, role, jobTitle, empNo, email });
   }
-  return { plan, skipped };
+  return { plan, skipped, cols };
 }
 
 // Fetch EmployeeProfile, plan accounts, and (unless preview) upsert them.
@@ -125,19 +162,33 @@ export function planProvisioning(rows, { domain }) {
 // password to brand-new accounts (so existing users keep their password).
 export async function provisionFromEmployeeProfile({ preview = false, domain = 'boomerang.local', includeRoles = ['campaign_lead', 'tm', 'agent'] } = {}) {
   const rows = await fetchView(VIEW.employee);
-  const { plan, skipped } = planProvisioning(rows, { domain });
+  const { plan, skipped, cols } = planProvisioning(rows, { domain });
   const filtered = plan.filter(p => includeRoles.includes(p.role));
 
   const summary = {
     source_rows: rows.length,
     planned: filtered.length,
     skipped: skipped.length,
+    skip_reasons: tally(skipped.map(s => s.reason)),
     by_role: tally(filtered.map(p => p.role)),
     by_campaign: tally(filtered.map(p => p.campaign)),
   };
 
   if (preview) {
-    return { preview: true, summary, sample: filtered.slice(0, 25), skipped_sample: skipped.slice(0, 15) };
+    // Diagnostics so the admin can see WHY rows were skipped: the actual
+    // column headers Zoho returned and which we matched to each field.
+    const sampleRow = rows.find(r => r) || {};
+    return {
+      preview: true,
+      summary,
+      diagnostics: {
+        detected_columns: cols,
+        source_columns: Object.keys(sampleRow),
+        sample_row: sampleRow,
+      },
+      sample: filtered.slice(0, 25),
+      skipped_sample: skipped.slice(0, 15),
+    };
   }
 
   const created = [];

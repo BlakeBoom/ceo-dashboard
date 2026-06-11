@@ -1859,20 +1859,30 @@ function renderUsers() {
     .filter(r => counts[r]).map(r => `${counts[r]} ${_roleLabel[r]}${counts[r]>1?'s':''}`).join(' · ');
 
   const pv = USERS_STATE.preview;
+  const pvDiag = pv?.diagnostics;
+  const diagPanel = (pv && pv.summary.planned === 0 && pvDiag) ? `
+      <div style="margin-top:12px;padding:12px;border:1px solid rgba(245,158,11,.4);border-radius:8px;background:rgba(245,158,11,.06)">
+        <div style="font-weight:600;font-size:12px;margin-bottom:8px">⚠ Nothing matched — column diagnostics</div>
+        <div class="agent-tbl-sub" style="margin-bottom:4px">Skip reasons: ${Object.entries(pv.summary.skip_reasons||{}).map(([r,n])=>`${r}: ${n}`).join(' · ') || '—'}</div>
+        <div class="agent-tbl-sub" style="margin-bottom:4px">Detected fields: ${Object.entries(pvDiag.detected_columns||{}).map(([f,c])=>`${f}→${c??'<b style="color:#b45309">none</b>'}`).join(' · ')}</div>
+        <div class="agent-tbl-sub" style="margin-bottom:4px">Columns Zoho returned: <span class="mono">${(pvDiag.source_columns||[]).join(', ')||'—'}</span></div>
+        <div class="agent-tbl-sub">Sample row: <span class="mono" style="word-break:break-all">${JSON.stringify(pvDiag.sample_row||{}).slice(0,600)}</span></div>
+      </div>` : '';
   const previewPanel = pv ? `
     <div class="users-panel">
       <div class="users-panel-h">Preview — nothing written yet</div>
       <div class="users-kpis">
         <span><b>${pv.summary.planned}</b> accounts to provision</span>
         <span><b>${pv.summary.source_rows}</b> profile rows</span>
-        <span><b>${pv.summary.skipped}</b> skipped (internal/no name)</span>
+        <span><b>${pv.summary.skipped}</b> skipped</span>
       </div>
       <div class="users-bycamp">${Object.entries(pv.summary.by_campaign).sort((a,b)=>b[1]-a[1])
         .map(([c,n])=>`<span class="chip">${c}: ${n}</span>`).join('')}</div>
       <div class="users-bycamp" style="margin-top:6px">${Object.entries(pv.summary.by_role)
         .map(([r,n])=>`<span class="chip role-${r}">${_roleLabel[r]||r}: ${n}</span>`).join('')}</div>
-      <button class="btn-primary" id="usersCommitBtn" ${USERS_STATE.busy?'disabled':''} style="margin-top:12px">
-        ${USERS_STATE.busy?'Working…':`✓ Commit — create/update ${pv.summary.planned} accounts`}</button>
+      ${diagPanel}
+      ${pv.summary.planned > 0 ? `<button class="btn-primary" id="usersCommitBtn" ${USERS_STATE.busy?'disabled':''} style="margin-top:12px">
+        ${USERS_STATE.busy?'Working…':`✓ Commit — create/update ${pv.summary.planned} accounts`}</button>` : ''}
       <button class="btn-ghost" id="usersCancelPreview" style="margin-top:12px">Cancel</button>
     </div>` : '';
 
