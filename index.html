@@ -72,6 +72,26 @@ body{font-family:'DM Sans',system-ui,sans-serif;color:var(--text);-webkit-font-s
 .btn-primary:hover{filter:brightness(1.08)}
 .btn-ghost{font-size:12px;font-weight:500;padding:8px 14px;border-radius:8px;border:1px solid var(--border-light);background:transparent;color:var(--text2);cursor:pointer}
 .btn-ghost:hover{color:var(--text);border-color:var(--border-strong)}
+/* Users view */
+.mono{font-family:var(--mono),ui-monospace,SFMono-Regular,Menlo,monospace}
+.chip{display:inline-block;font-size:10px;font-weight:600;letter-spacing:.3px;padding:2px 8px;border-radius:99px;background:var(--border-light);color:var(--text2);white-space:nowrap}
+.chip.ok{background:rgba(34,197,94,.16);color:var(--green-text)}
+.chip.warn{background:rgba(245,158,11,.16);color:#b45309}
+.chip.role-admin{background:rgba(139,92,246,.18);color:#7c3aed}
+.chip.role-campaign_lead{background:rgba(59,130,246,.18);color:#2563eb}
+.chip.role-tm{background:rgba(14,165,233,.16);color:#0284c7}
+.chip.role-agent{background:var(--border-light);color:var(--text2)}
+.row-btn{font-size:11px;font-weight:600;padding:4px 10px;border-radius:6px;border:1px solid var(--border-light);background:transparent;color:var(--text2);cursor:pointer;margin-left:4px}
+.row-btn:hover{color:var(--text);border-color:var(--border-strong)}
+.row-btn.danger:hover{color:#dc2626;border-color:#dc2626}
+.users-panel{margin-top:10px;padding:16px 18px;border:1px solid var(--border-light);border-radius:12px;background:var(--card)}
+.users-panel.created{border-color:rgba(34,197,94,.4);background:rgba(34,197,94,.05)}
+.users-panel-h{font-size:13px;font-weight:600;margin-bottom:10px}
+.users-kpis{display:flex;gap:18px;flex-wrap:wrap;font-size:13px;color:var(--text2)}
+.users-kpis b{color:var(--text);font-size:15px}
+.users-bycamp{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
+.creds-tbl{margin-top:8px;width:100%}
+.creds-tbl td,.creds-tbl th{padding:6px 10px;text-align:left}
 .weeks{display:flex;gap:3px;flex-wrap:wrap}
 .wk-btn{font-size:11px;font-weight:500;padding:5px 11px;border-radius:6px;cursor:pointer;border:1px solid var(--border-light);background:transparent;color:var(--text3);transition:all .15s;font-family:var(--mono)}
 .wk-btn:hover{color:var(--text);border-color:var(--border-strong)}
@@ -349,6 +369,7 @@ body{font-family:'DM Sans',system-ui,sans-serif;color:var(--text);-webkit-font-s
         <button class="tab" data-view="campaigns" data-min-role="tm">Campaigns</button>
         <button class="tab" data-view="trends" data-min-role="tm">Trends</button>
         <button class="tab" data-view="bonus" data-min-role="agent">Bonus</button>
+        <button class="tab" data-view="users" data-min-role="admin">Users</button>
       </div>
       <div class="gran-toggle" id="granNav">
         <button class="gran-btn" data-gran="day">Day</button>
@@ -400,6 +421,7 @@ body{font-family:'DM Sans',system-ui,sans-serif;color:var(--text);-webkit-font-s
   <div id="campaignsView" class="view"></div>
   <div id="trendsView" class="view"></div>
   <div id="bonusView" class="view"></div>
+  <div id="usersView" class="view"></div>
 
   <div class="footer" id="footer"></div>
 </div>
@@ -1599,6 +1621,7 @@ function render() {
   else if (STATE.view === 'campaigns') renderCampaigns();
   else if (STATE.view === 'trends') renderTrends();
   else if (STATE.view === 'bonus') renderBonus();
+  else if (STATE.view === 'users') renderUsers();
 }
 
 // ─── Bonus view ─────────────────────────────────────────────────
@@ -1753,6 +1776,160 @@ function renderBonus() {
     loadBonusAwards();
   });
   $('bonusSyncBtn')?.addEventListener('click', triggerBonusSync);
+}
+
+// ─── Users view (admin only) ─────────────────────────────────────
+// Lets the admin provision login accounts from the Zoho EmployeeProfile roster
+// and verify they exist (role, campaign, last login). Generated temp passwords
+// are shown once, right after a commit, so the admin can confirm a login works.
+const USERS_STATE = {
+  loaded: false, loading: false, users: [], error: null,
+  busy: false, preview: null, justCreated: [],
+};
+
+async function loadUsers() {
+  USERS_STATE.loading = true; renderUsers();
+  try {
+    const r = await apiFetch('/api/users');
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    USERS_STATE.users = (await r.json()).users || [];
+    USERS_STATE.error = null;
+  } catch (e) {
+    USERS_STATE.error = `Could not load users (${e.message})`;
+  }
+  USERS_STATE.loading = false; renderUsers();
+}
+
+async function provisionUsers(preview) {
+  USERS_STATE.busy = true; USERS_STATE.error = null;
+  if (!preview) USERS_STATE.justCreated = [];
+  renderUsers();
+  try {
+    const r = await apiFetch(`/api/users/provision${preview ? '?preview=1' : ''}`, {
+      method: 'POST', body: JSON.stringify({ preview }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+    if (preview) {
+      USERS_STATE.preview = data;
+    } else {
+      USERS_STATE.preview = null;
+      USERS_STATE.justCreated = data.created || [];
+      await loadUsers();
+      return;
+    }
+  } catch (e) {
+    USERS_STATE.error = `Provisioning failed: ${e.message}`;
+  }
+  USERS_STATE.busy = false; renderUsers();
+}
+
+async function resetUserPassword(id, name) {
+  // Generate a temp password client-side, set it, then show it once.
+  const temp = Array.from(crypto.getRandomValues(new Uint8Array(9)))
+    .map(b => 'ABCDEFGHJKMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789'[b % 54]).join('') + 'A1';
+  if (!confirm(`Reset password for ${name}? They will be signed out and must use the new temporary password.`)) return;
+  const r = await apiFetch(`/api/users/${id}/reset-password`, {
+    method: 'POST', body: JSON.stringify({ new_password: temp }),
+  });
+  if (r.ok) {
+    USERS_STATE.justCreated = [{ full_name: name, temp_password: temp, reset: true }];
+    renderUsers();
+  } else {
+    alert('Reset failed.');
+  }
+}
+
+async function deactivateUser(id, name) {
+  if (!confirm(`Deactivate ${name}? This revokes their access immediately.`)) return;
+  const r = await apiFetch(`/api/users/${id}/deactivate`, { method: 'POST' });
+  if (r.ok) loadUsers(); else alert('Deactivate failed.');
+}
+
+const _roleLabel = { admin: 'Admin', campaign_lead: 'Campaign Mgr', tm: 'Team Leader', agent: 'Agent' };
+
+function renderUsers() {
+  const u = AUTH.user;
+  if (!u || u.role !== 'admin') { $('usersView').innerHTML = '<div class="flag-empty" style="padding:32px">Admins only.</div>'; return; }
+  if (!USERS_STATE.loaded) { USERS_STATE.loaded = true; loadUsers(); }
+
+  const us = USERS_STATE.users;
+  const counts = us.reduce((a, x) => (a[x.role] = (a[x.role] || 0) + 1, a), {});
+  const summaryLine = ['admin','campaign_lead','tm','agent']
+    .filter(r => counts[r]).map(r => `${counts[r]} ${_roleLabel[r]}${counts[r]>1?'s':''}`).join(' · ');
+
+  const pv = USERS_STATE.preview;
+  const previewPanel = pv ? `
+    <div class="users-panel">
+      <div class="users-panel-h">Preview — nothing written yet</div>
+      <div class="users-kpis">
+        <span><b>${pv.summary.planned}</b> accounts to provision</span>
+        <span><b>${pv.summary.source_rows}</b> profile rows</span>
+        <span><b>${pv.summary.skipped}</b> skipped (internal/no name)</span>
+      </div>
+      <div class="users-bycamp">${Object.entries(pv.summary.by_campaign).sort((a,b)=>b[1]-a[1])
+        .map(([c,n])=>`<span class="chip">${c}: ${n}</span>`).join('')}</div>
+      <div class="users-bycamp" style="margin-top:6px">${Object.entries(pv.summary.by_role)
+        .map(([r,n])=>`<span class="chip role-${r}">${_roleLabel[r]||r}: ${n}</span>`).join('')}</div>
+      <button class="btn-primary" id="usersCommitBtn" ${USERS_STATE.busy?'disabled':''} style="margin-top:12px">
+        ${USERS_STATE.busy?'Working…':`✓ Commit — create/update ${pv.summary.planned} accounts`}</button>
+      <button class="btn-ghost" id="usersCancelPreview" style="margin-top:12px">Cancel</button>
+    </div>` : '';
+
+  const created = USERS_STATE.justCreated;
+  const createdPanel = created.length ? `
+    <div class="users-panel created">
+      <div class="users-panel-h">${created[0].reset ? 'Password reset' : `${created.length} new account${created.length>1?'s':''} created`} — copy these now, they won't be shown again</div>
+      <table class="agent-tbl creds-tbl"><thead><tr><th>Name</th><th>Email</th><th>Temp password</th></tr></thead>
+      <tbody>${created.map(c=>`<tr><td>${c.full_name}</td><td class="mono">${c.email||'—'}</td><td class="mono"><b>${c.temp_password}</b></td></tr>`).join('')}</tbody></table>
+      <button class="btn-ghost" id="usersDismissCreated" style="margin-top:10px">Dismiss</button>
+    </div>` : '';
+
+  const rows = us.map(x => `
+    <tr>
+      <td class="name">${x.full_name}${x.must_change_password?' <span class="chip warn">temp pw</span>':''}</td>
+      <td class="mono dim">${x.email || '—'}</td>
+      <td><span class="chip role-${x.role}">${_roleLabel[x.role]||x.role}</span></td>
+      <td class="dim">${x.campaign_name || '—'}</td>
+      <td class="dim">${x.team_name || '—'}</td>
+      <td class="dim">${x.job_title || '—'}</td>
+      <td class="dim numeric">${x.last_login_at ? new Date(x.last_login_at).toLocaleDateString('en-GB',{day:'2-digit',month:'short'}) : 'never'}</td>
+      <td>${x.active ? '<span class="chip ok">active</span>' : '<span class="chip">inactive</span>'}</td>
+      <td class="numeric" style="white-space:nowrap">
+        <button class="row-btn" data-act="reset" data-id="${x.id}" data-name="${(x.full_name||'').replace(/"/g,'&quot;')}">Reset pw</button>
+        ${x.active && x.id !== u.id ? `<button class="row-btn danger" data-act="deact" data-id="${x.id}" data-name="${(x.full_name||'').replace(/"/g,'&quot;')}">Deactivate</button>` : ''}
+      </td>
+    </tr>`).join('');
+
+  $('usersView').innerHTML = `
+    <div class="agent-tbl-head" style="background:var(--card);border:1px solid var(--border-light);border-radius:12px 12px 0 0;border-bottom:none">
+      <div style="flex:1">
+        <div style="font-weight:600">User accounts</div>
+        <div class="agent-tbl-sub">${us.length} account${us.length===1?'':'s'}${summaryLine?` · ${summaryLine}`:''}</div>
+      </div>
+      <button id="usersPreviewBtn" class="btn-primary" ${USERS_STATE.busy?'disabled':''}>↻ Provision from EmployeeProfile</button>
+    </div>
+    ${USERS_STATE.error ? `<div class="err-banner show" style="margin-top:8px">${USERS_STATE.error}</div>` : ''}
+    ${createdPanel}
+    ${previewPanel}
+    ${USERS_STATE.loading ? '<div class="loading"><div class="spinner"></div><div>Loading users…</div></div>' :
+      `<div class="agent-tbl-wrap" style="border-radius:0 0 12px 12px;border-top:none">
+        <table class="agent-tbl">
+          <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Campaign</th><th>Team</th><th>Job title</th><th class="numeric">Last login</th><th>Status</th><th></th></tr></thead>
+          <tbody>${rows || '<tr><td colspan="9" class="flag-empty" style="padding:24px">No users yet — click <b>Provision from EmployeeProfile</b>.</td></tr>'}</tbody>
+        </table>
+      </div>`}
+  `;
+
+  $('usersPreviewBtn')?.addEventListener('click', () => provisionUsers(true));
+  $('usersCommitBtn')?.addEventListener('click', () => provisionUsers(false));
+  $('usersCancelPreview')?.addEventListener('click', () => { USERS_STATE.preview = null; renderUsers(); });
+  $('usersDismissCreated')?.addEventListener('click', () => { USERS_STATE.justCreated = []; renderUsers(); });
+  $('usersView').querySelectorAll('.row-btn').forEach(b => b.onclick = () => {
+    const id = parseInt(b.dataset.id, 10);
+    if (b.dataset.act === 'reset') resetUserPassword(id, b.dataset.name);
+    else if (b.dataset.act === 'deact') deactivateUser(id, b.dataset.name);
+  });
 }
 
 // ─── Summary view ────────────────────────────────────────────────
