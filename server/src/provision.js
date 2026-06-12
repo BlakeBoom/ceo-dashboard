@@ -17,8 +17,10 @@ import { query, withTx } from './db.js';
 import { fetchView, VIEW } from './zoho.js';
 import { hashPassword } from './auth.js';
 
-// Companion table that Job Title lookup ids resolve against.
-const JOB_TITLE_VIEW_ID = '2292884000019602033';
+// Companion tables that EmployeeProfile lookup ids resolve against.
+const JOB_TITLE_VIEW_ID = '2292884000019602033'; // Job description table
+const CAMPAIGN_VIEW_ID  = '2292884000019602061'; // Campaign table → Department ids
+const DIVISIONS_VIEW_ID = '2292884000019604699'; // Divisions table (merged as fallback)
 
 // ── Pure mapping helpers (unit-tested) ──────────────────────────────────────
 
@@ -270,19 +272,25 @@ export function planProvisioning(rows, { domain, jobTitleMap = new Map(), depart
 export async function provisionFromEmployeeProfile({ preview = false, domain = 'boomerang.local', includeRoles = ['campaign_lead', 'tm', 'agent'], viewId = null, deptViewId = null } = {}) {
   const employeeViewId = viewId || process.env.ZOHO_EMPLOYEE_VIEW_ID || VIEW.employee;
   const jobTitleViewId = process.env.ZOHO_JOB_TITLE_VIEW_ID || JOB_TITLE_VIEW_ID;
-  const departmentViewId = deptViewId || process.env.ZOHO_DEPARTMENT_VIEW_ID || null;
+  const departmentViewId = deptViewId || process.env.ZOHO_DEPARTMENT_VIEW_ID || CAMPAIGN_VIEW_ID;
   const safeFetch = (id) => id ? fetchView(id).catch(err => {
     console.warn(`[provision] companion view ${id} fetch failed:`, err.message);
     return [];
   }) : Promise.resolve([]);
 
-  const [rows, jobTitleRows, departmentRows] = await Promise.all([
+  const [rows, jobTitleRows, departmentRows, divisionRows] = await Promise.all([
     fetchView(employeeViewId),
     safeFetch(jobTitleViewId),
     safeFetch(departmentViewId),
+    safeFetch(DIVISIONS_VIEW_ID),
   ]);
   const jobTitleMap = buildJobTitleMap(jobTitleRows);
+  // Department ids resolve against the Campaign table; merge Divisions in as a
+  // fallback for any employee whose Department points at a division instead.
   const departmentMap = buildDepartmentMap(departmentRows);
+  for (const [id, name] of buildDepartmentMap(divisionRows)) {
+    if (!departmentMap.has(id)) departmentMap.set(id, name);
+  }
   const { plan, skipped, cols, titlesResolved, titlesUnresolved } =
     planProvisioning(rows, { domain, jobTitleMap, departmentMap });
   const filtered = plan.filter(p => includeRoles.includes(p.role));
