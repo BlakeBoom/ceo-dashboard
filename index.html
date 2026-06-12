@@ -253,6 +253,8 @@ input:focus-visible,select:focus-visible{outline:none;border-color:var(--accent)
 .team-stat.red{border-left-color:var(--red-border)}
 .team-stat-lbl{font-size:9px;color:var(--text3);font-family:var(--mono);text-transform:uppercase;letter-spacing:0.4px}
 .team-stat-val{font-size:13px;font-weight:600;margin-top:1px;font-variant-numeric:tabular-nums}
+.team-stat.grey{border-left-color:var(--grey-border)}
+.eff-label{font-size:9px;font-weight:600;letter-spacing:.8px;text-transform:uppercase;color:var(--text3);font-family:var(--mono);margin:12px 0 6px}
 
 /* Agent table (drill-down level 3) */
 .agent-tbl-wrap{background:var(--card);border:1px solid var(--border-light);border-radius:12px;overflow:hidden;box-shadow:var(--shadow)}
@@ -2611,6 +2613,52 @@ function renderCampaignList(root) {
   });
 }
 
+// Efficiency / shrinkage KPIs shown identically at campaign and team level.
+// `sh` is the shrinkage bucket (may be null), `billableHrs` the period billable,
+// `reqHrs` the pro-rated required hours for slippage/fulfillment (may be null).
+// Returns { cells, has } where cells is .team-stat HTML for whichever metrics
+// we can actually compute from the available data.
+function efficiencyStats(sh, billableHrs, reqHrs) {
+  const out = [];
+  const cell = (lbl, valTxt, rag, title) =>
+    `<div class="team-stat ${rag}"${title?` title="${title}"`:''}><div class="team-stat-lbl">${lbl}</div><div class="team-stat-val">${valTxt}</div></div>`;
+  const band = (v, lo, hi) => v == null ? 'grey' : (v <= lo ? 'green' : v <= hi ? 'amber' : 'red');
+  if (sh && sh.shrinkage_total_pct != null) {
+    out.push(cell('Shrink', sh.shrinkage_total_pct.toFixed(1)+'%', band(sh.shrinkage_total_pct,25,35),
+      `Planned ${sh.shrinkage_planned_pct?.toFixed(1)}% · Unplanned ${sh.shrinkage_unplanned_pct?.toFixed(1)}%`));
+    if (sh.shrinkage_planned_pct != null)
+      out.push(cell('Planned', sh.shrinkage_planned_pct.toFixed(1)+'%', band(sh.shrinkage_planned_pct,20,25)));
+    if (sh.shrinkage_unplanned_pct != null)
+      out.push(cell('Unplanned', sh.shrinkage_unplanned_pct.toFixed(1)+'%', band(sh.shrinkage_unplanned_pct,12,18)));
+  }
+  if (sh && sh.utilization_pct != null) {
+    const u = sh.utilization_pct;
+    out.push(cell('Util', u.toFixed(0)+'%', u>=80?'green':u>=70?'amber':'red'));
+  }
+  // Realization = billable ÷ paid (payable). Needs both sides.
+  if (sh && sh.payable_mins > 0 && billableHrs != null) {
+    const real = (billableHrs / (sh.payable_mins / 60)) * 100;
+    out.push(cell('Realiz', real.toFixed(0)+'%', real>=85?'green':real>=75?'amber':'red', 'Billable ÷ Paid hours'));
+  }
+  // Slippage + Fulfillment from required hours.
+  if (reqHrs != null && reqHrs > 0 && billableHrs != null) {
+    const slip = ((reqHrs - billableHrs) / reqHrs) * 100;
+    const fulfil = (billableHrs / reqHrs) * 100;
+    out.push(cell('Slippage', slip.toFixed(1)+'%', slip<=5?'green':slip<=15?'amber':'red', `Required ${Math.round(reqHrs).toLocaleString()} hrs`));
+    out.push(cell('Fulfil', fulfil.toFixed(0)+'%', fulfil>=95?'green':fulfil>=85?'amber':'red'));
+  }
+  return { cells: out.join(''), has: out.length > 0 };
+}
+
+// Pro-rated required hours for a campaign in the selected period (for slippage).
+function reqHrsForCampaign(c, wk) {
+  const ar = rulesForPeriod(wk)?.[c];
+  if (!ar) return null;
+  const full = reqHrsForPeriod(ar);
+  const frac = periodElapsedFraction(wk, STATE.granularity);
+  return full * (frac < 1 ? frac : 1);
+}
+
 function campaignCardHtml(c, wk) {
   const m = STATE.campaignWeek[c][wk];
   const tgts = TARGETS[c] || {};
@@ -2643,6 +2691,8 @@ function campaignCardHtml(c, wk) {
   const shrinkChip = sh && sh.shrinkage_total_pct != null ?
     `<span class="camp-meta-chip" title="Planned ${sh.shrinkage_planned_pct?.toFixed(1)}% · Unplanned ${sh.shrinkage_unplanned_pct?.toFixed(1)}%" style="background:${sh.shrinkage_total_pct > 35 ? 'var(--red-bg)' : sh.shrinkage_total_pct > 25 ? 'var(--amber-bg)' : 'var(--green-bg)'};color:${sh.shrinkage_total_pct > 35 ? 'var(--red-text)' : sh.shrinkage_total_pct > 25 ? 'var(--amber-text)' : 'var(--green-text)'}">${sh.shrinkage_total_pct.toFixed(1)}% shrink</span>` : '';
 
+  const eff = efficiencyStats(sh, m.billable, reqHrsForCampaign(c, wk));
+
   return `
     <div class="camp-card ${hasTeams?'':'no-detail'}" data-camp="${c}">
       <div class="camp-head">
@@ -2654,6 +2704,7 @@ function campaignCardHtml(c, wk) {
         </div>
       </div>
       <div class="kpi-grid">${kpis}</div>
+      ${eff.has ? `<div class="eff-label">Efficiency</div><div class="team-stats">${eff.cells}</div>` : ''}
       <div class="spark-row">
         <span class="spark-lbl">Billable</span>
         <div class="spark">${spark}</div>
@@ -2681,42 +2732,26 @@ function renderTeamList(root) {
     const tgts = TARGETS[c] || {};
     const cfg = KPI_CONFIG[c] || [];
     const overall = overallRag(m, tgts, cfg);
-    // Pick 3-4 most important KPIs to show in compact view
-    const showKpis = cfg.filter(x => x[2] !== 'none').slice(0, 4);
 
+    // Same KPI set as the campaign card, so a drill-down is consistent (and
+    // billable is no longer rendered twice — it comes from cfg once).
     let stats = '';
-    for (const [k, lbl, dir] of showKpis) {
+    for (const [k, lbl, dir] of cfg) {
       const v = m[k], tg = tgts[k];
-      const r = rag(v, tg, dir);
+      const r = dir === 'none' ? 'grey' : rag(v, tg, dir);
       stats += `<div class="team-stat ${r}">
         <div class="team-stat-lbl">${lbl}</div>
         <div class="team-stat-val">${fmtVal(v, k)}</div>
       </div>`;
     }
-    // Always show billable + FTE
-    stats = `<div class="team-stat ${rag(m.billable, tgts.billable, 'higher')}">
-      <div class="team-stat-lbl">Billable</div>
-      <div class="team-stat-val">${Math.round(m.billable).toLocaleString()}</div>
-    </div>` + stats;
-
-    // Shrinkage + Utilization (if Attendance data available)
-    let shrinkStats = '';
+    // Efficiency / shrinkage KPIs (same helper the campaign card uses).
     const sh = STATE.shrinkageAvailable ? STATE.shrinkageTeamWeek?.[c + '||' + t]?.[wk] : null;
-    if (sh && sh.shrinkage_total_pct != null) {
-      const shrRag = sh.shrinkage_total_pct > 35 ? 'red' : sh.shrinkage_total_pct > 25 ? 'amber' : 'green';
-      shrinkStats += `<div class="team-stat ${shrRag}" title="Planned ${sh.shrinkage_planned_pct?.toFixed(1)}% · Unplanned ${sh.shrinkage_unplanned_pct?.toFixed(1)}%">
-        <div class="team-stat-lbl">Shrink</div>
-        <div class="team-stat-val">${sh.shrinkage_total_pct.toFixed(1)}%</div>
-      </div>`;
-    }
-    if (sh && sh.utilization_pct != null) {
-      const utlRag = sh.utilization_pct >= 75 ? 'green' : sh.utilization_pct >= 60 ? 'amber' : 'red';
-      shrinkStats += `<div class="team-stat ${utlRag}">
-        <div class="team-stat-lbl">Util</div>
-        <div class="team-stat-val">${sh.utilization_pct.toFixed(0)}%</div>
-      </div>`;
-    }
-    stats += shrinkStats;
+    // Targets are campaign-level; pro-rate required hours to the team by its
+    // share of campaign FTE so slippage/fulfillment are meaningful per team.
+    const campFte = STATE.campaignWeek[c]?.[wk]?.fte || 0;
+    const campReq = reqHrsForCampaign(c, wk);
+    const teamReq = (campReq != null && campFte > 0) ? campReq * (m.fte / campFte) : null;
+    stats += efficiencyStats(sh, m.billable, teamReq).cells;
 
     html += `
       <div class="team-card" data-team="${t}">
