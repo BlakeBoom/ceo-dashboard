@@ -28,8 +28,12 @@ router.post('/login', loginLimiter, async (req, res) => {
   const { email, password } = parsed.data;
 
   const { rows } = await query(
-    `SELECT id, email, password_hash, full_name, role, campaign_id, team_id, token_version, active
-       FROM users WHERE LOWER(email) = LOWER($1)`,
+    `SELECT u.id, u.email, u.password_hash, u.full_name, u.role, u.campaign_id, u.team_id,
+            u.token_version, u.active, c.name AS campaign_name, t.name AS team_name
+       FROM users u
+       LEFT JOIN campaigns c ON c.id = u.campaign_id
+       LEFT JOIN teams t     ON t.id = u.team_id
+      WHERE LOWER(u.email) = LOWER($1)`,
     [email]
   );
   const user = rows[0];
@@ -53,6 +57,7 @@ router.post('/login', loginLimiter, async (req, res) => {
     user: {
       id: user.id, email: user.email, name: user.full_name,
       role: user.role, campaign_id: user.campaign_id, team_id: user.team_id,
+      campaign_name: user.campaign_name, team_name: user.team_name,
     },
   });
 });
@@ -71,6 +76,8 @@ router.get('/me', authRequired, (req, res) => {
       role: req.user.role,
       campaign_id: req.user.campaign_id,
       team_id: req.user.team_id,
+      campaign_name: req.user.campaign_name,
+      team_name: req.user.team_name,
     },
   });
 });

@@ -46,6 +46,7 @@ const CAMPAIGN_BY_KEY = {
   beer52:            { name: 'Beer52',              slug: 'beer52' },
   thegoodlifesorted: { name: 'The Good Life Sorted', slug: 'thegoodlifesorted' },
   leadgen:           { name: 'LeadGen',             slug: 'leadgen' },
+  vetnique:          { name: 'Lintbells',           slug: 'lintbells' }, // old name for Lintbells
 };
 
 // Returns { name, slug } or null (internal/empty).

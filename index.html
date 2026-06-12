@@ -2888,7 +2888,11 @@ function renderUserChip() {
   const initials = (u.name || u.email || '?').split(/\s+/).map(s => s[0]).slice(0,2).join('').toUpperCase();
   $('userAvatar').textContent = initials;
   $('userName').textContent = u.name || u.email;
-  $('userRole').textContent = u.role.replace('_', ' ');
+  // Show the scope a non-admin is limited to (campaign / team) next to the role.
+  const scope = u.role === 'admin' ? '' :
+    u.role === 'tm' ? (u.team_name || u.campaign_name || '') :
+    (u.campaign_name || '');
+  $('userRole').textContent = u.role.replace('_', ' ') + (scope ? ` · ${scope}` : '');
   $('userChip').style.display = '';
 }
 

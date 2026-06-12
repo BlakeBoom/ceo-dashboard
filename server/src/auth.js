@@ -55,8 +55,13 @@ export async function authRequired(req, res, next) {
   }
 
   const { rows } = await query(
-    `SELECT id, email, full_name, role, campaign_id, team_id, token_version, active
-       FROM users WHERE id = $1`,
+    `SELECT u.id, u.email, u.full_name, u.role, u.campaign_id, u.team_id,
+            u.token_version, u.active,
+            c.slug AS campaign_slug, c.name AS campaign_name, t.name AS team_name
+       FROM users u
+       LEFT JOIN campaigns c ON c.id = u.campaign_id
+       LEFT JOIN teams t     ON t.id = u.team_id
+      WHERE u.id = $1`,
     [payload.sub]
   );
   const user = rows[0];
