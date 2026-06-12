@@ -1,8 +1,118 @@
 import { Router } from 'express';
+import { z } from 'zod';
 import { query } from '../db.js';
-import { scopeClause } from '../rbac.js';
+import { scopeClause, requireRole } from '../rbac.js';
 
 const router = Router();
+
+// ── Admin: rules management (per campaign × role level) ─────────────────────
+
+// Current rule for every active campaign at every level, for the Rules screen.
+router.get('/rules/all', requireRole('admin'), async (req, res) => {
+  const { rows } = await query(
+    `SELECT c.id AS campaign_id, c.slug, c.name, r.role_level, r.rule_json
+       FROM campaigns c
+       LEFT JOIN LATERAL (
+         SELECT DISTINCT ON (role_level) role_level, rule_json
+           FROM bonus_rules
+          WHERE campaign_id = c.id
+            AND effective_from <= CURRENT_DATE
+            AND (effective_to IS NULL OR effective_to >= CURRENT_DATE)
+          ORDER BY role_level, effective_from DESC
+       ) r ON TRUE
+      WHERE c.active = TRUE
+      ORDER BY c.name`
+  );
+  const byCampaign = new Map();
+  for (const r of rows) {
+    if (!byCampaign.has(r.campaign_id)) {
+      byCampaign.set(r.campaign_id, { campaign_id: r.campaign_id, slug: r.slug, name: r.name, rules: {} });
+    }
+    if (r.role_level) byCampaign.get(r.campaign_id).rules[r.role_level] = r.rule_json;
+  }
+  res.json({ campaigns: [...byCampaign.values()] });
+});
+
+const componentSchema = z.object({
+  key: z.enum(['sa', 'productivity', 'csat', 'qa']),
+  label: z.string().max(40).optional(),
+  type: z.enum(['callouts_le', 'value_ge', 'pct_ge']),
+  metric_column: z.string().max(60).optional(),
+  threshold: z.number(),
+  amount: z.number().min(0).max(1000000),
+});
+const ruleSchema = z.object({
+  campaign_id: z.number().int().positive(),
+  role_level: z.enum(['agent', 'tm', 'campaign_lead']),
+  rule_json: z.object({
+    components: z.array(componentSchema).max(8),
+    unplanned_statuses: z.array(z.string().max(60)).optional(),
+    kpi_min_components: z.number().int().min(0).max(8).optional(),
+  }),
+});
+
+// Upsert the open-ended current rule for (campaign, level).
+router.put('/rules', requireRole('admin'), async (req, res) => {
+  const parsed = ruleSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: 'invalid_input', detail: parsed.error.flatten() });
+  const { campaign_id, role_level, rule_json } = parsed.data;
+  const { rows } = await query(
+    `INSERT INTO bonus_rules (campaign_id, role_level, effective_from, effective_to, rule_json, created_by)
+     VALUES ($1, $2, '2026-01-01'::date, NULL, $3, $4)
+     ON CONFLICT (campaign_id, role_level, effective_from)
+     DO UPDATE SET rule_json = EXCLUDED.rule_json
+     RETURNING id`,
+    [campaign_id, role_level, rule_json, req.user.id]
+  );
+  await query(
+    `INSERT INTO audit_log (user_id, action, target_id, metadata)
+     VALUES ($1, 'bonus.rule_update', $2, $3)`,
+    [req.user.id, rows[0].id, { campaign_id, role_level }]
+  );
+  res.json({ ok: true, rule_id: rows[0].id });
+});
+
+// ── Admin: financial summary per campaign for a month, drillable ────────────
+router.get('/summary', requireRole('admin'), async (req, res) => {
+  const ym = /^\d{4}-\d{2}$/.test(req.query.year_month || '') ? req.query.year_month : null;
+  const { rows: monthRows } = await query(
+    `SELECT DISTINCT to_char(period_start, 'YYYY-MM') AS ym FROM bonus_periods ORDER BY ym DESC`
+  );
+  const months = monthRows.map(r => r.ym);
+  const month = ym || months[0] || null;
+  if (!month) return res.json({ months: [], month: null, campaigns: [] });
+
+  const { rows } = await query(
+    `SELECT c.id AS campaign_id, c.name, bp.id AS period_id, bp.locked,
+            u.role,
+            COUNT(ba.id)::int AS awarded,
+            COUNT(ba.id) FILTER (WHERE ba.qualified)::int AS qualified,
+            COALESCE(SUM(ba.final_bonus), 0)::numeric AS total
+       FROM bonus_periods bp
+       JOIN campaigns c ON c.id = bp.campaign_id
+       LEFT JOIN bonus_awards ba ON ba.period_id = bp.id
+       LEFT JOIN users u ON u.id = ba.user_id
+      WHERE to_char(bp.period_start, 'YYYY-MM') = $1
+      GROUP BY c.id, c.name, bp.id, bp.locked, u.role
+      ORDER BY c.name`,
+    [month]
+  );
+  const byCampaign = new Map();
+  for (const r of rows) {
+    if (!byCampaign.has(r.campaign_id)) {
+      byCampaign.set(r.campaign_id, {
+        campaign_id: r.campaign_id, name: r.name, period_id: r.period_id,
+        locked: r.locked, total: 0, levels: {},
+      });
+    }
+    const c = byCampaign.get(r.campaign_id);
+    if (r.role) {
+      c.levels[r.role] = { awarded: r.awarded, qualified: r.qualified, total: Number(r.total) };
+      c.total += Number(r.total);
+    }
+  }
+  res.json({ months, month, campaigns: [...byCampaign.values()] });
+});
 
 // List periods visible to the caller (scoped by campaign).
 router.get('/periods', async (req, res) => {

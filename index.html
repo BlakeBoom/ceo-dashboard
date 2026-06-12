@@ -387,6 +387,7 @@ input:focus-visible,select:focus-visible{outline:none;border-color:var(--accent)
         <button class="tab" data-view="campaigns" data-min-role="tm">Campaigns</button>
         <button class="tab" data-view="trends" data-min-role="tm">Trends</button>
         <button class="tab" data-view="bonus" data-min-role="agent">Bonus</button>
+        <button class="tab" data-view="rules" data-min-role="admin">Rules</button>
         <button class="tab" data-view="users" data-min-role="admin">Users</button>
       </div>
       <div class="gran-toggle" id="granNav">
@@ -439,6 +440,7 @@ input:focus-visible,select:focus-visible{outline:none;border-color:var(--accent)
   <div id="campaignsView" class="view"></div>
   <div id="trendsView" class="view"></div>
   <div id="bonusView" class="view"></div>
+  <div id="rulesView" class="view"></div>
   <div id="usersView" class="view"></div>
 
   <div class="footer" id="footer"></div>
@@ -1639,6 +1641,7 @@ function render() {
   else if (STATE.view === 'campaigns') renderCampaigns();
   else if (STATE.view === 'trends') renderTrends();
   else if (STATE.view === 'bonus') renderBonus();
+  else if (STATE.view === 'rules') renderRules();
   else if (STATE.view === 'users') renderUsers();
 }
 
@@ -1646,6 +1649,8 @@ function render() {
 const BONUS_STATE = {
   periods: [], selectedPeriodId: null,
   awards: [],
+  // Admin financial view: month history + per-campaign rollup, drillable.
+  months: [], month: null, summary: null, drill: null,
   loaded: false, loading: false, syncing: false, error: null,
 };
 
@@ -1676,8 +1681,9 @@ async function triggerBonusSync() {
   // Figure out which campaign to sync. Priority: selected period > user's
   // own campaign > first campaign the user can see (admin fallback).
   let campaignId = null;
+  if (BONUS_STATE.drill) campaignId = BONUS_STATE.drill.campaign_id;
   const p = BONUS_STATE.periods.find(x => x.id === BONUS_STATE.selectedPeriodId);
-  if (p) campaignId = p.campaign_id;
+  if (!campaignId && p) campaignId = p.campaign_id;
   if (!campaignId && AUTH.user?.campaign_id) campaignId = AUTH.user.campaign_id;
   if (!campaignId) {
     const cr = await apiFetch('/api/teams/campaigns');
@@ -1697,17 +1703,17 @@ async function triggerBonusSync() {
 
   BONUS_STATE.syncing = true; BONUS_STATE.error = null; renderBonus();
   const r = await apiFetch('/api/sync/now', {
-    method: 'POST', body: JSON.stringify({ campaign_id: campaignId }),
+    method: 'POST', body: JSON.stringify({ campaign_id: campaignId, year_month: BONUS_STATE.drill ? BONUS_STATE.month : undefined }),
   });
   BONUS_STATE.syncing = false;
   if (r.ok) {
     const out = await r.json();
     // Surface the sync result so first-run shows the auto-create numbers.
     if (out?.result?.skipped) {
-      BONUS_STATE.error = `Sync skipped: ${out.result.skipped}${out.result.workgroups ? ` (looked for workgroup ${JSON.stringify(out.result.workgroups)})` : ''}`;
+      BONUS_STATE.error = `Sync skipped: ${out.result.skipped}`;
     }
     // Period may not have existed before sync — reload periods too.
-    await loadBonusPeriods();
+    if (!BONUS_STATE.drill) await loadBonusPeriods();
     await loadBonusAwards();
   } else {
     const body = await r.text();
@@ -1719,14 +1725,102 @@ async function triggerBonusSync() {
 function fmtZAR(n) { return (n == null || n === 0) ? '—' : 'R' + Math.round(n).toLocaleString(); }
 function fmtPctBonus(p) { return p == null ? '—' : (p * 100).toFixed(0) + '%'; }
 
+// Admin: per-campaign financial rollup for a month.
+async function loadBonusSummary(month) {
+  BONUS_STATE.loading = true; renderBonus();
+  const r = await apiFetch(`/api/bonus/summary${month ? `?year_month=${month}` : ''}`);
+  if (r.ok) {
+    const data = await r.json();
+    BONUS_STATE.summary = data.campaigns;
+    BONUS_STATE.months = data.months;
+    BONUS_STATE.month = data.month;
+    BONUS_STATE.error = null;
+  } else {
+    BONUS_STATE.error = `Could not load summary (${r.status})`;
+  }
+  BONUS_STATE.loading = false; renderBonus();
+}
+
+async function triggerSyncAll() {
+  BONUS_STATE.syncing = true; BONUS_STATE.error = null; renderBonus();
+  const r = await apiFetch('/api/sync/now', {
+    method: 'POST',
+    body: JSON.stringify({ all: true, year_month: BONUS_STATE.month || undefined }),
+  });
+  BONUS_STATE.syncing = false;
+  if (r.ok) await loadBonusSummary(BONUS_STATE.month);
+  else {
+    BONUS_STATE.error = `Sync failed (${r.status}): ${(await r.text()).slice(0, 300)}`;
+    renderBonus();
+  }
+}
+
+const _lvlLabel = { agent: 'Agents', tm: 'Team Leaders', campaign_lead: 'Campaign Mgr' };
+
+function renderBonusSummary() {
+  const s = BONUS_STATE.summary || [];
+  const grand = s.reduce((a, c) => a + c.total, 0);
+  const monthOpts = BONUS_STATE.months.map(m =>
+    `<option value="${m}"${m === BONUS_STATE.month ? ' selected' : ''}>${m}</option>`).join('');
+  const lvlCell = (c, lvl) => {
+    const v = c.levels[lvl];
+    if (!v || !v.awarded) return '<td class="numeric dim">—</td>';
+    return `<td class="numeric">${fmtZAR(v.total)} <span class="dim">(${v.qualified}/${v.awarded})</span></td>`;
+  };
+  const rows = s.map(c => `
+    <tr class="camp-row" data-cid="${c.campaign_id}" data-pid="${c.period_id}" style="cursor:pointer">
+      <td class="name">${c.name}${c.locked ? ' 🔒' : ''}</td>
+      ${lvlCell(c, 'agent')}${lvlCell(c, 'tm')}${lvlCell(c, 'campaign_lead')}
+      <td class="numeric"><b style="color:${c.total > 0 ? 'var(--green-text)' : 'var(--text3)'}">${fmtZAR(c.total)}</b></td>
+      <td class="numeric dim">→</td>
+    </tr>`).join('');
+
+  $('bonusView').innerHTML = `
+    <div class="agent-tbl-head" style="background:var(--card);border:1px solid var(--border-light);border-radius:12px 12px 0 0;border-bottom:none">
+      <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;flex:1">
+        <select id="bonusMonthSelect" class="modal-month" style="font-size:13px;padding:7px 10px">${monthOpts || '<option>No periods yet</option>'}</select>
+        <div class="agent-tbl-sub">Payouts to date · ${s.length} campaign${s.length===1?'':'s'} · grand total ${fmtZAR(grand)}</div>
+      </div>
+      <button id="bonusSyncAllBtn" class="btn-primary" ${BONUS_STATE.syncing ? 'disabled' : ''}>${BONUS_STATE.syncing ? 'Syncing all…' : '↻ Sync all campaigns'}</button>
+    </div>
+    ${BONUS_STATE.error ? `<div class="err-banner show" style="margin-top:8px">${BONUS_STATE.error}</div>` : ''}
+    ${BONUS_STATE.loading ? '<div class="loading"><div class="spinner"></div><div>Loading…</div></div>' :
+      `<div class="agent-tbl-wrap" style="border-radius:0 0 12px 12px;border-top:none">
+        <table class="agent-tbl">
+          <thead><tr>
+            <th>Campaign</th>
+            <th class="numeric">Agents (qual/awarded)</th>
+            <th class="numeric">Team Leaders</th>
+            <th class="numeric">Campaign Mgr</th>
+            <th class="numeric">Total</th><th></th>
+          </tr></thead>
+          <tbody>${rows || `<tr><td colspan="6" class="flag-empty" style="padding:24px">No bonus data for ${BONUS_STATE.month || 'this month'} yet. Set rules in the <b>Rules</b> tab, then click <b>Sync all campaigns</b>.</td></tr>`}</tbody>
+        </table>
+      </div>`}
+  `;
+  $('bonusMonthSelect')?.addEventListener('change', (e) => loadBonusSummary(e.target.value));
+  $('bonusSyncAllBtn')?.addEventListener('click', triggerSyncAll);
+  $('bonusView').querySelectorAll('.camp-row').forEach(tr => tr.onclick = () => {
+    const c = (BONUS_STATE.summary || []).find(x => x.campaign_id === parseInt(tr.dataset.cid, 10));
+    BONUS_STATE.drill = c || null;
+    BONUS_STATE.selectedPeriodId = parseInt(tr.dataset.pid, 10);
+    loadBonusAwards();
+  });
+}
+
 function renderBonus() {
   const u = AUTH.user;
   if (!u) { $('bonusView').innerHTML = ''; return; }
 
   if (!BONUS_STATE.loaded) {
     BONUS_STATE.loaded = true;
+    if (u.role === 'admin') { loadBonusSummary(); return; }
     loadBonusPeriods().then(loadBonusAwards);
   }
+
+  // Admin lands on the financial rollup; drilling into a campaign reuses the
+  // grouped team/agent detail below.
+  if (u.role === 'admin' && !BONUS_STATE.drill) { renderBonusSummary(); return; }
 
   const canSync = ROLE_RANK[u.role] >= ROLE_RANK.tm;
   const periodOpts = BONUS_STATE.periods.map(p => {
@@ -1779,7 +1873,10 @@ function renderBonus() {
   $('bonusView').innerHTML = `
     <div class="agent-tbl-head" style="background:var(--card);border:1px solid var(--border-light);border-radius:12px 12px 0 0;border-bottom:none">
       <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;flex:1">
-        <select id="bonusPeriodSelect" class="modal-month" style="font-size:13px;padding:7px 10px">${periodOpts || '<option>No periods yet</option>'}</select>
+        ${BONUS_STATE.drill
+          ? `<button id="bonusBackBtn" class="btn-ghost">← All campaigns</button>
+             <div style="font-weight:600">${BONUS_STATE.drill.name} <span class="dim">· ${BONUS_STATE.month || ''}</span></div>`
+          : `<select id="bonusPeriodSelect" class="modal-month" style="font-size:13px;padding:7px 10px">${periodOpts || '<option>No periods yet</option>'}</select>`}
         <div class="agent-tbl-sub">${BONUS_STATE.awards.length} agent${BONUS_STATE.awards.length===1?'':'s'} · total payout ${fmtZAR(total)}</div>
       </div>
       ${canSync ? `<button id="bonusSyncBtn" class="btn-primary" ${BONUS_STATE.syncing ? 'disabled' : ''}>${BONUS_STATE.syncing ? 'Syncing…' : '↻ Refresh from Zoho'}</button>` : ''}
@@ -1815,7 +1912,127 @@ function renderBonus() {
     BONUS_STATE.selectedPeriodId = parseInt(e.target.value, 10);
     loadBonusAwards();
   });
+  $('bonusBackBtn')?.addEventListener('click', () => {
+    BONUS_STATE.drill = null;
+    loadBonusSummary(BONUS_STATE.month);
+  });
   $('bonusSyncBtn')?.addEventListener('click', triggerBonusSync);
+}
+
+// ─── Rules view (admin only) ─────────────────────────────────────
+// Admin sets KPI bonus rules per campaign at three levels. Agents are scored
+// on their own monthly metrics; team leaders on their team's aggregates
+// (productivity/CSAT/QA averaged per agent, callouts totalled); campaign
+// managers on the whole campaign's aggregates. A component with a blank or
+// zero Rand amount is disabled.
+const RULES_STATE = { loaded: false, loading: false, campaigns: [], error: null, savedMsg: null };
+
+async function loadRules() {
+  RULES_STATE.loading = true; renderRules();
+  const r = await apiFetch('/api/bonus/rules/all');
+  if (r.ok) {
+    RULES_STATE.campaigns = (await r.json()).campaigns;
+    RULES_STATE.error = null;
+  } else {
+    RULES_STATE.error = `Could not load rules (${r.status})`;
+  }
+  RULES_STATE.loading = false; renderRules();
+}
+
+function ruleToForm(rule) {
+  const comp = (k) => (rule?.components || []).find(c => c.key === k);
+  const sa = comp('sa'), pr = comp('productivity'), cs = comp('csat'), qa = comp('qa');
+  return {
+    sa_th: sa?.threshold ?? 0,            sa_amt: sa?.amount ?? '',
+    pr_col: pr?.metric_column ?? 'tickets', pr_th: pr?.threshold ?? '', pr_amt: pr?.amount ?? '',
+    cs_th: cs != null ? Math.round(cs.threshold * 100) : 90, cs_amt: cs?.amount ?? '',
+    qa_th: qa != null ? Math.round(qa.threshold * 100) : 90, qa_amt: qa?.amount ?? '',
+  };
+}
+
+function formToRule(f) {
+  const components = [];
+  if (+f.sa_amt > 0) components.push({ key: 'sa', label: 'S&A', type: 'callouts_le', threshold: +f.sa_th || 0, amount: +f.sa_amt });
+  if (+f.pr_amt > 0 && f.pr_th !== '') components.push({ key: 'productivity', label: 'Productivity', type: 'value_ge', metric_column: f.pr_col || 'tickets', threshold: +f.pr_th, amount: +f.pr_amt });
+  if (+f.cs_amt > 0) components.push({ key: 'csat', label: 'CSAT', type: 'pct_ge', threshold: (+f.cs_th || 0) / 100, amount: +f.cs_amt });
+  if (+f.qa_amt > 0) components.push({ key: 'qa', label: 'QA', type: 'pct_ge', threshold: (+f.qa_th || 0) / 100, amount: +f.qa_amt });
+  return { components, kpi_min_components: 0 };
+}
+
+async function saveRule(campaignId, level, rowEl) {
+  const get = (n) => rowEl.querySelector(`[data-f="${n}"]`)?.value?.trim() ?? '';
+  const rule = formToRule({
+    sa_th: get('sa_th'), sa_amt: get('sa_amt'),
+    pr_col: get('pr_col'), pr_th: get('pr_th'), pr_amt: get('pr_amt'),
+    cs_th: get('cs_th'), cs_amt: get('cs_amt'),
+    qa_th: get('qa_th'), qa_amt: get('qa_amt'),
+  });
+  const r = await apiFetch('/api/bonus/rules', {
+    method: 'PUT',
+    body: JSON.stringify({ campaign_id: campaignId, role_level: level, rule_json: rule }),
+  });
+  RULES_STATE.savedMsg = r.ok
+    ? `Saved ${_lvlLabel[level]} rule (${rule.components.length} component${rule.components.length===1?'':'s'}). Run a sync to recalculate.`
+    : `Save failed (${r.status})`;
+  await loadRules();
+}
+
+function renderRules() {
+  const u = AUTH.user;
+  if (!u || u.role !== 'admin') { $('rulesView').innerHTML = '<div class="flag-empty" style="padding:32px">Admins only.</div>'; return; }
+  if (!RULES_STATE.loaded) { RULES_STATE.loaded = true; loadRules(); }
+
+  const inp = (f, val, w, ph) =>
+    `<input data-f="${f}" value="${val ?? ''}" placeholder="${ph || ''}" class="mono" style="width:${w}px;font-size:11px;padding:5px 7px;border:1px solid var(--border-light);border-radius:6px;background:var(--bg-2);color:var(--text);text-align:right">`;
+
+  const levelRow = (c, level) => {
+    const f = ruleToForm(c.rules[level]);
+    const has = !!c.rules[level];
+    return `<tr data-cid="${c.campaign_id}" data-level="${level}">
+      <td class="name" style="white-space:nowrap">${_lvlLabel[level]}${has ? '' : ' <span class="chip warn">no rule</span>'}</td>
+      <td class="numeric">${inp('sa_th', f.sa_th, 46, '0')} ${inp('sa_amt', f.sa_amt, 64, 'R')}</td>
+      <td class="numeric">${inp('pr_col', f.pr_col, 76, 'column')} ${inp('pr_th', f.pr_th, 64, '≥')} ${inp('pr_amt', f.pr_amt, 64, 'R')}</td>
+      <td class="numeric">${inp('cs_th', f.cs_th, 46, '%')} ${inp('cs_amt', f.cs_amt, 64, 'R')}</td>
+      <td class="numeric">${inp('qa_th', f.qa_th, 46, '%')} ${inp('qa_amt', f.qa_amt, 64, 'R')}</td>
+      <td class="numeric"><button class="row-btn rule-save">Save</button></td>
+    </tr>`;
+  };
+
+  const cards = RULES_STATE.campaigns.map(c => `
+    <div class="agent-tbl-wrap" style="margin-bottom:14px">
+      <div class="agent-tbl-head"><div class="agent-tbl-title">${c.name}</div>
+        <div class="agent-tbl-sub">${Object.keys(c.rules).length} rule level${Object.keys(c.rules).length===1?'':'s'} set</div></div>
+      <table class="agent-tbl">
+        <thead><tr>
+          <th>Level</th>
+          <th class="numeric">S&amp;A · max callouts / payout</th>
+          <th class="numeric">Productivity · column / ≥ / payout</th>
+          <th class="numeric">CSAT · ≥% / payout</th>
+          <th class="numeric">QA · ≥% / payout</th>
+          <th></th>
+        </tr></thead>
+        <tbody>${levelRow(c, 'agent')}${levelRow(c, 'tm')}${levelRow(c, 'campaign_lead')}</tbody>
+      </table>
+    </div>`).join('');
+
+  $('rulesView').innerHTML = `
+    <div class="users-panel" style="margin-bottom:14px;margin-top:0">
+      <div class="users-panel-h">KPI bonus rules</div>
+      <div class="agent-tbl-sub" style="text-transform:none;letter-spacing:0;font-family:inherit;font-size:12px;line-height:1.6">
+        Set a Rand payout per component to enable it; blank or 0 disables it. Agents score on their own monthly
+        metrics. <b>Team Leaders</b> score on their team's aggregates and <b>Campaign Managers</b> on the campaign's
+        (productivity, CSAT and QA averaged per agent; callouts totalled — set thresholds accordingly).
+        After saving, run a sync from the Bonus tab to recalculate.
+      </div>
+      ${RULES_STATE.savedMsg ? `<div class="chip ok" style="margin-top:8px">${RULES_STATE.savedMsg}</div>` : ''}
+      ${RULES_STATE.error ? `<div class="err-banner show" style="margin-top:8px">${RULES_STATE.error}</div>` : ''}
+    </div>
+    ${RULES_STATE.loading ? '<div class="loading"><div class="spinner"></div><div>Loading rules…</div></div>' : cards}
+  `;
+  $('rulesView').querySelectorAll('.rule-save').forEach(btn => btn.onclick = () => {
+    const tr = btn.closest('tr');
+    saveRule(parseInt(tr.dataset.cid, 10), tr.dataset.level, tr);
+  });
 }
 
 // ─── Users view (admin only) ─────────────────────────────────────

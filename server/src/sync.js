@@ -15,40 +15,42 @@
 import { query, withTx } from './db.js';
 import { fetchView, fetchViewByDate, VIEW, monthBounds } from './zoho.js';
 import { aggregateUserMetrics, aggregateCallouts, buildEmployeeUserMap, applyRule } from './bonus.js';
+import { canonicalCampaign } from './provision.js';
 
-// Campaign slug → list of Zoho "workgroup" values to include. Mirrors the
-// existing dashboard's WG_MAP. Add new campaigns here as they're rolled out.
-const CAMPAIGN_WORKGROUPS = {
-  'medexpress':        ['MedExpress'],
-  'picknpay':          ['PICKnPAY'],
-  'butternutbox':      ['BBOX', 'Butternut Box'],
-  'pinter':            ['Pinter'],
-  'boomerang-internal': [],
-};
+// A metrics row belongs to a campaign when its workgroup canonicalises to the
+// campaign's slug (same matching the analytics proxy uses), so every campaign
+// works without maintaining a hardcoded workgroup list per slug.
+function rowMatchesCampaign(row, slug) {
+  const c = canonicalCampaign(row.workgroup);
+  return !!c && c.slug === slug;
+}
 
 export function currentYearMonth() {
   const d = new Date();
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
 }
 
-export async function syncCampaign(campaignId, yearMonth = currentYearMonth()) {
-  // 1. Get campaign slug + active rule_json
+// `prefetched` lets syncAll fetch the Zoho views once and reuse them across
+// campaigns (per-campaign fetching blows the lambda budget at 13+ campaigns).
+export async function syncCampaign(campaignId, yearMonth = currentYearMonth(), prefetched = null) {
+  // 1. Get campaign slug + the active rule per role level. The agent rule is
+  // required; team-leader / campaign-manager rules are optional add-ons.
   const { rows: campRows } = await query(`SELECT slug FROM campaigns WHERE id = $1`, [campaignId]);
   if (!campRows.length) return { campaign_id: campaignId, error: 'campaign_not_found' };
   const slug = campRows[0].slug;
-  const validWorkgroups = CAMPAIGN_WORKGROUPS[slug] || [];
 
   const { rows: ruleRows } = await query(
-    `SELECT id, rule_json FROM bonus_rules
+    `SELECT DISTINCT ON (role_level) id, rule_json, role_level FROM bonus_rules
       WHERE campaign_id = $1
         AND effective_from <= $2::date
         AND (effective_to IS NULL OR effective_to >= $2::date)
-      ORDER BY effective_from DESC LIMIT 1`,
+      ORDER BY role_level, effective_from DESC`,
     [campaignId, `${yearMonth}-01`]
   );
-  if (!ruleRows.length) return { campaign_id: campaignId, skipped: 'no_active_rule' };
-  const ruleId = ruleRows[0].id;
-  const rule = ruleRows[0].rule_json;
+  const ruleByLevel = Object.fromEntries(ruleRows.map(r => [r.role_level, r]));
+  if (!ruleByLevel.agent) return { campaign_id: campaignId, skipped: 'no_active_rule' };
+  const ruleId = ruleByLevel.agent.id;
+  const rule = ruleByLevel.agent.rule_json;
 
   // 2. Ensure bonus_period row exists
   const { start, end } = monthBounds(yearMonth);
@@ -66,19 +68,19 @@ export async function syncCampaign(campaignId, yearMonth = currentYearMonth()) {
   // differs per view (User_metrics_3's isn't named "Date"), so fetchViewByDate
   // probes for it. Filtering server-side keeps payloads to a single month —
   // fetching the full view history times out the lambda.
-  const [umRowsRaw, attRows, empRows] = await Promise.all([
-    fetchViewByDate(VIEW.userMetrics, start, end),
-    fetchViewByDate(VIEW.attendance,  start, end),
-    fetchView(VIEW.employee),
-  ]);
+  const [umRowsRaw, attRows, empRows] = prefetched
+    ? [prefetched.umRowsRaw, prefetched.attRows, prefetched.empRows]
+    : await Promise.all([
+        fetchViewByDate(VIEW.userMetrics, start, end),
+        fetchViewByDate(VIEW.attendance,  start, end),
+        fetchView(VIEW.employee),
+      ]);
 
-  // 4. Filter to this campaign's workgroups. Empty list = no rows.
-  const umRows = validWorkgroups.length
-    ? umRowsRaw.filter(r => validWorkgroups.includes(r.workgroup))
-    : [];
+  // 4. Filter to this campaign's rows by canonical workgroup.
+  const umRows = umRowsRaw.filter(r => rowMatchesCampaign(r, slug));
 
   if (umRows.length === 0) {
-    return { campaign_id: campaignId, period_id: period.id, skipped: 'no_matching_workgroup_rows', workgroups: validWorkgroups };
+    return { campaign_id: campaignId, period_id: period.id, skipped: 'no_matching_workgroup_rows', slug };
   }
 
   // 5. Aggregate
@@ -202,6 +204,88 @@ export async function syncCampaign(campaignId, yearMonth = currentYearMonth()) {
       );
       updated++;
     }
+
+    // 6d. Leader-level awards. Team leaders are scored on their team's
+    // aggregates, campaign managers on the whole campaign's:
+    //   productivity → average per agent, csat/qa → average of agents with a
+    //   value, callouts → total. Thresholds in tm/campaign_lead rules should
+    //   be set with those semantics in mind.
+    const statsFor = (uids) => {
+      const s = { prodSum: 0, prodN: 0, csatSum: 0, csatN: 0, qaSum: 0, qaN: 0, callouts: 0 };
+      for (const uid of uids) {
+        const m = metricsByUser.get(uid);
+        if (!m) continue;
+        if (m.productivity != null) { s.prodSum += m.productivity; s.prodN++; }
+        if (m.csat_pct != null) { s.csatSum += m.csat_pct; s.csatN++; }
+        if (m.qa_pct != null) { s.qaSum += m.qa_pct; s.qaN++; }
+        const empId = userToEmp.get(uid);
+        s.callouts += empId ? (calloutsByEmp.get(empId) || 0) : 0;
+      }
+      if (!s.prodN && !s.csatN && !s.qaN) return null;
+      return {
+        productivity: s.prodN ? Math.round((s.prodSum / s.prodN) * 100) / 100 : 0,
+        csat_pct: s.csatN ? s.csatSum / s.csatN : null,
+        qa_pct:   s.qaN   ? s.qaSum   / s.qaN   : null,
+        callouts: s.callouts,
+        attendance_days: null,
+      };
+    };
+
+    const upsertLeaderAward = async (userId, metricsRow, levelRule) => {
+      await client.query(
+        `INSERT INTO bonus_metrics (period_id, user_id, attendance_days, productivity, csat_pct, qa_pct, callouts, raw)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         ON CONFLICT (period_id, user_id) DO UPDATE SET
+           productivity = EXCLUDED.productivity, csat_pct = EXCLUDED.csat_pct,
+           qa_pct = EXCLUDED.qa_pct, callouts = EXCLUDED.callouts,
+           raw = EXCLUDED.raw, synced_at = NOW()`,
+        [period.id, userId, null, metricsRow.productivity, metricsRow.csat_pct,
+         metricsRow.qa_pct, metricsRow.callouts, { aggregated: true }]
+      );
+      const award = applyRule(metricsRow, levelRule.rule_json);
+      await client.query(
+        `INSERT INTO bonus_awards (period_id, user_id, rule_id, components, kpi_bonus, final_bonus, qualified)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         ON CONFLICT (period_id, user_id) DO UPDATE SET
+           rule_id = EXCLUDED.rule_id, components = EXCLUDED.components,
+           kpi_bonus = EXCLUDED.kpi_bonus, final_bonus = EXCLUDED.final_bonus,
+           qualified = EXCLUDED.qualified, calculated_at = NOW()`,
+        [period.id, userId, levelRule.id, award.components, award.kpi_bonus, award.final_bonus, award.qualified]
+      );
+      updated++;
+    };
+
+    if (ruleByLevel.tm) {
+      // Group agent uids by their dominant team's id.
+      const uidsByTeamId = new Map();
+      for (const [uid] of metricsByUser) {
+        const teamId = teamIdByName.get(dominantTeam(uid));
+        if (teamId == null) continue;
+        if (!uidsByTeamId.has(teamId)) uidsByTeamId.set(teamId, []);
+        uidsByTeamId.get(teamId).push(uid);
+      }
+      const { rows: tls } = await client.query(
+        `SELECT id, team_id FROM users
+          WHERE campaign_id = $1 AND role = 'tm' AND active = TRUE AND team_id IS NOT NULL`,
+        [campaignId]
+      );
+      for (const tl of tls) {
+        const stats = statsFor(uidsByTeamId.get(tl.team_id) || []);
+        if (stats) await upsertLeaderAward(tl.id, stats, ruleByLevel.tm);
+      }
+    }
+
+    if (ruleByLevel.campaign_lead) {
+      const campaignStats = statsFor([...metricsByUser.keys()]);
+      if (campaignStats) {
+        const { rows: cms } = await client.query(
+          `SELECT id FROM users
+            WHERE campaign_id = $1 AND role = 'campaign_lead' AND active = TRUE`,
+          [campaignId]
+        );
+        for (const cm of cms) await upsertLeaderAward(cm.id, campaignStats, ruleByLevel.campaign_lead);
+      }
+    }
   });
 
   return {
@@ -219,10 +303,22 @@ export async function syncAll(yearMonth = currentYearMonth()) {
         AND (effective_to IS NULL OR effective_to >= $1::date)`,
     [`${yearMonth}-01`]
   );
+  if (!rows.length) return [];
+
+  // Fetch the three Zoho views ONCE and share them across campaigns —
+  // per-campaign fetching is ~3 calls × N campaigns and blows the 60s budget.
+  const { start, end } = monthBounds(yearMonth);
+  const [umRowsRaw, attRows, empRows] = await Promise.all([
+    fetchViewByDate(VIEW.userMetrics, start, end),
+    fetchViewByDate(VIEW.attendance,  start, end),
+    fetchView(VIEW.employee),
+  ]);
+  const prefetched = { umRowsRaw, attRows, empRows };
+
   const results = [];
   for (const r of rows) {
     try {
-      results.push(await syncCampaign(r.campaign_id, yearMonth));
+      results.push(await syncCampaign(r.campaign_id, yearMonth, prefetched));
     } catch (err) {
       results.push({ campaign_id: r.campaign_id, error: err.message });
     }
