@@ -29,7 +29,8 @@ router.post('/login', loginLimiter, async (req, res) => {
 
   const { rows } = await query(
     `SELECT u.id, u.email, u.password_hash, u.full_name, u.role, u.campaign_id, u.team_id,
-            u.token_version, u.active, c.name AS campaign_name, t.name AS team_name
+            u.token_version, u.active, u.must_change_password,
+            c.name AS campaign_name, t.name AS team_name
        FROM users u
        LEFT JOIN campaigns c ON c.id = u.campaign_id
        LEFT JOIN teams t     ON t.id = u.team_id
@@ -58,6 +59,7 @@ router.post('/login', loginLimiter, async (req, res) => {
       id: user.id, email: user.email, name: user.full_name,
       role: user.role, campaign_id: user.campaign_id, team_id: user.team_id,
       campaign_name: user.campaign_name, team_name: user.team_name,
+      must_change_password: user.must_change_password === true,
     },
   });
 });
@@ -78,6 +80,7 @@ router.get('/me', authRequired, (req, res) => {
       team_id: req.user.team_id,
       campaign_name: req.user.campaign_name,
       team_name: req.user.team_name,
+      must_change_password: req.user.must_change_password === true,
     },
   });
 });
@@ -97,7 +100,8 @@ router.post('/change-password', authRequired, async (req, res) => {
 
   const newHash = await hashPassword(parsed.data.new_password);
   await query(
-    `UPDATE users SET password_hash = $1, token_version = token_version + 1, updated_at = NOW() WHERE id = $2`,
+    `UPDATE users SET password_hash = $1, must_change_password = FALSE,
+            token_version = token_version + 1, updated_at = NOW() WHERE id = $2`,
     [newHash, req.user.id]
   );
   clearSessionCookie(res);

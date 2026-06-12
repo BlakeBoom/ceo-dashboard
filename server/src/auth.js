@@ -56,7 +56,7 @@ export async function authRequired(req, res, next) {
 
   const { rows } = await query(
     `SELECT u.id, u.email, u.full_name, u.role, u.campaign_id, u.team_id,
-            u.token_version, u.active,
+            u.token_version, u.active, u.must_change_password,
             c.slug AS campaign_slug, c.name AS campaign_name, t.name AS team_name
        FROM users u
        LEFT JOIN campaigns c ON c.id = u.campaign_id

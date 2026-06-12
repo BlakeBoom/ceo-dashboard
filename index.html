@@ -371,6 +371,24 @@ input:focus-visible,select:focus-visible{outline:none;border-color:var(--accent)
     </div>
     <button type="submit" class="auth-submit" id="loginBtn">Sign in</button>
   </form>
+  <form class="auth-card" id="pwChangeForm" style="display:none" autocomplete="off">
+    <h2>Set your password</h2>
+    <div class="auth-sub">Your temporary password must be replaced</div>
+    <div class="auth-err" id="pwChangeErr"></div>
+    <div class="auth-field">
+      <label for="pwCurrent">Temporary password</label>
+      <input id="pwCurrent" type="password" autocomplete="current-password" required>
+    </div>
+    <div class="auth-field">
+      <label for="pwNew">New password (min 10 characters)</label>
+      <input id="pwNew" type="password" autocomplete="new-password" minlength="10" required>
+    </div>
+    <div class="auth-field">
+      <label for="pwNew2">Confirm new password</label>
+      <input id="pwNew2" type="password" autocomplete="new-password" minlength="10" required>
+    </div>
+    <button type="submit" class="auth-submit" id="pwChangeBtn">Save password</button>
+  </form>
 </div>
 
 <div class="refresh-bar" id="refreshBar"></div>
@@ -3102,10 +3120,53 @@ async function apiFetch(path, opts = {}) {
 function showLoginGate(errMsg) {
   $('appShell').classList.add('pre-auth');
   $('authGate').style.display = 'flex';
+  $('loginForm').style.display = '';
+  $('pwChangeForm').style.display = 'none';
   const errEl = $('loginErr');
   if (errMsg) { errEl.textContent = errMsg; errEl.classList.add('show'); }
   else { errEl.classList.remove('show'); errEl.textContent = ''; }
   setTimeout(() => $('loginEmail')?.focus(), 30);
+}
+
+// First-login gate for accounts still on a generated temp password. The API
+// refuses everything but auth routes until the password is replaced.
+function showPwChangeGate() {
+  $('appShell').classList.add('pre-auth');
+  $('authGate').style.display = 'flex';
+  $('loginForm').style.display = 'none';
+  $('pwChangeForm').style.display = '';
+  setTimeout(() => $('pwCurrent')?.focus(), 30);
+}
+
+function wirePwChangeForm() {
+  $('pwChangeForm').onsubmit = async (e) => {
+    e.preventDefault();
+    const errEl = $('pwChangeErr');
+    errEl.classList.remove('show');
+    if ($('pwNew').value !== $('pwNew2').value) {
+      errEl.textContent = 'New passwords do not match.'; errEl.classList.add('show'); return;
+    }
+    const btn = $('pwChangeBtn');
+    btn.disabled = true; btn.textContent = 'Saving…';
+    try {
+      const r = await apiFetch('/api/auth/change-password', {
+        method: 'POST',
+        body: JSON.stringify({ current_password: $('pwCurrent').value, new_password: $('pwNew').value }),
+      });
+      if (r.ok) {
+        AUTH.user = null;
+        showLoginGate('Password updated — sign in with your new password.');
+      } else if (r.status === 401) {
+        errEl.textContent = 'Temporary password is incorrect.'; errEl.classList.add('show');
+      } else {
+        errEl.textContent = 'Could not save — use at least 10 characters.'; errEl.classList.add('show');
+      }
+    } catch {
+      errEl.textContent = 'Network error — try again.'; errEl.classList.add('show');
+    } finally {
+      btn.disabled = false; btn.textContent = 'Save password';
+    }
+  };
 }
 
 function hideLoginGate() {
@@ -3192,6 +3253,7 @@ function wireLoginForm() {
       } else {
         const { user } = await r.json();
         AUTH.user = user;
+        if (user.must_change_password) { showPwChangeGate(); return; }
         hideLoginGate();
         renderUserChip();
         applyRoleVisibility();
@@ -3208,12 +3270,14 @@ function wireLoginForm() {
 
 async function bootstrap() {
   wireLoginForm();
+  wirePwChangeForm();
   wireUserMenu();
   try {
     const r = await apiFetch('/api/auth/me');
     if (r.ok) {
       const { user } = await r.json();
       AUTH.user = user;
+      if (user.must_change_password) { showPwChangeGate(); return; }
       hideLoginGate();
       renderUserChip();
       applyRoleVisibility();

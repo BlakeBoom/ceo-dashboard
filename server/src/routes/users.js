@@ -113,7 +113,8 @@ router.post('/:id/reset-password', requireRole('admin'), async (req, res) => {
   if (!Number.isFinite(id) || !parsed.success) return res.status(400).json({ error: 'invalid_input' });
   const newHash = await hashPassword(parsed.data.new_password);
   await query(
-    `UPDATE users SET password_hash = $1, token_version = token_version + 1, updated_at = NOW() WHERE id = $2`,
+    `UPDATE users SET password_hash = $1, must_change_password = TRUE,
+            token_version = token_version + 1, updated_at = NOW() WHERE id = $2`,
     [newHash, id]
   );
   await query(

@@ -51,6 +51,16 @@ app.use('/api/auth', authRoutes);
 
 // All other /api routes require a valid session.
 app.use('/api', authRequired);
+
+// Accounts created with a generated temp password must set their own before
+// using the app (the low-cost temp hash is only safe because it's short-lived).
+// /api/auth/* stays reachable (mounted above), so change-password works.
+app.use('/api', (req, res, next) => {
+  if (req.user?.must_change_password) {
+    return res.status(403).json({ error: 'password_change_required' });
+  }
+  next();
+});
 app.use('/api/users', userRoutes);
 app.use('/api/teams', teamRoutes);
 app.use('/api/bonus', bonusRoutes);
