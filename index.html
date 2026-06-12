@@ -1868,13 +1868,18 @@ function renderUsers() {
 
   const pv = USERS_STATE.preview;
   const pvDiag = pv?.diagnostics;
-  const diagPanel = (pv && pv.summary.planned === 0 && pvDiag) ? `
+  // Show diagnostics when nothing matched OR when role mapping looks broken
+  // (a real roster always contains team leaders / campaign managers).
+  const rolesBroken = pv && !((pv.summary.by_role||{}).tm || (pv.summary.by_role||{}).campaign_lead);
+  const diagPanel = (pv && (pv.summary.planned === 0 || rolesBroken) && pvDiag) ? `
       <div style="margin-top:12px;padding:12px;border:1px solid rgba(245,158,11,.4);border-radius:8px;background:rgba(245,158,11,.06)">
         <div style="font-weight:600;font-size:12px;margin-bottom:8px">⚠ Nothing matched — column diagnostics</div>
         <div class="agent-tbl-sub" style="margin-bottom:4px">Skip reasons: ${Object.entries(pv.summary.skip_reasons||{}).map(([r,n])=>`${r}: ${n}`).join(' · ') || '—'}</div>
         <div class="agent-tbl-sub" style="margin-bottom:4px">Detected fields: ${Object.entries(pvDiag.detected_columns||{}).map(([f,c])=>`${f}→${c??'<b style="color:#b45309">none</b>'}`).join(' · ')}</div>
         <div class="agent-tbl-sub" style="margin-bottom:4px">Job titles: ${pv.summary.job_titles?`${pv.summary.job_titles.lookup_rows} in lookup, ${pv.summary.job_titles.resolved} resolved, ${pv.summary.job_titles.unresolved} unresolved`:'—'}</div>
         <div class="agent-tbl-sub" style="margin-bottom:4px">Departments: ${pv.summary.departments?(pv.summary.departments.configured?`${pv.summary.departments.lookup_rows} in lookup`:'<b style="color:#b45309">no Department view ID set — enter it above</b>'):'—'}</div>
+        <div class="agent-tbl-sub" style="margin-bottom:4px">Job-title view columns: <span class="mono">${(pvDiag.job_title_view_columns||[]).join(', ')||'—'}</span></div>
+        <div class="agent-tbl-sub" style="margin-bottom:4px">Job-title view sample: <span class="mono" style="word-break:break-all">${JSON.stringify(pvDiag.job_title_view_sample||[]).slice(0,500)}</span></div>
         <div class="agent-tbl-sub" style="margin-bottom:6px">Columns Zoho returned: <span class="mono">${(pvDiag.source_columns||[]).join(', ')||'—'}</span></div>
         <div style="font-weight:600;font-size:11px;margin:8px 0 4px">Sample values per likely column:</div>
         ${Object.entries(pvDiag.field_values||{}).map(([c,vals])=>`<div class="agent-tbl-sub" style="margin-bottom:2px"><b>${c}</b>: <span class="mono" style="word-break:break-all">${(vals||[]).join(' | ')}</span></div>`).join('') || '<div class="agent-tbl-sub">—</div>'}

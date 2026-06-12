@@ -123,6 +123,14 @@ export function looksLikeLookupId(v) {
   return /^\d{10,}$/.test(String(v ?? '').trim());
 }
 
+// "05-Jul-2022 12:20:28", "2022-07-05", "05/07/2022" — timestamps, not titles.
+export function isDateLike(v) {
+  const s = String(v ?? '').trim();
+  return /^\d{1,2}-[A-Za-z]{3}-\d{2,4}/.test(s)
+      || /^\d{4}-\d{2}-\d{2}/.test(s)
+      || /^\d{1,2}\/\d{1,2}\/\d{2,4}/.test(s);
+}
+
 // For diagnostics: up to `n` distinct non-empty sample values for each named
 // column that exists, so we can see which column actually holds the campaign /
 // job title text.
@@ -162,13 +170,17 @@ export function buildLookupMap(rows, textCandidates) {
     if (k && k !== idCol) { textCol = k; break; }
   }
   if (!textCol) {
+    // Fallback: the column with the most distinct SHORT human text. Audit
+    // columns are excluded — "Created Time" is maximally distinct and won this
+    // race once, resolving every job title to a timestamp.
+    const auditRe = /(created|modified|added|updated|time|date|zuid)/;
     let best = null, bestN = 0;
     for (const k of keys) {
-      if (k === idCol) continue;
+      if (k === idCol || auditRe.test(normKey(k))) continue;
       const vals = new Set();
       for (const r of rows.slice(0, 200)) {
         const v = (r[k] ?? '').toString().trim();
-        if (v && !/^\d+$/.test(v)) vals.add(v);
+        if (v && !/^\d+$/.test(v) && !isDateLike(v) && v.length <= 80 && /[a-z]/i.test(v)) vals.add(v);
       }
       if (vals.size > bestN) { best = k; bestN = vals.size; }
     }
@@ -345,6 +357,8 @@ export async function provisionFromEmployeeProfile({ preview = false, domain = '
         source_columns: Object.keys(sampleRow),
         job_title_is_lookup_id: looksLikeLookupId(jobTitleVal),
         job_title_samples: [...new Set(jobTitleMap.values())].slice(0, 15),
+        job_title_view_columns: Object.keys(jobTitleRows.find(r => r) || {}),
+        job_title_view_sample: jobTitleRows.slice(0, 2),
         field_values: probeFieldValues(rows, probeCols, 10),
       },
       sample: filtered.slice(0, 25),
