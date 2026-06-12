@@ -43,8 +43,15 @@ router.get('/awards', async (req, res) => {
   const params = [periodId];
   let scopeSql = 'TRUE';
   if (req.user.role === 'tm') {
-    params.push(req.user.team_id);
-    scopeSql = `u.team_id = $${params.length}`;
+    // Team leaders: by assigned team when set; otherwise by teams they manage;
+    // name-based narrowing happens after the fetch (team names live in Zoho).
+    if (req.user.team_id != null) {
+      params.push(req.user.team_id);
+      scopeSql = `u.team_id = $${params.length}`;
+    } else {
+      params.push(req.user.campaign_id, req.user.id);
+      scopeSql = `(u.campaign_id = $${params.length - 1} AND (t.tm_user_id = $${params.length} OR TRUE))`;
+    }
   } else if (req.user.role === 'agent') {
     params.push(req.user.id);
     scopeSql = `u.id = $${params.length}`;
@@ -53,7 +60,10 @@ router.get('/awards', async (req, res) => {
     scopeSql = `u.campaign_id = $${params.length}`;
   }
 
-  const { rows } = await query(
+  // Only agents that actually have metrics or a computed award this period —
+  // not every account in the campaign (provisioning creates logins for staff
+  // who may have no scored data yet).
+  let { rows } = await query(
     `SELECT u.id            AS user_id,
             u.full_name,
             u.role          AS user_role,
@@ -76,14 +86,29 @@ router.get('/awards', async (req, res) => {
        LEFT JOIN bonus_awards  ba ON ba.user_id = u.id AND ba.period_id = $1
       WHERE u.active = TRUE
         AND u.campaign_id = (SELECT campaign_id FROM bonus_periods WHERE id = $1)
+        AND (bm.id IS NOT NULL OR ba.id IS NOT NULL)
         AND ${scopeSql}
-      ORDER BY ba.final_bonus DESC NULLS LAST, bm.productivity DESC NULLS LAST, u.full_name`,
+      ORDER BY t.name NULLS LAST, ba.final_bonus DESC NULLS LAST, u.full_name`,
     params
   );
+
+  // Team leaders without an assigned team: narrow to rows whose team name
+  // matches them (managed-team join or normalised-name match). If nothing
+  // matches we return empty + a flag rather than leaking the whole campaign.
+  let teamMatch = true;
+  if (req.user.role === 'tm' && req.user.team_id == null) {
+    const norm = (s) => String(s ?? '').toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim();
+    const me = norm(req.user.team_name) || norm(req.user.full_name);
+    const mine = rows.filter(r => r.tm_name && norm(r.tm_name) === norm(req.user.full_name)
+                               || me && norm(r.team_name) === me);
+    teamMatch = mine.length > 0;
+    rows = mine;
+  }
 
   res.json({
     period_id: periodId,
     locked: prows[0].locked,
+    team_match: teamMatch,
     rows,
   });
 });

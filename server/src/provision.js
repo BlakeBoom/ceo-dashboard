@@ -514,9 +514,13 @@ export async function provisionFromEmployeeProfile({ preview = false, domain = '
     }
   });
 
+  // Fold any bare sync-created rows into their login accounts so the same
+  // human never appears twice (metrics on one row, login on another).
+  const { merged } = await mergeSyncDuplicates();
+
   return {
     preview: false,
-    summary: { ...summary, created: created.length, updated, claimed: claimRows.length, failed: failures.length },
+    summary: { ...summary, created: created.length, updated, claimed: claimRows.length, merged, failed: failures.length },
     created,
     failures: failures.slice(0, 25),
   };
@@ -533,4 +537,84 @@ function topTally(arr, n) {
   return Object.fromEntries(
     Object.entries(tally(arr)).sort((a, b) => b[1] - a[1]).slice(0, n)
   );
+}
+
+// ── Duplicate merge ─────────────────────────────────────────────────────────
+// The bonus sync auto-creates bare agent rows (no email) keyed by zoho_user_id.
+// Provisioning creates login rows keyed by employee-no/email. When the name
+// claim misses (spelling/truncation differences), the same human ends up with
+// two rows: metrics on the sync row, login on the provisioned row. Merge them:
+// move metrics/awards + zoho_user_id + team onto the login row, deactivate the
+// bare row. Matching is normalised-name, then first+last, within a campaign.
+
+function mergeNorm(s) {
+  return String(s ?? '').toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim();
+}
+function mergeFirstLast(s) {
+  const n = mergeNorm(s);
+  const parts = n.split(' ');
+  return parts.length >= 2 ? `${parts[0]} ${parts[parts.length - 1]}` : null;
+}
+
+export async function mergeSyncDuplicates() {
+  const { rows: bare } = await query(
+    `SELECT id, full_name, campaign_id, team_id, zoho_user_id
+       FROM users WHERE email IS NULL AND active = TRUE`
+  );
+  if (!bare.length) return { merged: 0 };
+  const { rows: logins } = await query(
+    `SELECT id, full_name, campaign_id, zoho_user_id
+       FROM users WHERE email IS NOT NULL AND active = TRUE`
+  );
+
+  const byKey = new Map();
+  for (const p of logins) {
+    for (const k of [mergeNorm(p.full_name), mergeFirstLast(p.full_name)]) {
+      const key = k ? `${p.campaign_id}:${k}` : null;
+      if (key && !byKey.has(key)) byKey.set(key, p);
+    }
+  }
+
+  const merges = [];
+  const usedTargets = new Set();
+  for (const s of bare) {
+    const p = byKey.get(`${s.campaign_id}:${mergeNorm(s.full_name)}`)
+           || byKey.get(`${s.campaign_id}:${mergeFirstLast(s.full_name)}`);
+    if (p && p.id !== s.id && !usedTargets.has(p.id)) {
+      usedTargets.add(p.id);
+      merges.push({ fromId: s.id, toId: p.id, zuid: s.zoho_user_id, teamId: s.team_id });
+    }
+  }
+  if (!merges.length) return { merged: 0 };
+
+  const fromIds = merges.map(m => m.fromId);
+  const toIds = merges.map(m => m.toId);
+  await withTx(async (client) => {
+    // Move period data across (skip periods the login row already has).
+    for (const table of ['bonus_metrics', 'bonus_awards']) {
+      await client.query(
+        `UPDATE ${table} x SET user_id = v.to_id
+           FROM unnest($1::int[], $2::int[]) AS v(from_id, to_id)
+          WHERE x.user_id = v.from_id
+            AND NOT EXISTS (SELECT 1 FROM ${table} d WHERE d.user_id = v.to_id AND d.period_id = x.period_id)`,
+        [fromIds, toIds]
+      );
+    }
+    // Free the unique zoho_user_id + deactivate the bare rows…
+    await client.query(
+      `UPDATE users SET zoho_user_id = NULL, active = FALSE,
+              token_version = token_version + 1, updated_at = NOW()
+        WHERE id = ANY($1)`,
+      [fromIds]
+    );
+    // …then carry zoho identity + team over to the login rows.
+    await client.query(
+      `UPDATE users u SET zoho_user_id = COALESCE(u.zoho_user_id, v.zuid),
+              team_id = COALESCE(u.team_id, v.team_id), updated_at = NOW()
+         FROM unnest($1::int[], $2::text[], $3::int[]) AS v(id, zuid, team_id)
+        WHERE u.id = v.id`,
+      [toIds, merges.map(m => m.zuid), merges.map(m => m.teamId)]
+    );
+  });
+  return { merged: merges.length };
 }

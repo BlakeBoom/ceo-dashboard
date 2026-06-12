@@ -92,6 +92,7 @@ body{font-family:'DM Sans',system-ui,sans-serif;color:var(--text);-webkit-font-s
 .users-bycamp{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
 .creds-tbl{margin-top:8px;width:100%}
 .creds-tbl td,.creds-tbl th{padding:6px 10px;text-align:left}
+.team-row td{background:var(--border-light);font-size:12px;padding:8px 12px;border-top:2px solid var(--border)}
 .weeks{display:flex;gap:3px;flex-wrap:wrap}
 .wk-btn{font-size:11px;font-weight:500;padding:5px 11px;border-radius:6px;cursor:pointer;border:1px solid var(--border-light);background:transparent;color:var(--text3);transition:all .15s;font-family:var(--mono)}
 .wk-btn:hover{color:var(--text);border-color:var(--border-strong)}
@@ -1646,6 +1647,7 @@ async function loadBonusAwards() {
   if (r.ok) {
     const data = await r.json();
     BONUS_STATE.awards = data.rows;
+    BONUS_STATE.teamMatch = data.team_match !== false;
     BONUS_STATE.error = null;
   } else {
     BONUS_STATE.error = `Could not load awards (${r.status})`;
@@ -1715,7 +1717,7 @@ function renderBonus() {
     return `<option value="${p.id}"${p.id === BONUS_STATE.selectedPeriodId ? ' selected' : ''}>${label}</option>`;
   }).join('');
 
-  const rowsHtml = BONUS_STATE.awards.map(r => {
+  const agentRow = (r) => {
     const c = r.components || {};
     const calloutsRag = r.callouts === 0 ? 'green-cell' : r.callouts != null ? 'red-cell' : 'dim';
     const prodRag     = r.productivity == null ? 'dim' : r.productivity >= 1470 ? 'green-cell' : 'red-cell';
@@ -1723,8 +1725,6 @@ function renderBonus() {
     const qaRag       = r.qa_pct   == null ? 'dim' : r.qa_pct   >= 0.9 ? 'green-cell' : 'red-cell';
     return `<tr>
       <td class="name">${r.full_name}</td>
-      <td class="dim">${r.team_name || '—'}</td>
-      <td class="dim">${r.tm_name || '—'}</td>
       <td class="numeric ${calloutsRag}">${r.callouts ?? '—'}</td>
       <td class="numeric ${prodRag}">${r.productivity != null ? Math.round(r.productivity).toLocaleString() : '—'}</td>
       <td class="numeric ${csatRag}">${fmtPctBonus(r.csat_pct)}</td>
@@ -1736,6 +1736,25 @@ function renderBonus() {
       <td class="numeric"><b>${fmtZAR(r.kpi_bonus)}</b></td>
       <td class="numeric"><b style="color:${r.final_bonus > 0 ? 'var(--green-text)' : 'var(--text3)'}">${fmtZAR(r.final_bonus)}</b></td>
     </tr>`;
+  };
+
+  // Group agents by team: section header per team with leader + subtotals.
+  const groups = new Map();
+  for (const r of BONUS_STATE.awards) {
+    const key = r.team_name || 'Unassigned';
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(r);
+  }
+  const rowsHtml = [...groups.entries()].map(([team, rs]) => {
+    const sub = rs.reduce((a, r) => a + (Number(r.final_bonus) || 0), 0);
+    const qual = rs.filter(r => r.qualified).length;
+    const leader = rs.find(r => r.tm_name)?.tm_name;
+    return `<tr class="team-row">
+      <td colspan="9"><b>${team}</b>${leader ? ` <span class="dim">· ${leader}</span>` : ''}
+        <span class="dim" style="margin-left:8px">${rs.length} agent${rs.length===1?'':'s'} · ${qual} qualified</span></td>
+      <td class="numeric dim">subtotal</td>
+      <td class="numeric"><b>${fmtZAR(sub)}</b></td>
+    </tr>` + rs.map(agentRow).join('');
   }).join('');
 
   const total = BONUS_STATE.awards.reduce((a, r) => a + (Number(r.final_bonus) || 0), 0);
@@ -1751,11 +1770,15 @@ function renderBonus() {
     ${BONUS_STATE.error ? `<div class="err-banner show" style="margin-top:8px">${BONUS_STATE.error}</div>` : ''}
     ${BONUS_STATE.loading ? '<div class="loading"><div class="spinner"></div><div>Loading bonus data…</div></div>' :
       BONUS_STATE.awards.length === 0 ?
-        '<div class="agent-tbl-wrap" style="border-radius:0 0 12px 12px"><div class="flag-empty" style="padding:32px">No bonus data for this period yet. Click <b>Refresh from Zoho</b> to pull live metrics.</div></div>' :
+        `<div class="agent-tbl-wrap" style="border-radius:0 0 12px 12px"><div class="flag-empty" style="padding:32px">${
+          BONUS_STATE.teamMatch === false
+            ? 'No team could be matched to your account yet — ask your admin to assign you to your team in the Users screen.'
+            : 'No bonus data for this period yet. Click <b>Refresh from Zoho</b> to pull live metrics.'
+        }</div></div>` :
         `<div class="agent-tbl-wrap" style="border-radius:0 0 12px 12px;border-top:none">
           <table class="agent-tbl">
             <thead><tr>
-              <th>Agent</th><th>Cohort</th><th>TM</th>
+              <th>Agent</th>
               <th class="numeric">Callouts</th>
               <th class="numeric">Productivity</th>
               <th class="numeric">CSAT</th>
