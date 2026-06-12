@@ -148,13 +148,13 @@ export function probeFieldValues(rows, names, n = 8) {
 // name present, else the non-id column with the most distinct human text.
 export function buildLookupMap(rows, textCandidates) {
   const map = new Map();
-  if (!rows?.length) return map;
+  if (!rows?.length) return { map, idCol: null, textCol: null };
   const sample = rows.find(r => r) || {};
   const keys = Object.keys(sample);
 
   let idCol = keys.find(k => normKey(k) === 'id');
   if (!idCol) idCol = keys.find(k => looksLikeLookupId(sample[k]));
-  if (!idCol) return map;
+  if (!idCol) return { map, idCol: null, textCol: null };
 
   let textCol = null;
   for (const c of textCandidates) {
@@ -174,20 +174,20 @@ export function buildLookupMap(rows, textCandidates) {
     }
     textCol = best;
   }
-  if (!textCol) return map;
+  if (!textCol) return { map, idCol, textCol: null };
 
   for (const r of rows) {
     const id = (r[idCol] ?? '').toString().trim();
     const text = (r[textCol] ?? '').toString().trim();
     if (id && text) map.set(id, text);
   }
-  return map;
+  return { map, idCol, textCol };
 }
 
 export const buildJobTitleMap = (rows) =>
-  buildLookupMap(rows, ['jobtitle', 'title', 'name', 'jobdescription', 'designation', 'description']);
+  buildLookupMap(rows, ['jobtitle', 'title', 'name', 'jobtitlename', 'jobname', 'position', 'designation', 'jobdescription', 'description']);
 export const buildDepartmentMap = (rows) =>
-  buildLookupMap(rows, ['department', 'departmentname', 'workgroup', 'name', 'title', 'description']);
+  buildLookupMap(rows, ['department', 'departmentname', 'workgroup', 'campaignname', 'campaign', 'name', 'title', 'description']);
 
 // Read one EmployeeProfile row using the detected column map.
 export function parseEmployeeRow(r, cols) {
@@ -297,11 +297,13 @@ export async function provisionFromEmployeeProfile({ preview = false, domain = '
     safeFetch(departmentViewId),
     safeFetch(DIVISIONS_VIEW_ID),
   ]);
-  const jobTitleMap = buildJobTitleMap(jobTitleRows);
+  const jt = buildJobTitleMap(jobTitleRows);
+  const jobTitleMap = jt.map;
   // Department ids resolve against the Campaign table; merge Divisions in as a
   // fallback for any employee whose Department points at a division instead.
-  const departmentMap = buildDepartmentMap(departmentRows);
-  for (const [id, name] of buildDepartmentMap(divisionRows)) {
+  const dept = buildDepartmentMap(departmentRows);
+  const departmentMap = new Map(dept.map);
+  for (const [id, name] of buildDepartmentMap(divisionRows).map) {
     if (!departmentMap.has(id)) departmentMap.set(id, name);
   }
   const { plan, skipped, cols, titlesResolved, titlesUnresolved } =
@@ -313,10 +315,16 @@ export async function provisionFromEmployeeProfile({ preview = false, domain = '
     planned: filtered.length,
     skipped: skipped.length,
     skip_reasons: tally(skipped.map(s => s.reason)),
-    job_titles: { lookup_rows: jobTitleMap.size, resolved: titlesResolved, unresolved: titlesUnresolved },
-    departments: { lookup_rows: departmentMap.size, configured: !!departmentViewId },
+    job_titles: {
+      lookup_rows: jobTitleMap.size, resolved: titlesResolved, unresolved: titlesUnresolved,
+      id_col: jt.idCol, text_col: jt.textCol,
+    },
+    departments: { lookup_rows: departmentMap.size, id_col: dept.idCol, text_col: dept.textCol },
     by_role: tally(filtered.map(p => p.role)),
     by_campaign: tally(filtered.map(p => p.campaign)),
+    // Top resolved titles — this is how we verify role mapping is seeing the
+    // text we think it is (all-agent output means the wrong text column).
+    by_title: topTally(filtered.map(p => p.jobTitle || '(blank)'), 14),
   };
 
   if (preview) {
@@ -344,14 +352,81 @@ export async function provisionFromEmployeeProfile({ preview = false, domain = '
     };
   }
 
-  const created = [];
+  // ── Commit. The naive row-by-row version (542 × bcrypt-12 + 1000+ Neon
+  // round-trips) blows the 60s lambda budget, so: dedupe in memory, match all
+  // existing users in ONE query, hash temp passwords at a low cost factor
+  // (they're random 12-char strings forced to change on first login — entropy,
+  // not stretch, is what protects them), then three bulk unnest statements.
   const failures = [];
+  const batch = [];
+  const seenKeys = new Set();
+  for (const p of filtered) {
+    const ek = p.email.toLowerCase();
+    const nk = p.empNo ? `n:${p.empNo}` : null;
+    if (seenKeys.has(ek) || (nk && seenKeys.has(nk))) {
+      failures.push({ name: p.fullname, email: p.email, error: 'duplicate email/employee-no within batch' });
+      continue;
+    }
+    seenKeys.add(ek); if (nk) seenKeys.add(nk);
+    batch.push(p);
+  }
+
+  // Match existing users by employee-no, email, or — for accounts the bonus
+  // sync auto-created (no email yet) — by name, so we claim those rows instead
+  // of inserting duplicates.
+  const { rows: existingRows } = await query(
+    `SELECT id, LOWER(email) AS email, zoho_employee_no, LOWER(full_name) AS lname
+       FROM users
+      WHERE zoho_employee_no = ANY($1)
+         OR LOWER(email) = ANY($2)
+         OR (email IS NULL AND LOWER(full_name) = ANY($3))`,
+    [batch.map(p => p.empNo).filter(Boolean),
+     batch.map(p => p.email.toLowerCase()),
+     batch.map(p => p.fullname.toLowerCase())]
+  );
+  const byEmp = new Map(), byEmail = new Map(), byName = new Map();
+  for (const u of existingRows) {
+    if (u.zoho_employee_no) byEmp.set(u.zoho_employee_no, u);
+    if (u.email) byEmail.set(u.email, u);
+    else if (u.lname) byName.set(u.lname, u); // sync-created, claimable
+  }
+
+  const toUpdate = [], toClaim = [], toInsert = [];
+  const claimedIds = new Set();
+  for (const p of batch) {
+    const u = (p.empNo && byEmp.get(p.empNo))
+           || byEmail.get(p.email.toLowerCase())
+           || byName.get(p.fullname.toLowerCase());
+    if (u) {
+      if (claimedIds.has(u.id)) {
+        failures.push({ name: p.fullname, email: p.email, error: 'matches the same existing user as another row' });
+        continue;
+      }
+      claimedIds.add(u.id);
+      (u.email ? toUpdate : toClaim).push({ p, id: u.id });
+    } else {
+      toInsert.push(p);
+    }
+  }
+
+  // Pre-hash temp passwords for claim + insert.
+  const TEMP_BCRYPT_ROUNDS = 8;
+  const withTemp = async (p) => {
+    const temp = tempPassword();
+    return { p, temp, hash: await hashPassword(temp, TEMP_BCRYPT_ROUNDS) };
+  };
+  const claimRows = [];
+  for (const c of toClaim) claimRows.push({ ...(await withTemp(c.p)), id: c.id });
+  const insertRows = [];
+  for (const p of toInsert) insertRows.push(await withTemp(p));
+
+  const created = [];
   let updated = 0;
   await withTx(async (client) => {
     // Ensure every campaign exists.
     const campIdBySlug = new Map();
-    for (const slug of new Set(filtered.map(p => p.slug))) {
-      const name = filtered.find(p => p.slug === slug).campaign;
+    for (const slug of new Set(batch.map(p => p.slug))) {
+      const name = batch.find(p => p.slug === slug).campaign;
       const res = await client.query(
         `INSERT INTO campaigns (slug, name) VALUES ($1, $2)
          ON CONFLICT (slug) DO UPDATE SET name = campaigns.name
@@ -360,55 +435,73 @@ export async function provisionFromEmployeeProfile({ preview = false, domain = '
       );
       campIdBySlug.set(slug, res.rows[0]?.id);
     }
+    const cid = (p) => campIdBySlug.get(p.slug);
 
-    // Per-row savepoint so one bad row (e.g. duplicate email) is reported and
-    // skipped instead of aborting the whole batch.
-    for (const p of filtered) {
-      try {
-        await client.query('SAVEPOINT row');
-        const campaignId = campIdBySlug.get(p.slug);
-        // Match an existing account by employee number first, then by email.
-        const { rows: existing } = await client.query(
-          `SELECT id FROM users
-            WHERE (zoho_employee_no IS NOT NULL AND zoho_employee_no = $1)
-               OR LOWER(email) = LOWER($2)
-            LIMIT 1`,
-          [p.empNo, p.email]
-        );
-        if (existing.length) {
-          await client.query(
-            `UPDATE users
-                SET full_name = $1, role = $2, campaign_id = $3,
-                    job_title = $4, workgroup = $5,
-                    zoho_employee_no = COALESCE($6, zoho_employee_no),
-                    updated_at = NOW()
-              WHERE id = $7`,
-            [p.fullname, p.role, campaignId, p.jobTitle, p.workgroup, p.empNo, existing[0].id]
-          );
-          updated++;
+    if (toUpdate.length) {
+      const u = toUpdate;
+      await client.query(
+        `UPDATE users x
+            SET full_name = v.full_name, role = v.role::user_role, campaign_id = v.campaign_id,
+                job_title = v.job_title, workgroup = v.workgroup,
+                zoho_employee_no = COALESCE(v.emp_no, x.zoho_employee_no), updated_at = NOW()
+           FROM unnest($1::int[], $2::text[], $3::text[], $4::int[], $5::text[], $6::text[], $7::text[])
+                  AS v(id, full_name, role, campaign_id, job_title, workgroup, emp_no)
+          WHERE x.id = v.id`,
+        [u.map(r => r.id), u.map(r => r.p.fullname), u.map(r => r.p.role), u.map(r => cid(r.p)),
+         u.map(r => r.p.jobTitle), u.map(r => r.p.workgroup), u.map(r => r.p.empNo)]
+      );
+      updated = u.length;
+    }
+
+    if (claimRows.length) {
+      const c = claimRows;
+      await client.query(
+        `UPDATE users x
+            SET email = v.email, password_hash = v.hash, must_change_password = TRUE,
+                full_name = v.full_name, role = v.role::user_role, campaign_id = v.campaign_id,
+                job_title = v.job_title, workgroup = v.workgroup,
+                zoho_employee_no = COALESCE(v.emp_no, x.zoho_employee_no), updated_at = NOW()
+           FROM unnest($1::int[], $2::text[], $3::text[], $4::text[], $5::text[], $6::int[], $7::text[], $8::text[], $9::text[])
+                  AS v(id, email, hash, full_name, role, campaign_id, job_title, workgroup, emp_no)
+          WHERE x.id = v.id`,
+        [c.map(r => r.id), c.map(r => r.p.email), c.map(r => r.hash), c.map(r => r.p.fullname),
+         c.map(r => r.p.role), c.map(r => cid(r.p)), c.map(r => r.p.jobTitle),
+         c.map(r => r.p.workgroup), c.map(r => r.p.empNo)]
+      );
+      for (const r of c) {
+        created.push({ id: r.id, full_name: r.p.fullname, email: r.p.email, role: r.p.role, campaign: r.p.campaign, temp_password: r.temp });
+      }
+    }
+
+    if (insertRows.length) {
+      const i = insertRows;
+      const res = await client.query(
+        `INSERT INTO users (email, password_hash, full_name, role, campaign_id,
+                            job_title, workgroup, zoho_employee_no, must_change_password)
+         SELECT v.email, v.hash, v.full_name, v.role::user_role, v.campaign_id,
+                v.job_title, v.workgroup, v.emp_no, TRUE
+           FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::int[], $6::text[], $7::text[], $8::text[])
+                  AS v(email, hash, full_name, role, campaign_id, job_title, workgroup, emp_no)
+         ON CONFLICT DO NOTHING
+         RETURNING id, LOWER(email) AS email`,
+        [i.map(r => r.p.email), i.map(r => r.hash), i.map(r => r.p.fullname), i.map(r => r.p.role),
+         i.map(r => cid(r.p)), i.map(r => r.p.jobTitle), i.map(r => r.p.workgroup), i.map(r => r.p.empNo)]
+      );
+      const insertedByEmail = new Map(res.rows.map(r => [r.email, r.id]));
+      for (const r of i) {
+        const id = insertedByEmail.get(r.p.email.toLowerCase());
+        if (id != null) {
+          created.push({ id, full_name: r.p.fullname, email: r.p.email, role: r.p.role, campaign: r.p.campaign, temp_password: r.temp });
         } else {
-          const temp = tempPassword();
-          const hash = await hashPassword(temp);
-          const { rows: ins } = await client.query(
-            `INSERT INTO users (email, password_hash, full_name, role, campaign_id,
-                                job_title, workgroup, zoho_employee_no, must_change_password)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, TRUE)
-             RETURNING id`,
-            [p.email, hash, p.fullname, p.role, campaignId, p.jobTitle, p.workgroup, p.empNo]
-          );
-          created.push({ id: ins.rows[0].id, full_name: p.fullname, email: p.email, role: p.role, campaign: p.campaign, temp_password: temp });
+          failures.push({ name: r.p.fullname, email: r.p.email, error: 'insert conflict (email or employee-no already taken)' });
         }
-        await client.query('RELEASE SAVEPOINT row');
-      } catch (err) {
-        await client.query('ROLLBACK TO SAVEPOINT row').catch(() => {});
-        failures.push({ name: p.fullname, email: p.email, error: err.message });
       }
     }
   });
 
   return {
     preview: false,
-    summary: { ...summary, created: created.length, updated, failed: failures.length },
+    summary: { ...summary, created: created.length, updated, claimed: claimRows.length, failed: failures.length },
     created,
     failures: failures.slice(0, 25),
   };
@@ -418,4 +511,11 @@ function tally(arr) {
   const out = {};
   for (const x of arr) out[x] = (out[x] || 0) + 1;
   return out;
+}
+
+// tally() limited to the n most common entries.
+function topTally(arr, n) {
+  return Object.fromEntries(
+    Object.entries(tally(arr)).sort((a, b) => b[1] - a[1]).slice(0, n)
+  );
 }

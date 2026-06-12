@@ -1811,7 +1811,10 @@ async function provisionUsers(preview) {
     const r = await apiFetch(`/api/users/provision${preview ? '?preview=1' : ''}`, {
       method: 'POST', body: JSON.stringify(body),
     });
-    const data = await r.json();
+    const text = await r.text();
+    let data;
+    try { data = JSON.parse(text); }
+    catch { throw new Error(`HTTP ${r.status}: ${text.slice(0, 160)}`); }
     if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
     if (preview) {
       USERS_STATE.preview = data;
@@ -1885,10 +1888,12 @@ function renderUsers() {
         <span><b>${pv.summary.skipped}</b> skipped</span>
       </div>
       <div class="agent-tbl-sub" style="margin-top:8px">
-        Job titles: ${pv.summary.job_titles?`${pv.summary.job_titles.lookup_rows} in lookup · ${pv.summary.job_titles.resolved} resolved · ${pv.summary.job_titles.unresolved} unresolved`:'—'}
+        Job titles: ${pv.summary.job_titles?`${pv.summary.job_titles.lookup_rows} in lookup · ${pv.summary.job_titles.resolved} resolved · ${pv.summary.job_titles.unresolved} unresolved (text col: ${pv.summary.job_titles.text_col||'?'})`:'—'}
         ${pv.summary.job_titles && pv.summary.job_titles.lookup_rows===0?' <b style="color:#b45309">(job-title view returned no rows)</b>':''}
-        &nbsp;·&nbsp; Departments: ${pv.summary.departments?`${pv.summary.departments.lookup_rows} in lookup`:'—'}
+        &nbsp;·&nbsp; Departments: ${pv.summary.departments?`${pv.summary.departments.lookup_rows} in lookup (text col: ${pv.summary.departments.text_col||'?'})`:'—'}
       </div>
+      ${pv.summary.by_title ? `<div style="font-weight:600;font-size:11px;margin:10px 0 2px">Resolved job titles (top)</div>
+      <div class="users-bycamp">${Object.entries(pv.summary.by_title).map(([t,n])=>`<span class="chip">${t}: ${n}</span>`).join('')}</div>` : ''}
       <div class="users-bycamp">${Object.entries(pv.summary.by_campaign).sort((a,b)=>b[1]-a[1])
         .map(([c,n])=>`<span class="chip">${c}: ${n}</span>`).join('')}</div>
       <div class="users-bycamp" style="margin-top:6px">${Object.entries(pv.summary.by_role)

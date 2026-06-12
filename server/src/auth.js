@@ -5,8 +5,8 @@ import { query } from './db.js';
 
 const COOKIE_NAME = 'bbpo_session';
 
-export async function hashPassword(plain) {
-  return bcrypt.hash(plain, 12);
+export async function hashPassword(plain, rounds = 12) {
+  return bcrypt.hash(plain, rounds);
 }
 
 export async function verifyPassword(plain, hash) {
