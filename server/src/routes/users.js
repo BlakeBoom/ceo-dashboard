@@ -38,8 +38,9 @@ router.post('/provision', requireRole('admin'), async (req, res) => {
   const domain = (req.body?.domain || process.env.LOGIN_EMAIL_DOMAIN || 'boomerang.local')
     .toString().trim().toLowerCase();
   const viewId = req.body?.view_id ? String(req.body.view_id).trim() : null;
+  const deptViewId = req.body?.dept_view_id ? String(req.body.dept_view_id).trim() : null;
   try {
-    const result = await provisionFromEmployeeProfile({ preview, domain, viewId });
+    const result = await provisionFromEmployeeProfile({ preview, domain, viewId, deptViewId });
     if (!preview) {
       await query(
         `INSERT INTO audit_log (user_id, action, metadata)

@@ -127,11 +127,11 @@ export function probeFieldValues(rows, names, n = 8) {
   return out;
 }
 
-// Build lookup-id → title-text map from the Job Description companion view.
-// Column names there aren't guaranteed either, so detect: the id column is the
-// one whose values look like lookup ids; the title column is a known name or,
-// failing that, the column with the most distinct human text.
-export function buildJobTitleMap(rows) {
+// Build lookup-id → text map from a Zoho companion view (Job Title, Department,
+// …). Column names aren't guaranteed: the id column is the one called "id" or
+// whose values look like lookup ids; the text column is the first candidate
+// name present, else the non-id column with the most distinct human text.
+export function buildLookupMap(rows, textCandidates) {
   const map = new Map();
   if (!rows?.length) return map;
   const sample = rows.find(r => r) || {};
@@ -141,14 +141,12 @@ export function buildJobTitleMap(rows) {
   if (!idCol) idCol = keys.find(k => looksLikeLookupId(sample[k]));
   if (!idCol) return map;
 
-  const titleCands = ['jobtitle', 'title', 'name', 'jobdescription', 'designation', 'jobtitlename', 'description'];
-  let titleCol = null;
-  for (const c of titleCands) {
+  let textCol = null;
+  for (const c of textCandidates) {
     const k = keys.find(k => normKey(k) === c);
-    if (k && k !== idCol) { titleCol = k; break; }
+    if (k && k !== idCol) { textCol = k; break; }
   }
-  if (!titleCol) {
-    // Fallback: the non-id column with the most distinct non-numeric values.
+  if (!textCol) {
     let best = null, bestN = 0;
     for (const k of keys) {
       if (k === idCol) continue;
@@ -159,17 +157,22 @@ export function buildJobTitleMap(rows) {
       }
       if (vals.size > bestN) { best = k; bestN = vals.size; }
     }
-    titleCol = best;
+    textCol = best;
   }
-  if (!titleCol) return map;
+  if (!textCol) return map;
 
   for (const r of rows) {
     const id = (r[idCol] ?? '').toString().trim();
-    const title = (r[titleCol] ?? '').toString().trim();
-    if (id && title) map.set(id, title);
+    const text = (r[textCol] ?? '').toString().trim();
+    if (id && text) map.set(id, text);
   }
   return map;
 }
+
+export const buildJobTitleMap = (rows) =>
+  buildLookupMap(rows, ['jobtitle', 'title', 'name', 'jobdescription', 'designation', 'description']);
+export const buildDepartmentMap = (rows) =>
+  buildLookupMap(rows, ['department', 'departmentname', 'workgroup', 'name', 'title', 'description']);
 
 // Read one EmployeeProfile row using the detected column map.
 export function parseEmployeeRow(r, cols) {
@@ -209,7 +212,7 @@ function tempPassword() {
 
 // Classify every EmployeeProfile row into the account we'd create. Pure given
 // rows — used by both preview and commit so they can't drift.
-export function planProvisioning(rows, { domain, jobTitleMap = new Map() }) {
+export function planProvisioning(rows, { domain, jobTitleMap = new Map(), departmentMap = new Map() }) {
   const cols = detectProfileColumns(rows);
   const seenEmail = new Map(); // local → count, for collision suffixes
   const plan = [];
@@ -234,9 +237,11 @@ export function planProvisioning(rows, { domain, jobTitleMap = new Map() }) {
       else { jobTitle = ''; titlesUnresolved++; }
     }
 
+    // Department/Workgroup is also a lookup id in the raw view — resolve it.
     if (looksLikeLookupId(workgroup)) {
-      skipped.push({ reason: 'workgroup_lookup_id', fullname, workgroup });
-      continue;
+      const resolved = departmentMap.get(workgroup);
+      if (resolved) workgroup = resolved;
+      else { skipped.push({ reason: 'workgroup_lookup_id', fullname, workgroup }); continue; }
     }
     const camp = canonicalCampaign(workgroup);
     if (!camp) {
@@ -262,18 +267,24 @@ export function planProvisioning(rows, { domain, jobTitleMap = new Map() }) {
 // Fetch EmployeeProfile, plan accounts, and (unless preview) upsert them.
 // Idempotent: re-running updates role/campaign/title and only issues a temp
 // password to brand-new accounts (so existing users keep their password).
-export async function provisionFromEmployeeProfile({ preview = false, domain = 'boomerang.local', includeRoles = ['campaign_lead', 'tm', 'agent'], viewId = null } = {}) {
+export async function provisionFromEmployeeProfile({ preview = false, domain = 'boomerang.local', includeRoles = ['campaign_lead', 'tm', 'agent'], viewId = null, deptViewId = null } = {}) {
   const employeeViewId = viewId || process.env.ZOHO_EMPLOYEE_VIEW_ID || VIEW.employee;
   const jobTitleViewId = process.env.ZOHO_JOB_TITLE_VIEW_ID || JOB_TITLE_VIEW_ID;
-  const [rows, jobTitleRows] = await Promise.all([
+  const departmentViewId = deptViewId || process.env.ZOHO_DEPARTMENT_VIEW_ID || null;
+  const safeFetch = (id) => id ? fetchView(id).catch(err => {
+    console.warn(`[provision] companion view ${id} fetch failed:`, err.message);
+    return [];
+  }) : Promise.resolve([]);
+
+  const [rows, jobTitleRows, departmentRows] = await Promise.all([
     fetchView(employeeViewId),
-    fetchView(jobTitleViewId).catch(err => {
-      console.warn('[provision] job-title view fetch failed:', err.message);
-      return [];
-    }),
+    safeFetch(jobTitleViewId),
+    safeFetch(departmentViewId),
   ]);
   const jobTitleMap = buildJobTitleMap(jobTitleRows);
-  const { plan, skipped, cols, titlesResolved, titlesUnresolved } = planProvisioning(rows, { domain, jobTitleMap });
+  const departmentMap = buildDepartmentMap(departmentRows);
+  const { plan, skipped, cols, titlesResolved, titlesUnresolved } =
+    planProvisioning(rows, { domain, jobTitleMap, departmentMap });
   const filtered = plan.filter(p => includeRoles.includes(p.role));
 
   const summary = {
@@ -282,6 +293,7 @@ export async function provisionFromEmployeeProfile({ preview = false, domain = '
     skipped: skipped.length,
     skip_reasons: tally(skipped.map(s => s.reason)),
     job_titles: { lookup_rows: jobTitleMap.size, resolved: titlesResolved, unresolved: titlesUnresolved },
+    departments: { lookup_rows: departmentMap.size, configured: !!departmentViewId },
     by_role: tally(filtered.map(p => p.role)),
     by_campaign: tally(filtered.map(p => p.campaign)),
   };
