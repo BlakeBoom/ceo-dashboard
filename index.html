@@ -1818,6 +1818,8 @@ async function provisionUsers(preview) {
     } else {
       USERS_STATE.preview = null;
       USERS_STATE.justCreated = data.created || [];
+      USERS_STATE.lastFailures = data.failures || [];
+      USERS_STATE.lastSummary = data.summary || null;
       await loadUsers();
       return;
     }
@@ -1882,6 +1884,11 @@ function renderUsers() {
         <span><b>${pv.summary.source_rows}</b> profile rows</span>
         <span><b>${pv.summary.skipped}</b> skipped</span>
       </div>
+      <div class="agent-tbl-sub" style="margin-top:8px">
+        Job titles: ${pv.summary.job_titles?`${pv.summary.job_titles.lookup_rows} in lookup · ${pv.summary.job_titles.resolved} resolved · ${pv.summary.job_titles.unresolved} unresolved`:'—'}
+        ${pv.summary.job_titles && pv.summary.job_titles.lookup_rows===0?' <b style="color:#b45309">(job-title view returned no rows)</b>':''}
+        &nbsp;·&nbsp; Departments: ${pv.summary.departments?`${pv.summary.departments.lookup_rows} in lookup`:'—'}
+      </div>
       <div class="users-bycamp">${Object.entries(pv.summary.by_campaign).sort((a,b)=>b[1]-a[1])
         .map(([c,n])=>`<span class="chip">${c}: ${n}</span>`).join('')}</div>
       <div class="users-bycamp" style="margin-top:6px">${Object.entries(pv.summary.by_role)
@@ -1890,6 +1897,14 @@ function renderUsers() {
       ${pv.summary.planned > 0 ? `<button class="btn-primary" id="usersCommitBtn" ${USERS_STATE.busy?'disabled':''} style="margin-top:12px">
         ${USERS_STATE.busy?'Working…':`✓ Commit — create/update ${pv.summary.planned} accounts`}</button>` : ''}
       <button class="btn-ghost" id="usersCancelPreview" style="margin-top:12px">Cancel</button>
+    </div>` : '';
+
+  const fails = USERS_STATE.lastFailures || [];
+  const failPanel = fails.length ? `
+    <div class="users-panel" style="border-color:rgba(220,38,38,.4);background:rgba(220,38,38,.05)">
+      <div class="users-panel-h">${USERS_STATE.lastSummary?.failed||fails.length} row(s) failed during commit</div>
+      ${fails.slice(0,12).map(f=>`<div class="agent-tbl-sub"><b>${f.name}</b> (${f.email||'—'}): <span class="mono">${f.error}</span></div>`).join('')}
+      <button class="btn-ghost" id="usersDismissFails" style="margin-top:8px">Dismiss</button>
     </div>` : '';
 
   const created = USERS_STATE.justCreated;
@@ -1929,6 +1944,7 @@ function renderUsers() {
       </div>
     </div>
     ${USERS_STATE.error ? `<div class="err-banner show" style="margin-top:8px">${USERS_STATE.error}</div>` : ''}
+    ${failPanel}
     ${createdPanel}
     ${previewPanel}
     ${USERS_STATE.loading ? '<div class="loading"><div class="spinner"></div><div>Loading users…</div></div>' :
@@ -1948,6 +1964,7 @@ function renderUsers() {
   $('usersCommitBtn')?.addEventListener('click', () => provisionUsers(false));
   $('usersCancelPreview')?.addEventListener('click', () => { USERS_STATE.preview = null; renderUsers(); });
   $('usersDismissCreated')?.addEventListener('click', () => { USERS_STATE.justCreated = []; renderUsers(); });
+  $('usersDismissFails')?.addEventListener('click', () => { USERS_STATE.lastFailures = []; renderUsers(); });
   $('usersView').querySelectorAll('.row-btn').forEach(b => b.onclick = () => {
     const id = parseInt(b.dataset.id, 10);
     if (b.dataset.act === 'reset') resetUserPassword(id, b.dataset.name);

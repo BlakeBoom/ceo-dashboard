@@ -54,9 +54,22 @@ export function canonicalCampaign(workgroup) {
   if (!raw) return null;
   const key = raw.toLowerCase().replace(/[^a-z0-9]/g, '');
   if (!key || key.startsWith('admin')) return null; // internal department
+  if (INTERNAL_DEPARTMENTS.has(key)) return null;    // internal support function
   if (CAMPAIGN_BY_KEY[key]) return CAMPAIGN_BY_KEY[key];
   return { name: raw, slug: campaignSlug(raw) }; // unknown workgroup → own campaign
 }
+
+// Resolved Department names that are internal support functions, not client
+// campaigns — excluded from provisioning (they have no "Admin/" prefix once
+// resolved through the Campaign lookup table).
+const INTERNAL_DEPARTMENTS = new Set([
+  'operations', 'humanresources', 'hr', 'finance', 'wfm', 'workforcemanagement',
+  'itinformationtechnology', 'it', 'informationtechnology', 'informationandtechnology',
+  'businesssupportqualityassurance', 'qualityassurance', 'qa', 'businesssupport',
+  'learninganddevelopment', 'ld', 'recruitment', 'facilities', 'facility',
+  'marketing', 'digitaltransformation', 'people', 'peopleengagement', 'admin',
+  'boomerangteam', 'boomeranginternal', 'headofstaff', 'hos',
+]);
 
 export function campaignSlug(name) {
   return String(name).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
@@ -332,6 +345,7 @@ export async function provisionFromEmployeeProfile({ preview = false, domain = '
   }
 
   const created = [];
+  const failures = [];
   let updated = 0;
   await withTx(async (client) => {
     // Ensure every campaign exists.
@@ -344,46 +358,60 @@ export async function provisionFromEmployeeProfile({ preview = false, domain = '
          RETURNING id`,
         [slug, name]
       );
-      campIdBySlug.set(slug, res.rows[0].id);
+      campIdBySlug.set(slug, res.rows[0]?.id);
     }
 
+    // Per-row savepoint so one bad row (e.g. duplicate email) is reported and
+    // skipped instead of aborting the whole batch.
     for (const p of filtered) {
-      const campaignId = campIdBySlug.get(p.slug);
-      // Match an existing account by employee number first, then by email.
-      const { rows: existing } = await client.query(
-        `SELECT id FROM users
-          WHERE (zoho_employee_no IS NOT NULL AND zoho_employee_no = $1)
-             OR LOWER(email) = LOWER($2)
-          LIMIT 1`,
-        [p.empNo, p.email]
-      );
-      if (existing.length) {
-        await client.query(
-          `UPDATE users
-              SET full_name = $1, role = $2, campaign_id = $3,
-                  job_title = $4, workgroup = $5,
-                  zoho_employee_no = COALESCE($6, zoho_employee_no),
-                  updated_at = NOW()
-            WHERE id = $7`,
-          [p.fullname, p.role, campaignId, p.jobTitle, p.workgroup, p.empNo, existing[0].id]
+      try {
+        await client.query('SAVEPOINT row');
+        const campaignId = campIdBySlug.get(p.slug);
+        // Match an existing account by employee number first, then by email.
+        const { rows: existing } = await client.query(
+          `SELECT id FROM users
+            WHERE (zoho_employee_no IS NOT NULL AND zoho_employee_no = $1)
+               OR LOWER(email) = LOWER($2)
+            LIMIT 1`,
+          [p.empNo, p.email]
         );
-        updated++;
-      } else {
-        const temp = tempPassword();
-        const hash = await hashPassword(temp);
-        const { rows: ins } = await client.query(
-          `INSERT INTO users (email, password_hash, full_name, role, campaign_id,
-                              job_title, workgroup, zoho_employee_no, must_change_password)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, TRUE)
-           RETURNING id`,
-          [p.email, hash, p.fullname, p.role, campaignId, p.jobTitle, p.workgroup, p.empNo]
-        );
-        created.push({ id: ins.rows[0].id, full_name: p.fullname, email: p.email, role: p.role, campaign: p.campaign, temp_password: temp });
+        if (existing.length) {
+          await client.query(
+            `UPDATE users
+                SET full_name = $1, role = $2, campaign_id = $3,
+                    job_title = $4, workgroup = $5,
+                    zoho_employee_no = COALESCE($6, zoho_employee_no),
+                    updated_at = NOW()
+              WHERE id = $7`,
+            [p.fullname, p.role, campaignId, p.jobTitle, p.workgroup, p.empNo, existing[0].id]
+          );
+          updated++;
+        } else {
+          const temp = tempPassword();
+          const hash = await hashPassword(temp);
+          const { rows: ins } = await client.query(
+            `INSERT INTO users (email, password_hash, full_name, role, campaign_id,
+                                job_title, workgroup, zoho_employee_no, must_change_password)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, TRUE)
+             RETURNING id`,
+            [p.email, hash, p.fullname, p.role, campaignId, p.jobTitle, p.workgroup, p.empNo]
+          );
+          created.push({ id: ins.rows[0].id, full_name: p.fullname, email: p.email, role: p.role, campaign: p.campaign, temp_password: temp });
+        }
+        await client.query('RELEASE SAVEPOINT row');
+      } catch (err) {
+        await client.query('ROLLBACK TO SAVEPOINT row').catch(() => {});
+        failures.push({ name: p.fullname, email: p.email, error: err.message });
       }
     }
   });
 
-  return { preview: false, summary: { ...summary, created: created.length, updated }, created };
+  return {
+    preview: false,
+    summary: { ...summary, created: created.length, updated, failed: failures.length },
+    created,
+    failures: failures.slice(0, 25),
+  };
 }
 
 function tally(arr) {
