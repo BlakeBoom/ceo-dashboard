@@ -259,10 +259,15 @@ input:focus-visible,select:focus-visible{outline:none;border-color:var(--accent)
 /* ─── Rich charts: hero cards, rings, area charts ──────────────────── */
 .hero-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px;margin-bottom:14px}
 .hero{border-radius:16px;padding:18px 20px;display:flex;align-items:center;justify-content:space-between;gap:14px;box-shadow:var(--shadow);position:relative;overflow:hidden;min-height:104px}
-.hero.grad-a{background:linear-gradient(135deg,#6d5efc 0%,#a06bff 100%);color:#fff}
-.hero.grad-b{background:linear-gradient(135deg,#c4459c 0%,#7b53e0 100%);color:#fff}
-.hero.grad-c{background:linear-gradient(135deg,#1f9e7a 0%,#2bb6a3 100%);color:#fff}
 .hero.dark{background:var(--card);border:1px solid var(--border-light)}
+/* Status-driven hero colours: the colour answers "is this good or bad?" */
+.hero.info{background:linear-gradient(135deg,#4f6bf0 0%,#7b5ce0 100%);color:#fff}
+.hero.good{background:linear-gradient(135deg,#1f9e6e 0%,#37c08a 100%);color:#fff}
+.hero.warn{background:linear-gradient(135deg,#bd861d 0%,#e0a93a 100%);color:#fff}
+.hero.bad{background:linear-gradient(135deg,#c0413f 0%,#e0696b 100%);color:#fff}
+.hero.good .hero-lbl,.hero.warn .hero-lbl,.hero.bad .hero-lbl,.hero.info .hero-lbl{color:rgba(255,255,255,.9)}
+.hero.good .hero-val,.hero.warn .hero-val,.hero.bad .hero-val,.hero.info .hero-val{color:#fff}
+.hero.good .hero-delta,.hero.warn .hero-delta,.hero.bad .hero-delta,.hero.info .hero-delta{color:rgba(255,255,255,.92)}
 .hero-body{min-width:0}
 .hero-lbl{font-size:12px;font-weight:500;opacity:.92;letter-spacing:.2px}
 .hero.dark .hero-lbl{color:var(--text2);opacity:1}
@@ -2322,14 +2327,16 @@ function svgRing(pct, { size = 84, stroke = 9, val = '', sub = '', light = false
 }
 
 // Multi-segment donut. segments: [{value,color}]. Centre shows big+small text.
-function svgDonut(segments, { size = 128, stroke = 14, center = '', sub = '' } = {}) {
+function svgDonut(segments, { size = 128, stroke = 14, center = '', sub = '', gap = 0 } = {}) {
   const r = 42, c = 2 * Math.PI * r;
   const total = segments.reduce((a, s) => a + (s.value || 0), 0);
+  const drawn = segments.filter(s => s.value > 0);
   let off = 0;
-  const arcs = total > 0 ? segments.filter(s => s.value > 0).map(s => {
+  const arcs = total > 0 ? drawn.map(s => {
     const len = (s.value / total) * c;
+    const vis = Math.max(0.5, len - (drawn.length > 1 ? gap : 0)); // leave a gap between slices
     const seg = `<circle cx="50" cy="50" r="${r}" fill="none" stroke="${s.color}" stroke-width="${stroke}"
-      stroke-dasharray="${len.toFixed(2)} ${(c - len).toFixed(2)}" stroke-dashoffset="${(-off).toFixed(2)}"
+      stroke-dasharray="${vis.toFixed(2)} ${(c - vis).toFixed(2)}" stroke-dashoffset="${(-off).toFixed(2)}"
       transform="rotate(-90 50 50)"/>`;
     off += len;
     return seg;
@@ -2537,19 +2544,30 @@ function renderSummary() {
   const slipDeltaTxt = slipDelta ? { dir: slipDelta.dir, txt: `${slipDelta.val>0?'+':''}${slipDelta.val.toFixed(1)}pt` } : null;
   const shrDeltaTxt = shrinkageDelta ? { dir: shrinkageDelta.dir, txt: `${shrinkageDelta.val>0?'+':''}${shrinkageDelta.val.toFixed(1)}pt` } : null;
 
+  // Status banding → colour. Each card's colour means "is this good/bad?".
+  // For lower-is-better metrics (absence, slippage) the bands invert.
+  const band = (v, goodMax, warnMax) => v == null ? 'info' : v <= goodMax ? 'good' : v <= warnMax ? 'warn' : 'bad';
+  const bandHi = (v, goodMin, warnMin) => v == null ? 'info' : v >= goodMin ? 'good' : v >= warnMin ? 'warn' : 'bad';
+  const fulfilStatus = bandHi(fulfilment, 95, 85);     // delivering vs required
+  const healthStatus = bandHi(gPct, 80, 50);           // campaigns on track
+  const absStatus = band(absenceRate, 5, 10);          // ≤5% good
+  const slipStatus = band(slippage, 5, 15);            // ≤5% good
+  const shrStatus = band(shrinkageTotal, 25, 35);      // typical 25-35%
+  const onColour = (s) => s !== 'info';                // coloured cards get white rings
+
   const heroCards = [
-    hero('grad-a', 'Billable Hours', Math.round(totalBillable).toLocaleString(),
-      svgRing(fulfilment != null ? Math.min(100, fulfilment) : 0, { light: true, val: fulfilment != null ? Math.round(fulfilment)+'%' : '—', sub: 'of req' }), billDeltaTxt),
-    hero('grad-b', 'Campaign Health', `${green}/${total}`,
-      svgRing(gPct, { light: true, val: Math.round(gPct)+'%', sub: 'on track' }), null),
+    hero(fulfilStatus, 'Billable Hours', Math.round(totalBillable).toLocaleString(),
+      svgRing(fulfilment != null ? Math.min(100, fulfilment) : 0, { light: onColour(fulfilStatus), val: fulfilment != null ? Math.round(fulfilment)+'%' : '—', sub: 'of req' }), billDeltaTxt),
+    hero(healthStatus, 'Campaign Health', `${green}/${total}`,
+      svgRing(gPct, { light: onColour(healthStatus), val: Math.round(gPct)+'%', sub: 'on track' }), null),
     (STATE.shrinkageAvailable && shrinkageTotal != null)
-      ? hero('dark', 'Shrinkage', shrinkageTotal.toFixed(1)+'%',
-          svgRing(Math.min(100, shrinkageTotal), { val: shrinkageTotal.toFixed(0)+'%', sub: 'shrink' }), shrDeltaTxt)
-      : hero('dark', 'Volume', fmtK(totalCalls+totalTickets), null,
+      ? hero(shrStatus, 'Shrinkage', shrinkageTotal.toFixed(1)+'%',
+          svgRing(Math.min(100, shrinkageTotal), { light: onColour(shrStatus), val: shrinkageTotal.toFixed(0)+'%', sub: 'shrink' }), shrDeltaTxt)
+      : hero('info', 'Volume', fmtK(totalCalls+totalTickets), null,
           { dir:'', txt:`${Math.round(totalCalls).toLocaleString()} calls · ${Math.round(totalTickets).toLocaleString()} tkts` }),
-    hero('dark', 'Absence', absenceRate != null ? absenceRate.toFixed(1)+'%' : '—', null,
+    hero(absStatus, 'Absence', absenceRate != null ? absenceRate.toFixed(1)+'%' : '—', null,
       absDeltaTxt || { dir:'', txt:'target ≤5%' }),
-    hero('dark', 'Slippage', slippage != null ? slippage.toFixed(1)+'%' : '—', null,
+    hero(slipStatus, 'Slippage', slippage != null ? slippage.toFixed(1)+'%' : '—', null,
       slipDeltaTxt || { dir:'', txt:`${Math.round(reqHrsExpected).toLocaleString()} hrs req` }),
   ].join('');
 
@@ -2564,29 +2582,34 @@ function renderSummary() {
         ${svgArea(billSeries, { labels: weekLabels, series2: reqSeries.some(v=>v>0) ? reqSeries : null, fmt: fmtK })}
       </div>
       <div class="chart-card">
-        <div class="chart-head"><div class="chart-title">Billable hours by campaign</div><div class="chart-sub">where capacity goes</div></div>
+        <div class="chart-head"><div class="chart-title">Capacity by campaign</div><div class="chart-sub">coloured by health</div></div>
         ${(() => {
-          const palette = ['#6d5efc','#c4459c','#2bb6a3','#f0a93a','#5d9bf2','#e06a6a','#9b6dff','#37c5a0'];
-          const byBill = camps.map(c => ({ c, v: STATE.campaignWeek[c][wk]?.billable || 0 }))
+          const ragColor = (r) => r === 'green' ? 'var(--green-text)' : r === 'amber' ? 'var(--amber-text)' : r === 'red' ? 'var(--red-text)' : 'var(--text4)';
+          const byBill = camps.map(c => ({ c, v: STATE.campaignWeek[c][wk]?.billable || 0, rag: overalls[c] }))
             .filter(x => x.v > 0).sort((a, b) => b.v - a.v);
           if (!byBill.length) return '<div class="flag-empty" style="padding:24px">No billable hours this ' + periodNoun() + '.</div>';
-          const top = byBill.slice(0, 7);
-          const otherV = byBill.slice(7).reduce((a, x) => a + x.v, 0);
+          const top = byBill.slice(0, 8);
+          const otherV = byBill.slice(8).reduce((a, x) => a + x.v, 0);
           const sumV = byBill.reduce((a, x) => a + x.v, 0) || 1;
-          const segs = top.map((x, i) => ({ value: x.v, color: palette[i % palette.length] }));
+          // Slices coloured by campaign health, so big red slices = lots of
+          // capacity tied up in at-risk campaigns.
+          const segs = top.map(x => ({ value: x.v, color: ragColor(x.rag) }));
           if (otherV > 0) segs.push({ value: otherV, color: 'var(--text4)' });
-          const legend = top.map((x, i) => `
+          const atRisk = byBill.filter(x => x.rag === 'red').reduce((a, x) => a + x.v, 0);
+          const atRiskPct = Math.round(atRisk / sumV * 100);
+          const legend = top.map(x => `
             <div class="health-legend-row camp-leg" data-camp="${x.c}" style="cursor:pointer">
-              <span class="health-legend-dot" style="background:${palette[i % palette.length]}"></span>
+              <span class="health-legend-dot" style="background:${ragColor(x.rag)}"></span>
               <span class="health-legend-num">${fmtK(x.v)}</span>
               <span class="health-legend-lbl">${CAMP_DISPLAY[x.c]||x.c} · ${Math.round(x.v/sumV*100)}%</span>
             </div>`).join('') + (otherV > 0 ? `
             <div class="health-legend-row"><span class="health-legend-dot" style="background:var(--text4)"></span>
               <span class="health-legend-num">${fmtK(otherV)}</span><span class="health-legend-lbl">Other · ${Math.round(otherV/sumV*100)}%</span></div>` : '');
           return `<div style="display:flex;align-items:center;justify-content:center;gap:16px;padding:6px 0 2px;flex-wrap:wrap">
-            ${svgDonut(segs, { center: fmtK(sumV), sub: 'hrs' })}
-            <div class="health-legend" style="min-width:150px">${legend}</div>
-          </div>`;
+            ${svgDonut(segs, { gap: 3, center: atRiskPct + '%', sub: 'at risk' })}
+            <div class="health-legend" style="min-width:160px">${legend}</div>
+          </div>
+          <div class="chart-sub" style="text-align:center;margin-top:8px;text-transform:none;letter-spacing:0">${fmtK(atRisk)} of ${fmtK(sumV)} billable hrs are in <span style="color:var(--red-text)">red</span> campaigns</div>`;
         })()}
       </div>
     </div>
