@@ -2210,6 +2210,25 @@ async function saveUserEdit(id, rowEl) {
   else { alert('Save failed: ' + (await r.text()).slice(0, 160)); }
 }
 
+async function createUser() {
+  const v = (f) => $(`nu_${f}`)?.value?.trim();
+  const body = {
+    full_name: v('name'), email: v('email'), role: v('role'),
+    campaign_id: v('campaign') ? parseInt(v('campaign'), 10) : null,
+    team_id: v('team') ? parseInt(v('team'), 10) : null,
+  };
+  if (!body.full_name || !body.email) { alert('Name and email are required.'); return; }
+  const r = await apiFetch('/api/users', { method: 'POST', body: JSON.stringify(body) });
+  const text = await r.text(); let data; try { data = JSON.parse(text); } catch { data = {}; }
+  if (r.ok) {
+    USERS_STATE.showCreate = false;
+    USERS_STATE.justCreated = [{ full_name: body.full_name, email: body.email, temp_password: data.temp_password || '(set by you)' }];
+    loadUsers();
+  } else {
+    alert('Create failed: ' + (data.error === 'email_exists' ? 'that email already exists' : (data.error || r.status)));
+  }
+}
+
 async function setUserActive(id, active, name) {
   if (!active && !confirm(`Deactivate ${name}? This revokes their access immediately.`)) return;
   const r = await apiFetch(`/api/users/${id}`, { method: 'PATCH', body: JSON.stringify({ active }) });
@@ -2394,10 +2413,32 @@ function renderUsers() {
         <div class="agent-tbl-sub">${us.length} account${us.length===1?'':'s'}${summaryLine?` · ${summaryLine}`:''}</div>
       </div>
       <div style="display:flex;align-items:center;gap:8px">
+        <button id="usersNewBtn" class="btn-ghost">+ New user</button>
         <input id="usersDeptView" class="modal-month" placeholder="Department view ID" title="Zoho Analytics view ID for the Department lookup table" value="${USERS_STATE.deptViewId||''}" style="font-size:12px;padding:7px 10px;width:170px">
         <button id="usersPreviewBtn" class="btn-primary" ${USERS_STATE.busy?'disabled':''}>↻ Provision from EmployeeProfile</button>
       </div>
     </div>
+    ${USERS_STATE.showCreate ? `
+      <div class="users-panel">
+        <div class="users-panel-h">New user — a temporary password is generated and shown once</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          <input id="nu_name" class="modal-month" placeholder="Full name" style="font-size:12px;padding:7px 10px;width:180px">
+          <input id="nu_email" class="modal-month" placeholder="Email" style="font-size:12px;padding:7px 10px;width:200px">
+          <select id="nu_role" class="modal-month" style="font-size:12px;padding:7px 10px">
+            ${['exco','admin','campaign_lead','tm','agent'].map(r=>`<option value="${r}">${_roleLabel[r]}</option>`).join('')}
+          </select>
+          <select id="nu_campaign" class="modal-month" style="font-size:12px;padding:7px 10px">
+            <option value="">— campaign (optional) —</option>
+            ${USERS_STATE.campaigns.map(c=>`<option value="${c.id}">${c.name}</option>`).join('')}
+          </select>
+          <select id="nu_team" class="modal-month" style="font-size:12px;padding:7px 10px">
+            <option value="">— team (optional) —</option>
+            ${USERS_STATE.teams.map(t=>`<option value="${t.id}">${t.name}</option>`).join('')}
+          </select>
+          <button id="nu_save" class="btn-primary">Create user</button>
+          <button id="nu_cancel" class="btn-ghost">Cancel</button>
+        </div>
+      </div>` : ''}
     ${USERS_STATE.error ? `<div class="err-banner show" style="margin-top:8px">${USERS_STATE.error}</div>` : ''}
     ${failPanel}
     ${createdPanel}
@@ -2411,6 +2452,9 @@ function renderUsers() {
       </div>`}
   `;
 
+  $('usersNewBtn')?.addEventListener('click', () => { USERS_STATE.showCreate = !USERS_STATE.showCreate; renderUsers(); });
+  $('nu_save')?.addEventListener('click', createUser);
+  $('nu_cancel')?.addEventListener('click', () => { USERS_STATE.showCreate = false; renderUsers(); });
   $('usersDeptView')?.addEventListener('input', (e) => {
     USERS_STATE.deptViewId = e.target.value.trim();
     localStorage.setItem('provisionDeptViewId', USERS_STATE.deptViewId);

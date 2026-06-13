@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import crypto from 'node:crypto';
 import { z } from 'zod';
 import { query } from '../db.js';
 import { hashPassword } from '../auth.js';
@@ -59,7 +60,7 @@ router.post('/provision', requireRole('admin'), async (req, res) => {
 const createSchema = z.object({
   email: z.string().email().max(254),
   full_name: z.string().min(1).max(200),
-  password: z.string().min(10).max(200),
+  password: z.string().min(10).max(200).optional(),
   role: z.enum(['agent', 'tm', 'campaign_lead', 'exco', 'admin']),
   campaign_id: z.number().int().positive().nullable().optional(),
   team_id: z.number().int().positive().nullable().optional(),
@@ -108,20 +109,23 @@ router.post('/', requireRole('admin'), async (req, res) => {
   if (!parsed.success) return res.status(400).json({ error: 'invalid_input', detail: parsed.error.flatten() });
 
   const { email, full_name, password, role, campaign_id, team_id, zoho_user_id } = parsed.data;
-  const pwHash = await hashPassword(password);
+  // If no password is supplied, generate a one-time temp password (shown once)
+  // and force a change on first login — same as provisioning.
+  const temp = password ? null : crypto.randomBytes(9).toString('base64').replace(/[^a-zA-Z0-9]/g, '').slice(0, 10) + 'A1';
+  const pwHash = await hashPassword(temp || password);
   try {
     const { rows } = await query(
-      `INSERT INTO users (email, password_hash, full_name, role, campaign_id, team_id, zoho_user_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `INSERT INTO users (email, password_hash, full_name, role, campaign_id, team_id, zoho_user_id, must_change_password)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        RETURNING id, email, full_name, role, campaign_id, team_id, active`,
-      [email, pwHash, full_name, role, campaign_id ?? null, team_id ?? null, zoho_user_id ?? null]
+      [email, pwHash, full_name, role, campaign_id ?? null, team_id ?? null, zoho_user_id ?? null, !!temp]
     );
     await query(
       `INSERT INTO audit_log (user_id, action, target_id, metadata)
        VALUES ($1, 'user.create', $2, $3)`,
       [req.user.id, rows[0].id, { role, email }]
     );
-    res.status(201).json({ user: rows[0] });
+    res.status(201).json({ user: rows[0], temp_password: temp });
   } catch (err) {
     if (err.code === '23505') return res.status(409).json({ error: 'email_exists' });
     throw err;
