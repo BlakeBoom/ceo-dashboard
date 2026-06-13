@@ -2564,15 +2564,30 @@ function renderSummary() {
         ${svgArea(billSeries, { labels: weekLabels, series2: reqSeries.some(v=>v>0) ? reqSeries : null, fmt: fmtK })}
       </div>
       <div class="chart-card">
-        <div class="chart-head"><div class="chart-title">Campaign health</div><div class="chart-sub">${total} campaigns</div></div>
-        <div style="display:flex;align-items:center;justify-content:center;gap:18px;padding:6px 0 2px">
-          ${svgDonut([{value:green,color:'var(--green-text)'},{value:amber,color:'var(--amber-text)'},{value:red,color:'var(--red-text)'}], { center: `${green}/${total}`, sub: 'on track' })}
-          <div class="health-legend">
-            <div class="health-legend-row"><span class="health-legend-dot green"></span><span class="health-legend-num">${green}</span><span class="health-legend-lbl">Green</span></div>
-            <div class="health-legend-row"><span class="health-legend-dot amber"></span><span class="health-legend-num">${amber}</span><span class="health-legend-lbl">Amber</span></div>
-            <div class="health-legend-row"><span class="health-legend-dot red"></span><span class="health-legend-num">${red}</span><span class="health-legend-lbl">Red</span></div>
-          </div>
-        </div>
+        <div class="chart-head"><div class="chart-title">Billable hours by campaign</div><div class="chart-sub">where capacity goes</div></div>
+        ${(() => {
+          const palette = ['#6d5efc','#c4459c','#2bb6a3','#f0a93a','#5d9bf2','#e06a6a','#9b6dff','#37c5a0'];
+          const byBill = camps.map(c => ({ c, v: STATE.campaignWeek[c][wk]?.billable || 0 }))
+            .filter(x => x.v > 0).sort((a, b) => b.v - a.v);
+          if (!byBill.length) return '<div class="flag-empty" style="padding:24px">No billable hours this ' + periodNoun() + '.</div>';
+          const top = byBill.slice(0, 7);
+          const otherV = byBill.slice(7).reduce((a, x) => a + x.v, 0);
+          const sumV = byBill.reduce((a, x) => a + x.v, 0) || 1;
+          const segs = top.map((x, i) => ({ value: x.v, color: palette[i % palette.length] }));
+          if (otherV > 0) segs.push({ value: otherV, color: 'var(--text4)' });
+          const legend = top.map((x, i) => `
+            <div class="health-legend-row camp-leg" data-camp="${x.c}" style="cursor:pointer">
+              <span class="health-legend-dot" style="background:${palette[i % palette.length]}"></span>
+              <span class="health-legend-num">${fmtK(x.v)}</span>
+              <span class="health-legend-lbl">${CAMP_DISPLAY[x.c]||x.c} · ${Math.round(x.v/sumV*100)}%</span>
+            </div>`).join('') + (otherV > 0 ? `
+            <div class="health-legend-row"><span class="health-legend-dot" style="background:var(--text4)"></span>
+              <span class="health-legend-num">${fmtK(otherV)}</span><span class="health-legend-lbl">Other · ${Math.round(otherV/sumV*100)}%</span></div>` : '');
+          return `<div style="display:flex;align-items:center;justify-content:center;gap:16px;padding:6px 0 2px;flex-wrap:wrap">
+            ${svgDonut(segs, { center: fmtK(sumV), sub: 'hrs' })}
+            <div class="health-legend" style="min-width:150px">${legend}</div>
+          </div>`;
+        })()}
       </div>
     </div>
     <div class="sum-card">
@@ -2593,7 +2608,7 @@ function renderSummary() {
     </div>
   `;
   // Flag click → go to campaign drill
-  $('summaryView').querySelectorAll('.flag').forEach(el => {
+  $('summaryView').querySelectorAll('.flag, .camp-leg').forEach(el => {
     el.onclick = () => {
       STATE.selectedCampaign = el.dataset.camp;
       STATE.selectedTeam = null;
