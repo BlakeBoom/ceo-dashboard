@@ -256,6 +256,37 @@ input:focus-visible,select:focus-visible{outline:none;border-color:var(--accent)
 .team-stat.grey{border-left-color:var(--grey-border)}
 .eff-label{font-size:9px;font-weight:600;letter-spacing:.8px;text-transform:uppercase;color:var(--text3);font-family:var(--mono);margin:12px 0 6px}
 
+/* ─── Rich charts: hero cards, rings, area charts ──────────────────── */
+.hero-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px;margin-bottom:14px}
+.hero{border-radius:16px;padding:18px 20px;display:flex;align-items:center;justify-content:space-between;gap:14px;box-shadow:var(--shadow);position:relative;overflow:hidden;min-height:104px}
+.hero.grad-a{background:linear-gradient(135deg,#6d5efc 0%,#a06bff 100%);color:#fff}
+.hero.grad-b{background:linear-gradient(135deg,#c4459c 0%,#7b53e0 100%);color:#fff}
+.hero.grad-c{background:linear-gradient(135deg,#1f9e7a 0%,#2bb6a3 100%);color:#fff}
+.hero.dark{background:var(--card);border:1px solid var(--border-light)}
+.hero-body{min-width:0}
+.hero-lbl{font-size:12px;font-weight:500;opacity:.92;letter-spacing:.2px}
+.hero.dark .hero-lbl{color:var(--text2);opacity:1}
+.hero-val{font-size:27px;font-weight:700;letter-spacing:-.6px;margin-top:3px;line-height:1.05}
+.hero-delta{font-size:11px;margin-top:5px;opacity:.92;display:inline-flex;align-items:center;gap:4px}
+.hero.dark .hero-val{color:var(--text)}
+.hero-delta.up{color:#a8f08a}.hero-delta.down{color:#ff9a9a}
+.hero.dark .hero-delta{color:var(--text3)}
+.hero.dark .hero-delta.up{color:var(--green-text)}.hero.dark .hero-delta.down{color:var(--red-text)}
+.ring-wrap{flex-shrink:0;line-height:0}
+svg.ring text,svg.gauge text{text-anchor:middle;font-family:var(--mono)}
+svg.ring .rv{font-size:19px;font-weight:700}
+svg.ring .rs{font-size:8px;letter-spacing:.5px;text-transform:uppercase}
+.chart-card{background:var(--card);border:1px solid var(--border-light);border-radius:14px;padding:16px 18px;box-shadow:var(--shadow)}
+.chart-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
+.chart-title{font-size:13px;font-weight:600}
+.chart-sub{font-size:11px;color:var(--text3);font-family:var(--mono)}
+.area-svg{width:100%;height:auto;display:block;overflow:visible}
+.area-svg .grid-line{stroke:var(--border-light);stroke-width:1}
+.area-svg .axis-lbl{fill:var(--text3);font-size:9px;font-family:var(--mono)}
+.area-svg .dot{fill:var(--accent-2);stroke:var(--card);stroke-width:2}
+.sum-grid2{display:grid;grid-template-columns:2fr 1fr;gap:12px;margin-bottom:14px}
+@media(max-width:900px){.sum-grid2{grid-template-columns:1fr}}
+
 /* Agent table (drill-down level 3) */
 .agent-tbl-wrap{background:var(--card);border:1px solid var(--border-light);border-radius:12px;overflow:hidden;box-shadow:var(--shadow)}
 .agent-tbl-head{padding:14px 18px;border-bottom:1px solid var(--border-light);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px}
@@ -1643,7 +1674,7 @@ function render() {
   // Footer
   const now = new Date();
   $('footer').innerHTML = `
-    <span>Boomerang BPO · Operations Dashboard v3 · UI refresh</span>
+    <span>Boomerang BPO · Operations Dashboard v4 · rich charts</span>
     <span>Source: ${STATE.dataSource === 'live' ? 'Zoho User_metrics_3 (live)' : 'Embedded W19–W22 snapshot'} · Rendered ${now.toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})}</span>
   `;
   // Granularity toggle active state
@@ -2260,6 +2291,113 @@ function renderUsers() {
 }
 
 // ─── Summary view ────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════════════
+// SVG CHART KIT — self-contained, dependency-free. Returns HTML strings.
+// ════════════════════════════════════════════════════════════════════════
+let _gid = 0;
+const gradId = () => `g${++_gid}`;
+
+// Circular progress ring with a centred value. `light` = white strokes/text for
+// use on gradient hero cards; otherwise an accent gradient on a dark track.
+function svgRing(pct, { size = 84, stroke = 9, val = '', sub = '', light = false } = {}) {
+  const r = 42, c = 2 * Math.PI * r;
+  const p = Math.max(0, Math.min(100, pct || 0));
+  const off = c * (1 - p / 100);
+  const id = gradId();
+  const track = light ? 'rgba(255,255,255,.28)' : 'var(--border-light)';
+  const stops = light
+    ? '<stop offset="0" stop-color="#fff" stop-opacity=".95"/><stop offset="1" stop-color="#fff" stop-opacity=".55"/>'
+    : '<stop offset="0" stop-color="var(--accent-2)"/><stop offset="1" stop-color="var(--accent)"/>';
+  const txt = light ? '#fff' : 'var(--text)';
+  const subc = light ? 'rgba(255,255,255,.8)' : 'var(--text3)';
+  return `<svg class="ring" viewBox="0 0 100 100" width="${size}" height="${size}">
+    <defs><linearGradient id="${id}" x1="0" y1="0" x2="1" y2="1">${stops}</linearGradient></defs>
+    <circle cx="50" cy="50" r="${r}" fill="none" stroke="${track}" stroke-width="${stroke}"/>
+    <circle cx="50" cy="50" r="${r}" fill="none" stroke="url(#${id})" stroke-width="${stroke}"
+      stroke-linecap="round" stroke-dasharray="${c.toFixed(1)}" stroke-dashoffset="${off.toFixed(1)}"
+      transform="rotate(-90 50 50)" style="transition:stroke-dashoffset .6s ease"/>
+    ${val !== '' ? `<text class="rv" x="50" y="${sub ? 46 : 52}" fill="${txt}">${val}</text>` : ''}
+    ${sub ? `<text class="rs" x="50" y="62" fill="${subc}">${sub}</text>` : ''}
+  </svg>`;
+}
+
+// Multi-segment donut. segments: [{value,color}]. Centre shows big+small text.
+function svgDonut(segments, { size = 128, stroke = 14, center = '', sub = '' } = {}) {
+  const r = 42, c = 2 * Math.PI * r;
+  const total = segments.reduce((a, s) => a + (s.value || 0), 0);
+  let off = 0;
+  const arcs = total > 0 ? segments.filter(s => s.value > 0).map(s => {
+    const len = (s.value / total) * c;
+    const seg = `<circle cx="50" cy="50" r="${r}" fill="none" stroke="${s.color}" stroke-width="${stroke}"
+      stroke-dasharray="${len.toFixed(2)} ${(c - len).toFixed(2)}" stroke-dashoffset="${(-off).toFixed(2)}"
+      transform="rotate(-90 50 50)"/>`;
+    off += len;
+    return seg;
+  }).join('') : `<circle cx="50" cy="50" r="${r}" fill="none" stroke="var(--border)" stroke-width="${stroke}"/>`;
+  return `<svg class="ring" viewBox="0 0 100 100" width="${size}" height="${size}">
+    ${arcs}
+    ${center !== '' ? `<text class="rv" x="50" y="${sub ? 47 : 53}" fill="var(--text)" style="font-size:16px">${center}</text>` : ''}
+    ${sub ? `<text class="rs" x="50" y="61" fill="var(--text3)">${sub}</text>` : ''}
+  </svg>`;
+}
+
+// Smooth gradient area chart. values: number[]. Optional second series.
+function svgArea(values, { width = 640, height = 170, labels = [], series2 = null, fmt = (v) => v } = {}) {
+  const vals = values.map(v => +v || 0);
+  if (vals.length < 2) return '<div class="flag-empty">Not enough data to chart.</div>';
+  const all = series2 ? vals.concat(series2.map(v => +v || 0)) : vals;
+  const max = Math.max(...all, 1), min = Math.min(...all, 0), span = max - min || 1;
+  const padL = 34, padR = 10, padT = 12, padB = 22;
+  const iw = width - padL - padR, ih = height - padT - padB;
+  const X = (i) => padL + (i / (vals.length - 1)) * iw;
+  const Y = (v) => padT + ih - ((v - min) / span) * ih;
+  // Catmull-Rom → cubic bezier smoothing.
+  const smooth = (pts) => {
+    let d = `M ${pts[0][0].toFixed(1)} ${pts[0][1].toFixed(1)}`;
+    for (let i = 0; i < pts.length - 1; i++) {
+      const p0 = pts[i - 1] || pts[i], p1 = pts[i], p2 = pts[i + 1], p3 = pts[i + 2] || p2;
+      const c1x = p1[0] + (p2[0] - p0[0]) / 6, c1y = p1[1] + (p2[1] - p0[1]) / 6;
+      const c2x = p2[0] - (p3[0] - p1[0]) / 6, c2y = p2[1] - (p3[1] - p1[1]) / 6;
+      d += ` C ${c1x.toFixed(1)} ${c1y.toFixed(1)} ${c2x.toFixed(1)} ${c2y.toFixed(1)} ${p2[0].toFixed(1)} ${p2[1].toFixed(1)}`;
+    }
+    return d;
+  };
+  const pts = vals.map((v, i) => [X(i), Y(v)]);
+  const line = smooth(pts);
+  const fillId = gradId();
+  const area = `${line} L ${X(vals.length - 1).toFixed(1)} ${(padT + ih).toFixed(1)} L ${padL.toFixed(1)} ${(padT + ih).toFixed(1)} Z`;
+  // y gridlines (4)
+  let grid = '';
+  for (let g = 0; g <= 3; g++) {
+    const yv = min + (span * g / 3), y = Y(yv);
+    grid += `<line class="grid-line" x1="${padL}" y1="${y.toFixed(1)}" x2="${width - padR}" y2="${y.toFixed(1)}"/>
+      <text class="axis-lbl" x="${padL - 5}" y="${(y + 3).toFixed(1)}" text-anchor="end">${fmt(Math.round(yv))}</text>`;
+  }
+  let xlabels = '';
+  const nLab = labels.length;
+  if (nLab) labels.forEach((l, i) => {
+    if (nLab > 8 && i % Math.ceil(nLab / 8) !== 0 && i !== nLab - 1) return;
+    xlabels += `<text class="axis-lbl" x="${X(i).toFixed(1)}" y="${height - 6}" text-anchor="middle">${l}</text>`;
+  });
+  let line2 = '';
+  if (series2) {
+    const p2 = series2.map((v, i) => [X(i), Y(+v || 0)]);
+    line2 = `<path d="${smooth(p2)}" fill="none" stroke="var(--text3)" stroke-width="2" stroke-dasharray="4 4" opacity=".7"/>`;
+  }
+  const lastX = X(vals.length - 1), lastY = Y(vals[vals.length - 1]);
+  return `<svg class="area-svg" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none">
+    <defs><linearGradient id="${fillId}" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="var(--accent)" stop-opacity=".42"/>
+      <stop offset="1" stop-color="var(--accent)" stop-opacity="0"/></linearGradient></defs>
+    ${grid}
+    <path d="${area}" fill="url(#${fillId})"/>
+    <path d="${line}" fill="none" stroke="var(--accent-2)" stroke-width="2.5" stroke-linejoin="round"/>
+    ${line2}
+    <circle class="dot" cx="${lastX.toFixed(1)}" cy="${lastY.toFixed(1)}" r="3.5"/>
+    ${xlabels}
+  </svg>`;
+}
+
 function renderSummary() {
   const wk = STATE.selectedWeek;
   const prevWk = prevWeek(wk);
@@ -2374,74 +2512,61 @@ function renderSummary() {
 
   const total = camps.length || 1;
   const gPct = (green/total) * 100;
-  const aPct = (amber/total) * 100;
-  // donut maths
-  const C = 2 * Math.PI * 40;  // r=40
-  const gLen = (gPct/100) * C;
-  const aLen = (aPct/100) * C;
-  const rLen = C - gLen - aLen;
+
+  // Series for the area chart: total billable per week, with required as a
+  // dashed target line.
+  const billSeries = STATE.weeks.map(w => camps.reduce((a, c) => a + (STATE.campaignWeek[c]?.[w]?.billable || 0), 0));
+  const reqSeries = STATE.weeks.map(w => {
+    const rv = rulesForPeriod(w) || {};
+    return camps.reduce((a, c) => a + (STATE.campaignWeek[c]?.[w] && rv[c] ? reqHrsForPeriod(rv[c]) : 0), 0);
+  });
+  const weekLabels = STATE.weeks.map(w => pLbl(w));
+  const fulfilment = reqHrsExpected > 0 ? (totalBillable / reqHrsExpected) * 100 : null;
+  const fmtK = (n) => Math.abs(n) >= 1000 ? (n/1000).toFixed(n>=10000?0:1)+'k' : Math.round(n);
+
+  // Hero card builder.
+  const heroDelta = (d) => d ? `<div class="hero-delta ${d.dir==='up'?'up':d.dir==='down'?'down':''}">${d.dir==='up'?'▲':d.dir==='down'?'▼':'•'} ${d.txt}</div>` : '';
+  const hero = (cls, lbl, val, ringHtml, delta) => `
+    <div class="hero ${cls}">
+      <div class="hero-body"><div class="hero-lbl">${lbl}</div><div class="hero-val">${val}</div>${heroDelta(delta)}</div>
+      ${ringHtml ? `<div class="ring-wrap">${ringHtml}</div>` : ''}
+    </div>`;
+
+  const billDeltaTxt = billDelta ? { dir: billDelta.dir, txt: (billDelta.pct != null ? (billDelta.pct>0?'+':'')+billDelta.pct.toFixed(1)+'%' : billDelta.str) + ` vs ${prevWk ? pLbl(prevWk) : 'prev'}` } : null;
+  const absDeltaTxt = absDelta ? { dir: absDelta.dir, txt: `${absDelta.val>0?'+':''}${absDelta.val.toFixed(1)}pt` } : null;
+  const slipDeltaTxt = slipDelta ? { dir: slipDelta.dir, txt: `${slipDelta.val>0?'+':''}${slipDelta.val.toFixed(1)}pt` } : null;
+  const shrDeltaTxt = shrinkageDelta ? { dir: shrinkageDelta.dir, txt: `${shrinkageDelta.val>0?'+':''}${shrinkageDelta.val.toFixed(1)}pt` } : null;
+
+  const heroCards = [
+    hero('grad-a', 'Billable Hours', Math.round(totalBillable).toLocaleString(),
+      svgRing(fulfilment != null ? Math.min(100, fulfilment) : 0, { light: true, val: fulfilment != null ? Math.round(fulfilment)+'%' : '—', sub: 'of req' }), billDeltaTxt),
+    hero('grad-b', 'Campaign Health', `${green}/${total}`,
+      svgRing(gPct, { light: true, val: Math.round(gPct)+'%', sub: 'on track' }), null),
+    (STATE.shrinkageAvailable && shrinkageTotal != null)
+      ? hero('dark', 'Shrinkage', shrinkageTotal.toFixed(1)+'%',
+          svgRing(Math.min(100, shrinkageTotal), { val: shrinkageTotal.toFixed(0)+'%', sub: 'shrink' }), shrDeltaTxt)
+      : hero('dark', 'Volume', fmtK(totalCalls+totalTickets), null,
+          { dir:'', txt:`${Math.round(totalCalls).toLocaleString()} calls · ${Math.round(totalTickets).toLocaleString()} tkts` }),
+    hero('dark', 'Absence', absenceRate != null ? absenceRate.toFixed(1)+'%' : '—', null,
+      absDeltaTxt || { dir:'', txt:'target ≤5%' }),
+    hero('dark', 'Slippage', slippage != null ? slippage.toFixed(1)+'%' : '—', null,
+      slipDeltaTxt || { dir:'', txt:`${Math.round(reqHrsExpected).toLocaleString()} hrs req` }),
+  ].join('');
 
   $('summaryView').innerHTML = `
-    <div class="sum-grid">
-      <div class="sum-card">
-        <h3>Headline${isPartial ? ` <span class="mtd-badge" title="${pLbl(wk)} is still in progress — cumulative figures and targets are pro-rated to the elapsed portion">${periodNoun()}-to-date · ${pctElapsed}% elapsed</span>` : ''}</h3>
-        <div class="headline-grid">
-          <div class="headline">
-            <div class="headline-lbl">FTE</div>
-            <div class="headline-val">${totalFTE}</div>
-            ${fteDelta ? `<div class="headline-delta ${fteDelta.dir}">${fteDelta.str} vs ${prevWk ? pLbl(prevWk) : 'prev'}</div>` : `<div class="headline-sub">${isPartial ? `${periodNoun()}-to-date` : '—'}</div>`}
-          </div>
-          <div class="headline">
-            <div class="headline-lbl">Billable hrs</div>
-            <div class="headline-val">${Math.round(totalBillable).toLocaleString()}</div>
-            ${billDelta ? `<div class="headline-delta ${billDelta.dir}">${billDelta.pct != null ? (billDelta.pct>0?'+':'')+billDelta.pct.toFixed(1)+'%' : billDelta.str}</div>` : '<div class="headline-sub">—</div>'}
-          </div>
-          ${STATE.shrinkageAvailable && shrinkageTotal != null ? `
-          <div class="headline ${shrinkageTotal > 35 ? 'danger' : shrinkageTotal > 25 ? 'warn' : 'good'}">
-            <div class="headline-lbl">Shrinkage</div>
-            <div class="headline-val">${shrinkageTotal.toFixed(1)}%</div>
-            ${shrinkageDelta ? `<div class="headline-delta ${shrinkageDelta.dir}">${shrinkageDelta.val>0?'+':''}${shrinkageDelta.val.toFixed(1)}pt · plan ${shrinkagePlanned.toFixed(0)}% · unplan ${shrinkageUnplanned.toFixed(0)}%</div>` :
-              `<div class="headline-sub">plan ${shrinkagePlanned.toFixed(0)}% · unplan ${shrinkageUnplanned.toFixed(0)}%</div>`}
-          </div>
-          ` : `
-          <div class="headline">
-            <div class="headline-lbl">Volume</div>
-            <div class="headline-val">${Math.round((totalCalls+totalTickets)/1000)}k</div>
-            <div class="headline-sub">${Math.round(totalCalls).toLocaleString()} calls · ${Math.round(totalTickets).toLocaleString()} tickets</div>
-          </div>
-          `}
-          <div class="headline ${absenceRate != null ? (absenceRate > 10 ? 'danger' : absenceRate > 5 ? 'warn' : 'good') : ''}">
-            <div class="headline-lbl">Absence</div>
-            <div class="headline-val">${absenceRate != null ? absenceRate.toFixed(1)+'%' : '—'}</div>
-            ${absDelta ? `<div class="headline-delta ${absDelta.dir}">${absDelta.val>0?'+':''}${absDelta.val.toFixed(1)}pt vs ${prevWk ? pLbl(prevWk) : 'prev'}</div>` : '<div class="headline-sub">target ≤5%</div>'}
-          </div>
-          <div class="headline ${slippage != null ? (slippage > 15 ? 'danger' : slippage > 5 ? 'warn' : 'good') : ''}" title="${Math.round(reqHrsExpected).toLocaleString()} hrs required${isPartial ? ` so far (${pctElapsed}% of ${Math.round(reqHrsTotal).toLocaleString()} full-${periodNoun()})` : ''}${tgtVerLabel ? ` · targets: ${tgtVerLabel}` : ''}">
-            <div class="headline-lbl">Slippage</div>
-            <div class="headline-val">${slippage != null ? slippage.toFixed(1)+'%' : '—'}</div>
-            ${slipDelta ? `<div class="headline-delta ${slipDelta.dir}">${slipDelta.val>0?'+':''}${slipDelta.val.toFixed(1)}pt vs ${prevWk ? pLbl(prevWk) : 'prev'}</div>` : `<div class="headline-sub">${Math.round(reqHrsExpected).toLocaleString()} hrs req${isPartial ? ' to date' : ''}${tgtVerLabel ? ` · ${tgtVerLabel}` : ''}</div>`}
-          </div>
-          <div class="headline">
-            <div class="headline-lbl">Campaigns</div>
-            <div class="headline-val">${camps.length}</div>
-            <div class="headline-sub">${Object.keys(camps.reduce((a,c)=>{a[CAMP_SECTION[c]||'Other']=1;return a;},{})).length} sections active</div>
-          </div>
+    <div class="hero-row">${heroCards}</div>
+    <div class="sum-grid2">
+      <div class="chart-card">
+        <div class="chart-head">
+          <div class="chart-title">Billable hours over time</div>
+          <div class="chart-sub">${isPartial ? `${periodNoun()}-to-date · ${pctElapsed}% elapsed` : 'vs required (dashed)'}</div>
         </div>
+        ${svgArea(billSeries, { labels: weekLabels, series2: reqSeries.some(v=>v>0) ? reqSeries : null, fmt: fmtK })}
       </div>
-      <div class="sum-card">
-        <h3>Campaign health</h3>
-        <div class="health-wrap">
-          <div class="donut">
-            <svg viewBox="0 0 100 100">
-              ${gLen > 0 ? `<circle class="donut-circle" cx="50" cy="50" r="40" stroke="var(--green-text)" stroke-dasharray="${gLen} ${C}" stroke-dashoffset="0"/>` : ''}
-              ${aLen > 0 ? `<circle class="donut-circle" cx="50" cy="50" r="40" stroke="var(--amber-text)" stroke-dasharray="${aLen} ${C}" stroke-dashoffset="${-gLen}"/>` : ''}
-              ${rLen > 0 ? `<circle class="donut-circle" cx="50" cy="50" r="40" stroke="var(--red-text)" stroke-dasharray="${rLen} ${C}" stroke-dashoffset="${-(gLen+aLen)}"/>` : ''}
-              ${green+amber+red === 0 ? `<circle class="donut-circle" cx="50" cy="50" r="40" stroke="var(--border)"/>` : ''}
-            </svg>
-            <div class="donut-center">
-              <div class="donut-num">${green}/${total}</div>
-              <div class="donut-lbl">on track</div>
-            </div>
-          </div>
+      <div class="chart-card">
+        <div class="chart-head"><div class="chart-title">Campaign health</div><div class="chart-sub">${total} campaigns</div></div>
+        <div style="display:flex;align-items:center;justify-content:center;gap:18px;padding:6px 0 2px">
+          ${svgDonut([{value:green,color:'var(--green-text)'},{value:amber,color:'var(--amber-text)'},{value:red,color:'var(--red-text)'}], { center: `${green}/${total}`, sub: 'on track' })}
           <div class="health-legend">
             <div class="health-legend-row"><span class="health-legend-dot green"></span><span class="health-legend-num">${green}</span><span class="health-legend-lbl">Green</span></div>
             <div class="health-legend-row"><span class="health-legend-dot amber"></span><span class="health-legend-num">${amber}</span><span class="health-legend-lbl">Amber</span></div>
@@ -2449,21 +2574,21 @@ function renderSummary() {
           </div>
         </div>
       </div>
-      <div class="sum-card">
-        <h3>Watch list</h3>
-        <div class="flag-list">
-          ${flags.length === 0 ? `<div class="flag-empty">No flags this ${periodNoun()}. Everything is on track.</div>` :
-            flags.map(f => `
-              <button class="flag ${f.severity}" data-camp="${f.camp}">
-                <span class="flag-icon">${f.icon}</span>
-                <div class="flag-body">
-                  <div class="flag-camp">${CAMP_DISPLAY[f.camp]||f.camp}</div>
-                  <div class="flag-msg">${f.msg}</div>
-                </div>
-              </button>
-            `).join('')
-          }
-        </div>
+    </div>
+    <div class="sum-card">
+      <h3>Watch list</h3>
+      <div class="flag-list">
+        ${flags.length === 0 ? `<div class="flag-empty">No flags this ${periodNoun()}. Everything is on track.</div>` :
+          flags.map(f => `
+            <button class="flag ${f.severity}" data-camp="${f.camp}">
+              <span class="flag-icon">${f.icon}</span>
+              <div class="flag-body">
+                <div class="flag-camp">${CAMP_DISPLAY[f.camp]||f.camp}</div>
+                <div class="flag-msg">${f.msg}</div>
+              </div>
+            </button>
+          `).join('')
+        }
       </div>
     </div>
   `;
