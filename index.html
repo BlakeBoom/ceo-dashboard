@@ -1710,7 +1710,7 @@ function render() {
   // Footer
   const now = new Date();
   $('footer').innerHTML = `
-    <span>Boomerang BPO · Operations Dashboard v4 · rich charts</span>
+    <span>Boomerang BPO · Operations Dashboard v5 · rich charts everywhere</span>
     <span>Source: ${STATE.dataSource === 'live' ? 'Zoho User_metrics_3 (live)' : 'Embedded W19–W22 snapshot'} · Rendered ${now.toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})}</span>
   `;
   // Granularity toggle active state
@@ -1862,6 +1862,43 @@ function renderBonusSummary() {
       <td class="numeric dim">→</td>
     </tr>`).join('');
 
+  // Roll-up stats for the hero cards.
+  let awarded = 0, qualified = 0;
+  for (const c of s) for (const lv of Object.values(c.levels)) { awarded += lv.awarded || 0; qualified += lv.qualified || 0; }
+  const qRate = awarded ? (qualified / awarded) * 100 : null;
+  const paying = s.filter(c => c.total > 0).length;
+  const fmtK = (n) => Math.abs(n) >= 1000 ? (n/1000).toFixed(n>=10000?0:1)+'k' : Math.round(n);
+
+  const heroes = [
+    heroCard('info', 'Total Payout', fmtZAR(grand), '', { dir:'', txt: `${BONUS_STATE.month || ''} · ${paying} campaign${paying===1?'':'s'}` }),
+    heroCard(bandHi(qRate, 60, 40), 'Qualified Rate', qRate != null ? Math.round(qRate)+'%' : '—',
+      svgRing(qRate || 0, { light: qRate != null, val: qRate != null ? Math.round(qRate)+'%' : '—', sub: 'qualified' }),
+      { dir:'', txt: `${qualified}/${awarded} awards` }),
+    heroCard('dark', 'Agents Awarded', awarded.toLocaleString(), null, { dir:'', txt: 'with metrics this month' }),
+  ].join('');
+
+  // Payout share donut, coloured by each campaign's qualified rate (green = most
+  // agents qualifying), so it shows where spend goes AND whether it's earned.
+  const payCamps = s.filter(c => c.total > 0).map(c => {
+    let a = 0, q = 0; for (const lv of Object.values(c.levels)) { a += lv.awarded || 0; q += lv.qualified || 0; }
+    return { name: c.name, total: c.total, rate: a ? q / a * 100 : null };
+  }).sort((x, y) => y.total - x.total);
+  const donutBlock = payCamps.length ? `
+    <div class="chart-card" style="margin-bottom:14px">
+      <div class="chart-head"><div class="chart-title">Payout share by campaign</div><div class="chart-sub">coloured by qualified rate</div></div>
+      <div style="display:flex;align-items:center;justify-content:center;gap:18px;padding:6px 0 2px;flex-wrap:wrap">
+        ${svgDonut(payCamps.slice(0, 9).map(c => ({ value: c.total, color: ragColor(bandHi(c.rate, 60, 40) === 'good' ? 'green' : bandHi(c.rate, 60, 40) === 'warn' ? 'amber' : c.rate == null ? '' : 'red') })), { gap: 3, center: fmtZAR(grand).replace('R',''), sub: 'ZAR' })}
+        <div class="health-legend" style="min-width:180px">
+          ${payCamps.slice(0, 9).map(c => {
+            const st = bandHi(c.rate, 60, 40);
+            return `<div class="health-legend-row"><span class="health-legend-dot" style="background:${ragColor(st==='good'?'green':st==='warn'?'amber':c.rate==null?'':'red')}"></span>
+              <span class="health-legend-num">${fmtZAR(c.total)}</span>
+              <span class="health-legend-lbl">${c.name} · ${c.rate != null ? Math.round(c.rate)+'% qual' : 'n/a'}</span></div>`;
+          }).join('')}
+        </div>
+      </div>
+    </div>` : '';
+
   $('bonusView').innerHTML = `
     <div class="agent-tbl-head" style="background:var(--card);border:1px solid var(--border-light);border-radius:12px 12px 0 0;border-bottom:none">
       <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;flex:1">
@@ -1871,8 +1908,10 @@ function renderBonusSummary() {
       <button id="bonusSyncAllBtn" class="btn-primary" ${BONUS_STATE.syncing ? 'disabled' : ''}>${BONUS_STATE.syncing ? 'Syncing all…' : '↻ Sync all campaigns'}</button>
     </div>
     ${BONUS_STATE.error ? `<div class="err-banner show" style="margin-top:8px">${BONUS_STATE.error}</div>` : ''}
-    ${BONUS_STATE.loading ? '<div class="loading"><div class="spinner"></div><div>Loading…</div></div>' :
-      `<div class="agent-tbl-wrap" style="border-radius:0 0 12px 12px;border-top:none">
+    ${BONUS_STATE.loading ? '<div class="loading"><div class="spinner"></div><div>Loading…</div></div>' : `
+      <div class="hero-row" style="margin-top:14px">${heroes}</div>
+      ${donutBlock}
+      <div class="agent-tbl-wrap">
         <table class="agent-tbl">
           <thead><tr>
             <th>Campaign</th>
@@ -2335,7 +2374,7 @@ const gradId = () => `g${++_gid}`;
 
 // Circular progress ring with a centred value. `light` = white strokes/text for
 // use on gradient hero cards; otherwise an accent gradient on a dark track.
-function svgRing(pct, { size = 84, stroke = 9, val = '', sub = '', light = false } = {}) {
+function svgRing(pct, { size = 84, stroke = 9, val = '', sub = '', light = false, color = null } = {}) {
   const r = 42, c = 2 * Math.PI * r;
   const p = Math.max(0, Math.min(100, pct || 0));
   const off = c * (1 - p / 100);
@@ -2344,12 +2383,14 @@ function svgRing(pct, { size = 84, stroke = 9, val = '', sub = '', light = false
   const stops = light
     ? '<stop offset="0" stop-color="#fff" stop-opacity=".95"/><stop offset="1" stop-color="#fff" stop-opacity=".55"/>'
     : '<stop offset="0" stop-color="var(--accent-2)"/><stop offset="1" stop-color="var(--accent)"/>';
+  // Explicit colour (e.g. RAG) overrides the gradient so the ring reads as status.
+  const prog = color ? `stroke="${color}"` : `stroke="url(#${id})"`;
   const txt = light ? '#fff' : 'var(--text)';
   const subc = light ? 'rgba(255,255,255,.8)' : 'var(--text3)';
   return `<svg class="ring" viewBox="0 0 100 100" width="${size}" height="${size}">
-    <defs><linearGradient id="${id}" x1="0" y1="0" x2="1" y2="1">${stops}</linearGradient></defs>
+    ${color ? '' : `<defs><linearGradient id="${id}" x1="0" y1="0" x2="1" y2="1">${stops}</linearGradient></defs>`}
     <circle cx="50" cy="50" r="${r}" fill="none" stroke="${track}" stroke-width="${stroke}"/>
-    <circle cx="50" cy="50" r="${r}" fill="none" stroke="url(#${id})" stroke-width="${stroke}"
+    <circle cx="50" cy="50" r="${r}" fill="none" ${prog} stroke-width="${stroke}"
       stroke-linecap="round" stroke-dasharray="${c.toFixed(1)}" stroke-dashoffset="${off.toFixed(1)}"
       transform="rotate(-90 50 50)" style="transition:stroke-dashoffset .6s ease"/>
     ${val !== '' ? `<text class="rv" x="50" y="${sub ? 46 : 52}" fill="${txt}">${val}</text>` : ''}
@@ -2434,6 +2475,21 @@ function svgArea(values, { width = 640, height = 170, labels = [], series2 = nul
     <circle class="dot" cx="${lastX.toFixed(1)}" cy="${lastY.toFixed(1)}" r="3.5"/>
     ${xlabels}
   </svg>`;
+}
+
+// RAG status → colour, used everywhere so colour always means health.
+function ragColor(r) {
+  return r === 'green' ? 'var(--green-text)' : r === 'amber' ? 'var(--amber-text)'
+       : r === 'red' ? 'var(--red-text)' : 'var(--text4)';
+}
+// Status band helpers (higher-better / lower-better) → 'good'|'warn'|'bad'|'info'.
+function bandHi(v, goodMin, warnMin) { return v == null ? 'info' : v >= goodMin ? 'good' : v >= warnMin ? 'warn' : 'bad'; }
+function bandLo(v, goodMax, warnMax) { return v == null ? 'info' : v <= goodMax ? 'good' : v <= warnMax ? 'warn' : 'bad'; }
+
+// Shared hero stat card. `delta` = {dir:'up'|'down'|'', txt}.
+function heroCard(cls, lbl, val, ringHtml, delta) {
+  const d = delta ? `<div class="hero-delta ${delta.dir === 'up' ? 'up' : delta.dir === 'down' ? 'down' : ''}">${delta.dir === 'up' ? '▲' : delta.dir === 'down' ? '▼' : '•'} ${delta.txt}</div>` : '';
+  return `<div class="hero ${cls}"><div class="hero-body"><div class="hero-lbl">${lbl}</div><div class="hero-val">${val}</div>${d}</div>${ringHtml ? `<div class="ring-wrap">${ringHtml}</div>` : ''}</div>`;
 }
 
 function renderSummary() {
@@ -2886,6 +2942,13 @@ function campaignCardHtml(c, wk) {
     `<span class="camp-meta-chip" title="Planned ${sh.shrinkage_planned_pct?.toFixed(1)}% · Unplanned ${sh.shrinkage_unplanned_pct?.toFixed(1)}%" style="background:${sh.shrinkage_total_pct > 35 ? 'var(--red-bg)' : sh.shrinkage_total_pct > 25 ? 'var(--amber-bg)' : 'var(--green-bg)'};color:${sh.shrinkage_total_pct > 35 ? 'var(--red-text)' : sh.shrinkage_total_pct > 25 ? 'var(--amber-text)' : 'var(--green-text)'}">${sh.shrinkage_total_pct.toFixed(1)}% shrink</span>` : '';
 
   const eff = efficiencyStats(sh, m.billable, reqHrsForCampaign(c, wk));
+  // Header ring: % of required hours delivered, coloured by overall health.
+  const creq = reqHrsForCampaign(c, wk);
+  const cfulfil = creq != null && creq > 0 ? Math.min(100, (m.billable / creq) * 100) : null;
+  const headRing = svgRing(cfulfil != null ? cfulfil : 0, {
+    size: 58, stroke: 10, color: ragColor(overall),
+    val: cfulfil != null ? Math.round(cfulfil) + '%' : '—', sub: 'of req',
+  });
 
   return `
     <div class="camp-card ${hasTeams?'':'no-detail'}" data-camp="${c}">
@@ -2894,6 +2957,7 @@ function campaignCardHtml(c, wk) {
         <div class="camp-meta">
           <span class="camp-meta-chip">${m.fte} FTE</span>
           ${shrinkChip}
+          <span class="ring-wrap">${headRing}</span>
           ${hasTeams ? `<span class="camp-drill">Drill ›</span>` : ''}
         </div>
       </div>
@@ -3166,7 +3230,19 @@ function renderTrends() {
     </tr>`;
   }).join('');
 
+  // Org-wide billable trend across all loaded periods.
+  const orgSeries = STATE.weeks.map(w => camps.reduce((a, c) => a + (STATE.campaignWeek[c]?.[w]?.billable || 0), 0));
+  const orgLabels = STATE.weeks.map(w => pLbl(w));
+  const fmtK = (n) => Math.abs(n) >= 1000 ? (n/1000).toFixed(n>=10000?0:1)+'k' : Math.round(n);
+
   $('trendsView').innerHTML = `
+    <div class="chart-card" style="margin-bottom:14px">
+      <div class="chart-head">
+        <div class="chart-title">Billable hours · all campaigns</div>
+        <div class="chart-sub">${orgLabels.length} ${periodNoun()}s</div>
+      </div>
+      ${svgArea(orgSeries, { labels: orgLabels, fmt: fmtK })}
+    </div>
     <div class="trends-grid">
       <div class="trend-card">
         <h3>Top growers <span class="h3-kpi">Billable hrs vs ${prevWk ? pLbl(prevWk) : 'prev'}</span></h3>
