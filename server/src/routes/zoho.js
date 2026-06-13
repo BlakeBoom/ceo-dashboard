@@ -10,6 +10,7 @@ import { Router } from 'express';
 import { requireRole } from '../rbac.js';
 import { fetchView, fetchViewByDate, VIEW } from '../zoho.js';
 import { canonicalCampaign } from '../provision.js';
+import { seesAllScope } from '../rbac.js';
 
 const router = Router();
 
@@ -31,7 +32,7 @@ function normName(s) {
 //                   identifiable by name (team_name matches the leader's name)
 // A non-admin with no campaign sees nothing rather than everything.
 function scopeMetricsRows(user, rows) {
-  if (user.role === 'admin') return rows;
+  if (seesAllScope(user)) return rows;
   const slug = user.campaign_slug;
   if (!slug) return [];
   let out = rows.filter(r => {

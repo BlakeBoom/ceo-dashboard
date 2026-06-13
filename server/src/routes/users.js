@@ -60,10 +60,48 @@ const createSchema = z.object({
   email: z.string().email().max(254),
   full_name: z.string().min(1).max(200),
   password: z.string().min(10).max(200),
-  role: z.enum(['agent', 'tm', 'campaign_lead', 'admin']),
+  role: z.enum(['agent', 'tm', 'campaign_lead', 'exco', 'admin']),
   campaign_id: z.number().int().positive().nullable().optional(),
   team_id: z.number().int().positive().nullable().optional(),
   zoho_user_id: z.string().max(64).nullable().optional(),
+});
+
+// Admin-only: edit an existing user's role / campaign / team / active flag.
+// Any of these change what the user can see, so bump token_version to refresh
+// their session immediately.
+const updateSchema = z.object({
+  role: z.enum(['agent', 'tm', 'campaign_lead', 'exco', 'admin']).optional(),
+  campaign_id: z.number().int().positive().nullable().optional(),
+  team_id: z.number().int().positive().nullable().optional(),
+  active: z.boolean().optional(),
+}).refine(o => Object.keys(o).length > 0, { message: 'no fields to update' });
+
+router.patch('/:id', requireRole('admin'), async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const parsed = updateSchema.safeParse(req.body);
+  if (!Number.isFinite(id) || !parsed.success) {
+    return res.status(400).json({ error: 'invalid_input', detail: parsed.success ? undefined : parsed.error.flatten() });
+  }
+  const sets = [], vals = [];
+  for (const [k, v] of Object.entries(parsed.data)) { sets.push(`${k} = $${vals.length + 1}`); vals.push(v); }
+  vals.push(id);
+  try {
+    const { rows } = await query(
+      `UPDATE users SET ${sets.join(', ')}, token_version = token_version + 1, updated_at = NOW()
+        WHERE id = $${vals.length}
+        RETURNING id, email, full_name, role, campaign_id, team_id, active`,
+      vals
+    );
+    if (!rows.length) return res.status(404).json({ error: 'not_found' });
+    await query(
+      `INSERT INTO audit_log (user_id, action, target_id, metadata) VALUES ($1, 'user.update', $2, $3)`,
+      [req.user.id, id, parsed.data]
+    );
+    res.json({ user: rows[0] });
+  } catch (err) {
+    if (err.code === '23503') return res.status(400).json({ error: 'invalid_campaign_or_team' });
+    throw err;
+  }
 });
 router.post('/', requireRole('admin'), async (req, res) => {
   const parsed = createSchema.safeParse(req.body);

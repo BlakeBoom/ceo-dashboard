@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { query } from '../db.js';
-import { scopeClause, requireRole } from '../rbac.js';
+import { scopeClause, requireRole, seesAllScope } from '../rbac.js';
 
 const router = Router();
 
@@ -72,8 +72,8 @@ router.put('/rules', requireRole('admin'), async (req, res) => {
   res.json({ ok: true, rule_id: rows[0].id });
 });
 
-// ── Admin: financial summary per campaign for a month, drillable ────────────
-router.get('/summary', requireRole('admin'), async (req, res) => {
+// ── Exec (admin + exco): financial summary per campaign for a month ─────────
+router.get('/summary', requireRole('exco'), async (req, res) => {
   const ym = /^\d{4}-\d{2}$/.test(req.query.year_month || '') ? req.query.year_month : null;
   const { rows: monthRows } = await query(
     `SELECT DISTINCT to_char(period_start, 'YYYY-MM') AS ym FROM bonus_periods ORDER BY ym DESC`
@@ -118,7 +118,7 @@ router.get('/summary', requireRole('admin'), async (req, res) => {
 router.get('/periods', async (req, res) => {
   const params = [];
   let where = 'TRUE';
-  if (req.user.role !== 'admin') {
+  if (!seesAllScope(req.user)) {
     if (req.user.campaign_id == null) return res.json({ periods: [] });
     where = 'bp.campaign_id = $1';
     params.push(req.user.campaign_id);
@@ -145,7 +145,7 @@ router.get('/awards', async (req, res) => {
   const { rows: prows } = await query(`SELECT campaign_id, locked FROM bonus_periods WHERE id = $1`, [periodId]);
   if (!prows.length) return res.status(404).json({ error: 'period_not_found' });
   const campaignId = prows[0].campaign_id;
-  if (req.user.role !== 'admin' && req.user.campaign_id !== campaignId) {
+  if (!seesAllScope(req.user) && req.user.campaign_id !== campaignId) {
     return res.status(403).json({ error: 'forbidden' });
   }
 
@@ -229,7 +229,7 @@ router.get('/rules', async (req, res) => {
   const campaignId = parseInt(req.query.campaign_id, 10);
   const onDate = req.query.on_date || new Date().toISOString().slice(0, 10);
   if (!Number.isFinite(campaignId)) return res.status(400).json({ error: 'campaign_id required' });
-  if (req.user.role !== 'admin' && req.user.campaign_id !== campaignId) {
+  if (!seesAllScope(req.user) && req.user.campaign_id !== campaignId) {
     return res.status(403).json({ error: 'forbidden' });
   }
   const { rows } = await query(

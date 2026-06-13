@@ -1712,7 +1712,7 @@ function render() {
   // Footer
   const now = new Date();
   $('footer').innerHTML = `
-    <span>Boomerang BPO · Operations Dashboard v5 · rich charts everywhere</span>
+    <span>Boomerang BPO · Operations Dashboard v6 · EXCO + user editing</span>
     <span>Source: ${STATE.dataSource === 'live' ? 'Zoho User_metrics_3 (live)' : 'Embedded W19–W22 snapshot'} · Rendered ${now.toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})}</span>
   `;
   // Granularity toggle active state
@@ -1913,7 +1913,7 @@ function renderBonusSummary() {
         <select id="bonusMonthSelect" class="modal-month" style="font-size:13px;padding:7px 10px">${monthOpts || '<option>No periods yet</option>'}</select>
         <div class="agent-tbl-sub">Payouts to date · ${s.length} campaign${s.length===1?'':'s'} · grand total ${fmtZAR(grand)}</div>
       </div>
-      <button id="bonusSyncAllBtn" class="btn-primary" ${BONUS_STATE.syncing ? 'disabled' : ''}>${BONUS_STATE.syncing ? 'Syncing all…' : '↻ Sync all campaigns'}</button>
+      ${AUTH.user?.role === 'admin' ? `<button id="bonusSyncAllBtn" class="btn-primary" ${BONUS_STATE.syncing ? 'disabled' : ''}>${BONUS_STATE.syncing ? 'Syncing all…' : '↻ Sync all campaigns'}</button>` : ''}
     </div>
     ${BONUS_STATE.error ? `<div class="err-banner show" style="margin-top:8px">${BONUS_STATE.error}</div>` : ''}
     ${BONUS_STATE.loading ? '<div class="loading"><div class="spinner"></div><div>Loading…</div></div>' : `
@@ -1948,15 +1948,16 @@ function renderBonus() {
 
   if (!BONUS_STATE.loaded) {
     BONUS_STATE.loaded = true;
-    if (u.role === 'admin') { loadBonusSummary(); return; }
+    if (isExec(u)) { loadBonusSummary(); return; }
     loadBonusPeriods().then(loadBonusAwards);
   }
 
-  // Admin lands on the financial rollup; drilling into a campaign reuses the
-  // grouped team/agent detail below.
-  if (u.role === 'admin' && !BONUS_STATE.drill) { renderBonusSummary(); return; }
+  // Admin + EXCO land on the financial rollup; drilling into a campaign reuses
+  // the grouped team/agent detail below.
+  if (isExec(u) && !BONUS_STATE.drill) { renderBonusSummary(); return; }
 
-  const canSync = ROLE_RANK[u.role] >= ROLE_RANK.tm;
+  // Sync is a write action: campaign leads / TMs / admin can; EXCO is view-only.
+  const canSync = ROLE_RANK[u.role] >= ROLE_RANK.tm && u.role !== 'exco';
   const periodOpts = BONUS_STATE.periods.map(p => {
     const label = `${p.campaign_name} · ${p.period_start.slice(0,7)}${p.locked ? ' · 🔒' : ''}`;
     return `<option value="${p.id}"${p.id === BONUS_STATE.selectedPeriodId ? ' selected' : ''}>${label}</option>`;
@@ -2177,19 +2178,42 @@ const USERS_STATE = {
   loaded: false, loading: false, users: [], error: null,
   busy: false, preview: null, justCreated: [],
   deptViewId: localStorage.getItem('provisionDeptViewId') || '',
+  campaigns: [], teams: [], editingId: null,
 };
 
 async function loadUsers() {
   USERS_STATE.loading = true; renderUsers();
   try {
-    const r = await apiFetch('/api/users');
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    USERS_STATE.users = (await r.json()).users || [];
+    const [ur, cr, tr] = await Promise.all([
+      apiFetch('/api/users'), apiFetch('/api/teams/campaigns'), apiFetch('/api/teams'),
+    ]);
+    if (!ur.ok) throw new Error(`HTTP ${ur.status}`);
+    USERS_STATE.users = (await ur.json()).users || [];
+    if (cr.ok) USERS_STATE.campaigns = (await cr.json()).campaigns || [];
+    if (tr.ok) USERS_STATE.teams = (await tr.json()).teams || [];
     USERS_STATE.error = null;
   } catch (e) {
     USERS_STATE.error = `Could not load users (${e.message})`;
   }
   USERS_STATE.loading = false; renderUsers();
+}
+
+async function saveUserEdit(id, rowEl) {
+  const get = (f) => rowEl.querySelector(`[data-uf="${f}"]`)?.value;
+  const body = {
+    role: get('role'),
+    campaign_id: get('campaign_id') ? parseInt(get('campaign_id'), 10) : null,
+    team_id: get('team_id') ? parseInt(get('team_id'), 10) : null,
+  };
+  const r = await apiFetch(`/api/users/${id}`, { method: 'PATCH', body: JSON.stringify(body) });
+  if (r.ok) { USERS_STATE.editingId = null; loadUsers(); }
+  else { alert('Save failed: ' + (await r.text()).slice(0, 160)); }
+}
+
+async function setUserActive(id, active, name) {
+  if (!active && !confirm(`Deactivate ${name}? This revokes their access immediately.`)) return;
+  const r = await apiFetch(`/api/users/${id}`, { method: 'PATCH', body: JSON.stringify({ active }) });
+  if (r.ok) loadUsers(); else alert('Update failed.');
 }
 
 async function provisionUsers(preview) {
@@ -2245,7 +2269,7 @@ async function deactivateUser(id, name) {
   if (r.ok) loadUsers(); else alert('Deactivate failed.');
 }
 
-const _roleLabel = { admin: 'Admin', campaign_lead: 'Campaign Mgr', tm: 'Team Leader', agent: 'Agent' };
+const _roleLabel = { admin: 'Admin', exco: 'EXCO', campaign_lead: 'Campaign Mgr', tm: 'Team Leader', agent: 'Agent' };
 
 function renderUsers() {
   const u = AUTH.user;
@@ -2317,8 +2341,34 @@ function renderUsers() {
       <button class="btn-ghost" id="usersDismissCreated" style="margin-top:10px">Dismiss</button>
     </div>` : '';
 
-  const rows = us.map(x => `
-    <tr>
+  const esc = (s) => (s || '').replace(/"/g, '&quot;');
+  const sel = (field, options, current) =>
+    `<select data-uf="${field}" class="modal-month" style="font-size:11px;padding:4px 6px;max-width:130px">${
+      options.map(o => `<option value="${o.v}"${String(o.v) === String(current ?? '') ? ' selected' : ''}>${o.l}</option>`).join('')
+    }</select>`;
+  const roleOpts = ['agent','tm','campaign_lead','exco','admin'].map(r => ({ v: r, l: _roleLabel[r] }));
+  const campOpts = [{ v: '', l: '—' }].concat(USERS_STATE.campaigns.map(c => ({ v: c.id, l: c.name })));
+  const teamOptsFor = (cid) => [{ v: '', l: '—' }].concat(
+    USERS_STATE.teams.filter(t => !cid || t.campaign_id === cid).map(t => ({ v: t.id, l: t.name })));
+
+  const rows = us.map(x => {
+    if (x.id === USERS_STATE.editingId) {
+      return `<tr data-id="${x.id}">
+        <td class="name">${x.full_name}</td>
+        <td class="mono dim">${x.email || '—'}</td>
+        <td>${sel('role', roleOpts, x.role)}</td>
+        <td data-camp-cell>${sel('campaign_id', campOpts, x.campaign_id)}</td>
+        <td data-team-cell>${sel('team_id', teamOptsFor(x.campaign_id), x.team_id)}</td>
+        <td class="dim">${x.job_title || '—'}</td>
+        <td class="dim numeric">—</td>
+        <td>${x.active ? '<span class="chip ok">active</span>' : '<span class="chip">inactive</span>'}</td>
+        <td class="numeric" style="white-space:nowrap">
+          <button class="row-btn save" data-id="${x.id}">Save</button>
+          <button class="row-btn" data-act="cancel">Cancel</button>
+        </td>
+      </tr>`;
+    }
+    return `<tr>
       <td class="name">${x.full_name}${x.must_change_password?' <span class="chip warn">temp pw</span>':''}</td>
       <td class="mono dim">${x.email || '—'}</td>
       <td><span class="chip role-${x.role}">${_roleLabel[x.role]||x.role}</span></td>
@@ -2328,10 +2378,14 @@ function renderUsers() {
       <td class="dim numeric">${x.last_login_at ? new Date(x.last_login_at).toLocaleDateString('en-GB',{day:'2-digit',month:'short'}) : 'never'}</td>
       <td>${x.active ? '<span class="chip ok">active</span>' : '<span class="chip">inactive</span>'}</td>
       <td class="numeric" style="white-space:nowrap">
-        <button class="row-btn" data-act="reset" data-id="${x.id}" data-name="${(x.full_name||'').replace(/"/g,'&quot;')}">Reset pw</button>
-        ${x.active && x.id !== u.id ? `<button class="row-btn danger" data-act="deact" data-id="${x.id}" data-name="${(x.full_name||'').replace(/"/g,'&quot;')}">Deactivate</button>` : ''}
+        <button class="row-btn" data-act="edit" data-id="${x.id}">Edit</button>
+        <button class="row-btn" data-act="reset" data-id="${x.id}" data-name="${esc(x.full_name)}">Reset pw</button>
+        ${x.id !== u.id ? (x.active
+          ? `<button class="row-btn danger" data-act="deact" data-id="${x.id}" data-name="${esc(x.full_name)}">Deactivate</button>`
+          : `<button class="row-btn" data-act="react" data-id="${x.id}" data-name="${esc(x.full_name)}">Activate</button>`) : ''}
       </td>
-    </tr>`).join('');
+    </tr>`;
+  }).join('');
 
   $('usersView').innerHTML = `
     <div class="agent-tbl-head" style="background:var(--card);border:1px solid var(--border-light);border-radius:12px 12px 0 0;border-bottom:none">
@@ -2368,9 +2422,25 @@ function renderUsers() {
   $('usersDismissFails')?.addEventListener('click', () => { USERS_STATE.lastFailures = []; renderUsers(); });
   $('usersView').querySelectorAll('.row-btn').forEach(b => b.onclick = () => {
     const id = parseInt(b.dataset.id, 10);
-    if (b.dataset.act === 'reset') resetUserPassword(id, b.dataset.name);
-    else if (b.dataset.act === 'deact') deactivateUser(id, b.dataset.name);
+    const act = b.dataset.act;
+    if (act === 'reset') resetUserPassword(id, b.dataset.name);
+    else if (act === 'deact') setUserActive(id, false, b.dataset.name);
+    else if (act === 'react') setUserActive(id, true, b.dataset.name);
+    else if (act === 'edit') { USERS_STATE.editingId = id; renderUsers(); }
+    else if (act === 'cancel') { USERS_STATE.editingId = null; renderUsers(); }
+    else if (b.classList.contains('save')) saveUserEdit(id, b.closest('tr'));
   });
+  // When the campaign changes in an editing row, refilter the team options.
+  const editTr = $('usersView').querySelector(`tr[data-id="${USERS_STATE.editingId}"]`);
+  if (editTr) {
+    const campSel = editTr.querySelector('[data-uf="campaign_id"]');
+    campSel?.addEventListener('change', () => {
+      const cid = campSel.value ? parseInt(campSel.value, 10) : null;
+      const opts = [{ v: '', l: '—' }].concat(USERS_STATE.teams.filter(t => !cid || t.campaign_id === cid).map(t => ({ v: t.id, l: t.name })));
+      editTr.querySelector('[data-team-cell]').innerHTML =
+        `<select data-uf="team_id" class="modal-month" style="font-size:11px;padding:4px 6px;max-width:130px">${opts.map(o => `<option value="${o.v}">${o.l}</option>`).join('')}</select>`;
+    });
+  }
 }
 
 // ─── Summary view ────────────────────────────────────────────────
@@ -3408,7 +3478,9 @@ async function init() {
 // Auth bootstrap — runs before init() and gates the entire dashboard.
 // ════════════════════════════════════════════════════════════════════════
 const AUTH = { user: null };
-const ROLE_RANK = { agent: 0, tm: 1, campaign_lead: 2, admin: 3 };
+const ROLE_RANK = { agent: 0, tm: 1, campaign_lead: 2, exco: 3, admin: 4 };
+// Admin + EXCO both see all campaign data; only admin reaches settings.
+const isExec = (u) => u && (u.role === 'admin' || u.role === 'exco');
 
 async function apiFetch(path, opts = {}) {
   const r = await fetch(path, {

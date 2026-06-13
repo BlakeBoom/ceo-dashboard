@@ -1,13 +1,13 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { query } from '../db.js';
-import { requireRole, scopeClause } from '../rbac.js';
+import { requireRole, scopeClause, seesAllScope } from '../rbac.js';
 
 const router = Router();
 
 // Campaigns visible to caller.
 router.get('/campaigns', async (req, res) => {
-  if (req.user.role === 'admin') {
+  if (seesAllScope(req.user)) {
     const { rows } = await query(
       `SELECT id, slug, name, active FROM campaigns WHERE active = TRUE ORDER BY name`
     );
