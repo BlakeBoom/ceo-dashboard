@@ -109,6 +109,8 @@ input:focus-visible,select:focus-visible{outline:none;border-color:var(--accent)
 .team-row td{background:var(--accent-soft);font-size:12px;padding:8px 12px;border-top:2px solid var(--accent-dim)}
 .weeks{display:flex;gap:3px;flex-wrap:wrap}
 .wk-btn{font-size:11px;font-weight:500;padding:5px 11px;border-radius:6px;cursor:pointer;border:1px solid var(--border-light);background:transparent;color:var(--text3);transition:all .15s;font-family:var(--mono)}
+.ttip{position:fixed;transform:translate(-50%,-100%);background:var(--bg-2);border:1px solid var(--border-strong);color:var(--text);font-size:11px;font-family:var(--mono);padding:5px 9px;border-radius:7px;box-shadow:var(--shadow);white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .12s;z-index:2000}
+.ttip.show{opacity:1}
 .wk-btn:hover{color:var(--text);border-color:var(--border-strong)}
 .wk-btn.act{background:var(--accent);color:#fff;border-color:var(--accent)}
 
@@ -1726,7 +1728,7 @@ function render() {
     return r.start.getTime() === r.end.getTime() ? fday(r.start) : `${fday(r.start)} – ${fday(r.end)}`;
   };
   wn.innerHTML = STATE.weeks.map(w =>
-    `<button class="wk-btn${w === STATE.selectedWeek ? ' act' : ''}" data-wk="${w}" title="${periodTitle(w)}">${pLbl(w)}</button>`
+    `<button class="wk-btn${w === STATE.selectedWeek ? ' act' : ''}" data-wk="${w}" data-tip="${periodTitle(w)}">${pLbl(w)}</button>`
   ).join('');
   wn.querySelectorAll('.wk-btn').forEach(b => b.onclick = () => setWeek(b.dataset.wk));
 
@@ -3589,6 +3591,32 @@ async function bootstrap() {
   }
   showLoginGate();
 }
+
+// Lightweight global tooltip for any element with a [data-tip] attribute.
+// Delegated, so it works for dynamically-rendered content (week tiles, etc.)
+// and is positioned with fixed coords so container overflow can't clip it.
+(function initTooltips() {
+  const tip = document.createElement('div');
+  tip.className = 'ttip';
+  document.body.appendChild(tip);
+  const place = (el) => {
+    const t = el.getAttribute('data-tip');
+    if (!t) return;
+    tip.textContent = t;
+    const r = el.getBoundingClientRect();
+    tip.style.left = (r.left + r.width / 2) + 'px';
+    tip.style.top = (r.top - 8) + 'px';
+    tip.classList.add('show');
+  };
+  document.addEventListener('mouseover', (e) => {
+    const el = e.target.closest?.('[data-tip]');
+    if (el) place(el);
+  });
+  document.addEventListener('mouseout', (e) => {
+    if (e.target.closest?.('[data-tip]')) tip.classList.remove('show');
+  });
+  document.addEventListener('scroll', () => tip.classList.remove('show'), true);
+})();
 
 bootstrap();
 </script>
