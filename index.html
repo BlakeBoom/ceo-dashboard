@@ -1081,6 +1081,17 @@ function periodKeyFor(r, gran) {
   return r.Weeks || null;  // no date available → cannot split below week
 }
 
+// Period key for an attendance Date string, using the SAME label scheme as
+// periodKeyFor() so shrinkage buckets line up with the metric buckets at every
+// granularity (week → "W23, 2026", month → "Jun 2026", day → "YYYY-MM-DD").
+function periodKeyForDate(dateStr, gran) {
+  if (gran === 'week') return dateToWeekLabel(dateStr);
+  const d = parseDate(dateStr);
+  if (!d) return dateToWeekLabel(dateStr);
+  if (gran === 'month') return `${_MONTH_NAMES[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
+  return d.toISOString().slice(0, 10);
+}
+
 // "W23, 2026" → "Jun 2026" (month containing that ISO week's Thursday).
 function weekLabelToMonth(wk) {
   if (!wk) return null;
@@ -1396,7 +1407,7 @@ function dateToWeekLabel(s) {
   return `W${weekNum}, ${target.getUTCFullYear()}`;
 }
 
-function buildShrinkageByAgentWeek(attRows, empProfileRows, umAgentMeta) {
+function buildShrinkageByAgentWeek(attRows, empProfileRows, umAgentMeta, gran = 'week') {
   // Build name matcher: fullname → Zoho People ID
   const nameMatch = buildNameMatcher(empProfileRows);
   // Reverse: Zoho People ID → user_id (via matched fullname)
@@ -1417,7 +1428,7 @@ function buildShrinkageByAgentWeek(attRows, empProfileRows, umAgentMeta) {
     const uid = empIdToUserId.get(empId);
     if (!uid) { unmatchedRows++; continue; }
 
-    const week = dateToWeekLabel(row['Date'] ?? row.date);
+    const week = periodKeyForDate(row['Date'] ?? row.date, gran);
     if (!week) continue;
 
     const status = (row['Status'] ?? row.status ?? '').trim();
@@ -1538,8 +1549,8 @@ function setWeek(wk) {
 }
 
 // Re-aggregate the already-loaded raw rows at the current granularity and pick
-// a sensible default period. Shrinkage stays week-grained, so it only surfaces
-// when granularity === 'week'.
+// a sensible default period. Shrinkage is re-bucketed to the same granularity
+// (rebuildShrinkage) so the SAME metrics appear at day/week/month.
 function rebuildAggregates() {
   if (!STATE.rawAgentWeek) return;
   const agg = buildAggregates(STATE.rawAgentWeek, STATE.granularity);
@@ -1548,9 +1559,29 @@ function rebuildAggregates() {
   STATE.agentWeek = agg.agentWeek;
   STATE.agentMeta = agg.agentMeta;
   STATE.weeks = agg.weeks;
+  rebuildShrinkage();
   if (!STATE.selectedWeek || !STATE.weeks.includes(STATE.selectedWeek)) {
     // Latest period is often partial → default to penultimate when available.
     STATE.selectedWeek = STATE.weeks[STATE.weeks.length - 2] || STATE.weeks[STATE.weeks.length - 1];
+  }
+}
+
+// (Re)build shrinkage at the current granularity from the cached raw rows, so
+// the shrinkage-derived metrics (Shrinkage card, efficiency strip) are present
+// for day/week/month alike — not only week.
+function rebuildShrinkage() {
+  const att = STATE.rawAttRows, emp = STATE.rawEmpRows;
+  if (!att || !emp || !att.length || !emp.length) { STATE.shrinkageAvailable = false; return; }
+  try {
+    const agentShr = buildShrinkageByAgentWeek(att, emp, STATE.agentMeta, STATE.granularity);
+    const rolled = rollupShrinkage(agentShr, STATE.agentMeta);
+    STATE.shrinkageAgentWeek = agentShr;
+    STATE.shrinkageCampaignWeek = rolled.campaignWeek;
+    STATE.shrinkageTeamWeek = rolled.teamWeek;
+    STATE.shrinkageAvailable = true;
+  } catch (e) {
+    console.error('Shrinkage rollup failed:', e);
+    STATE.shrinkageAvailable = false;
   }
 }
 
@@ -3187,22 +3218,11 @@ function applyData(rows, attendanceRows, empProfileRows) {
   STATE.agentMeta = agg.agentMeta;
   STATE.weeks = agg.weeks;
 
-  // Layer in shrinkage if Attendance + Employee Profile are both available
-  if (attendanceRows && empProfileRows && attendanceRows.length && empProfileRows.length) {
-    try {
-      const agentShrinkage = buildShrinkageByAgentWeek(attendanceRows, empProfileRows, STATE.agentMeta);
-      const rolledUp = rollupShrinkage(agentShrinkage, STATE.agentMeta);
-      STATE.shrinkageAgentWeek = agentShrinkage;
-      STATE.shrinkageCampaignWeek = rolledUp.campaignWeek;
-      STATE.shrinkageTeamWeek = rolledUp.teamWeek;
-      STATE.shrinkageAvailable = true;
-    } catch (e) {
-      console.error('Shrinkage rollup failed:', e);
-      STATE.shrinkageAvailable = false;
-    }
-  } else {
-    STATE.shrinkageAvailable = false;
-  }
+  // Cache raw attendance + profile rows so shrinkage can be re-bucketed when
+  // the granularity changes, then build it for the current granularity.
+  STATE.rawAttRows = (attendanceRows && attendanceRows.length) ? attendanceRows : null;
+  STATE.rawEmpRows = (empProfileRows && empProfileRows.length) ? empProfileRows : null;
+  rebuildShrinkage();
 
   // Default selected week = penultimate (latest week is often incomplete)
   if (!STATE.selectedWeek || !STATE.weeks.includes(STATE.selectedWeek)) {
