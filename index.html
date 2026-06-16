@@ -758,11 +758,13 @@ async function loadTargets() {
       const k = x.slug + '|' + x.effective_from;
       (byCE[k] ??= { slug: x.slug, effective_from: x.effective_from })[x.rule_key] = x.value;
     }
-    DB_TARGETS = Object.values(byCE).map(o => ({
-      slug: o.slug, effective_from: o.effective_from,
-      req_fte: parseFloat(o[SLIP_FTE_KEY]),
-      req_hrs_month: parseFloat(o[SLIP_HRS_KEY]),
-    })).filter(o => !isNaN(o.req_hrs_month));
+    DB_TARGETS = Object.values(byCE).map(o => {
+      const fte = parseFloat(o[SLIP_FTE_KEY]);
+      const sla = parseFloat(o['sla_min_hrs_fte']);
+      // Requested hours = Target FTE × SLA hrs/FTE (falls back to a stored value).
+      const hrs = (!isNaN(fte) && !isNaN(sla)) ? fte * sla : parseFloat(o[SLIP_HRS_KEY]);
+      return { slug: o.slug, effective_from: o.effective_from, req_fte: fte, req_hrs_month: hrs };
+    }).filter(o => !isNaN(o.req_hrs_month));
     buildTargetVersions();
   } catch (e) { /* keep defaults */ }
 }
@@ -1806,7 +1808,7 @@ function render() {
   // Footer
   const now = new Date();
   $('footer').innerHTML = `
-    <span>Boomerang BPO · Operations Dashboard v8 · rules matrix</span>
+    <span>Boomerang BPO · Operations Dashboard v9 · computed req-hrs</span>
     <span>Source: ${STATE.dataSource === 'live' ? 'Zoho User_metrics_3 (live)' : 'Embedded W19–W22 snapshot'} · Rendered ${now.toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})}</span>
   `;
   // Granularity toggle active state
@@ -2212,9 +2214,23 @@ function renderTargets() {
     months.length ? months.map(m => `<option value="${m}"${m===eff?' selected':''}>${m.slice(0,7)}</option>`).join('')
                   : '<option value="">no versions yet</option>'}</select>`;
 
-  const cell = (key) => canEdit
-    ? `<input data-rk="${key}" value="${(eff?ruleValue(slug,eff,key):'').replace(/"/g,'&quot;')}" style="width:160px;font-size:12px;padding:5px 8px;border:1px solid var(--border-light);border-radius:6px;background:var(--bg-2);color:var(--text)">`
-    : `<span class="mono">${eff?(ruleValue(slug,eff,key)||'—'):'—'}</span>`;
+  // Requested hours is derived (FTE × SLA hrs/FTE), so it's a read-only computed
+  // field rather than a free input.
+  const computedHrs = () => {
+    const fte = parseFloat(eff ? ruleValue(slug, eff, SLIP_FTE_KEY) : '');
+    const sla = parseFloat(eff ? ruleValue(slug, eff, 'sla_min_hrs_fte') : '');
+    return (!isNaN(fte) && !isNaN(sla)) ? +(fte * sla).toFixed(2) : '';
+  };
+  const cell = (key) => {
+    if (key === SLIP_HRS_KEY) {
+      return `<input id="tg-reqhrs" data-rk="${key}" value="${computedHrs()}" readonly title="Computed = Target FTE × SLA hrs/FTE"
+        style="width:160px;font-size:12px;padding:5px 8px;border:1px dashed var(--border-strong);border-radius:6px;background:var(--bg);color:var(--text2)">
+        <span class="dim" style="font-size:11px;margin-left:6px">= FTE × SLA hrs/FTE</span>`;
+    }
+    return canEdit
+      ? `<input data-rk="${key}" value="${(eff?ruleValue(slug,eff,key):'').replace(/"/g,'&quot;')}" style="width:160px;font-size:12px;padding:5px 8px;border:1px solid var(--border-light);border-radius:6px;background:var(--bg-2);color:var(--text)">`
+      : `<span class="mono">${eff?(ruleValue(slug,eff,key)||'—'):'—'}</span>`;
+  };
   const groups = RULE_DEFS.map(([g, items]) => `
     <tr class="team-row"><td colspan="2"><b>${g}</b></td></tr>
     ${items.map(([key, label]) => `<tr><td class="name" style="white-space:nowrap">${label}</td><td>${cell(key)}</td></tr>`).join('')}
@@ -2239,6 +2255,16 @@ function renderTargets() {
           <tbody>${groups}</tbody></table>`}
       </div>`}
   `;
+
+  // Live-recompute requested hours as FTE / SLA hrs-per-FTE change.
+  const recomputeHrs = () => {
+    const out = $('tg-reqhrs'); if (!out) return;
+    const fte = parseFloat(document.querySelector('#targetsView [data-rk="target_fte"]')?.value);
+    const sla = parseFloat(document.querySelector('#targetsView [data-rk="sla_min_hrs_fte"]')?.value);
+    out.value = (!isNaN(fte) && !isNaN(sla)) ? +(fte * sla).toFixed(2) : '';
+  };
+  ['target_fte', 'sla_min_hrs_fte'].forEach(k =>
+    document.querySelector(`#targetsView [data-rk="${k}"]`)?.addEventListener('input', recomputeHrs));
 
   $('tg-camp')?.addEventListener('change', e => { TARGETS_STATE.selCid = +e.target.value; TARGETS_STATE.selEff = null; renderTargets(); });
   $('tg-eff')?.addEventListener('change', e => { TARGETS_STATE.selEff = e.target.value; renderTargets(); });
