@@ -950,6 +950,7 @@ const UNCLASSIFIED_STATUSES = new Set();
 // start), so these are contains-matches, ordered specific-first.
 const SHIFT_PATTERNS = [
   [/beer\s*52/i,                  'BEER52'],
+  [/bb\s*marro|\bmarro\b/i,       'BUTTERNUTBOX'], // "BB Marro" summer shift = Butternut Box
   [/butternut|\bbbox\b/i,         'BUTTERNUTBOX'],
   [/gousto/i,                     'Gousto'],
   [/hunza\s*g/i,                  'HUNZAG'],
@@ -967,6 +968,19 @@ function shiftToCampaign(shiftName) {
   if (!shiftName) return null;
   for (const [re, key] of SHIFT_PATTERNS) if (re.test(shiftName)) return key;
   return null;
+}
+
+// Some shift types are only partially billable — e.g. a mixed Customer-Service
+// + Team-Leader shift where only the CS half bills. Fraction of the shift's
+// hours that count toward billable (default 1.0). Ordered specific-first; first
+// match wins, and it is authoritative (overrides the role-based billable check).
+const SHIFT_BILLABLE_PCT = [
+  [/gousto.*(cs|customer\s*service).*\+.*tl|gousto.*mix\s*shift/i, 0.5], // Gousto CS + TL Mix = 50%
+];
+function shiftBillableFraction(shiftName) {
+  if (!shiftName) return 1;
+  for (const [re, pct] of SHIFT_BILLABLE_PCT) if (re.test(shiftName)) return pct;
+  return 1;
 }
 
 // Detect the role from the Shift text. Anything that matches none of these is a
@@ -1885,17 +1899,27 @@ function buildBillableByShift(attRows, empProfileRows, agentMeta, gran) {
       }
       continue;
     }
+    // Partial-billable shift types (e.g. CS + TL mix at 50%) are authoritative:
+    // the fraction already encodes the billable split, so skip the role check.
+    const pct = shiftBillableFraction(shift);
     // Campaign-aware: is this role billable on this campaign for this month?
-    if (!roleIsBillable(role, camp, ym)) {
+    if (pct >= 1 && !roleIsBillable(role, camp, ym)) {
       nonBillable[ROLE_LABEL[role] || role] = (nonBillable[ROLE_LABEL[role] || role] || 0) + hrs;
       addExcluded(week, shift, 'Non-billable role on campaign', role, camp, hrs);
       continue;
     }
-    (byCampWeek[camp] ??= {})[week] = (byCampWeek[camp][week] || 0) + hrs;
+    const bill = hrs * pct;
+    if (pct < 1) {
+      const excl = hrs - bill;
+      const lbl = `Partial shift (${Math.round((1 - pct) * 100)}% non-billable)`;
+      nonBillable[lbl] = (nonBillable[lbl] || 0) + excl;
+      addExcluded(week, shift, lbl, role, camp, excl);
+    }
+    (byCampWeek[camp] ??= {})[week] = (byCampWeek[camp][week] || 0) + bill;
     const uid = empToUid.get(String(row['Employee'] ?? row.employee ?? ''));
     const team = (uid && agentMeta[uid] && agentMeta[uid].team) || '— Unassigned';
     const tk = camp + '||' + team;
-    (byTeamWeek[tk] ??= {})[week] = (byTeamWeek[tk][week] || 0) + hrs;
+    (byTeamWeek[tk] ??= {})[week] = (byTeamWeek[tk][week] || 0) + bill;
   }
   return { byCampWeek, byTeamWeek, unmatched, nonBillable, excluded };
 }
