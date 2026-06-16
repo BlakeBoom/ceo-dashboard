@@ -525,7 +525,7 @@ const WG_MAP = {
   '1LIFE':'1LIFE','BBOX':'BUTTERNUTBOX','Butternut Box':'BUTTERNUTBOX',
   'Gousto':'Gousto','HunzaG':'HUNZAG',
   'JUST PARK':'JUSTPARK_uk','Just Park':'JUSTPARK_uk','JustPark':'JUSTPARK_uk',
-  'JustPark Event Pass':'JUSTPARK_so','JustPark US':'JUSTPARK_usa',
+  'JustPark Event Pass':'JUSTPARK_usa','JustPark US':'JUSTPARK_usa','JUST PARK US':'JUSTPARK_usa',
   'MedExpress':'Medexpress','PICKnPAY':'PICKNPAY','Pinter':'PINTER',
   'Royal Canin':'ROYALCANIN','RoyalCanin':'ROYALCANIN',
   'The Good Life Sorted':'GOODLIFESORTED',
@@ -534,8 +534,8 @@ const WG_MAP = {
 };
 
 const CAMP_DISPLAY = {
-  'Gousto':'GOUSTO','VETNIQUE':'VETNIQUE','JUSTPARK_usa':'JUSTPARK USA',
-  'JUSTPARK_uk':'JUSTPARK UK','JUSTPARK_so':'JUSTPARK SP',
+  'Gousto':'GOUSTO','VETNIQUE':'VETNIQUE','JUSTPARK_usa':'JUST PARK US',
+  'JUSTPARK_uk':'JUST PARK UK','JUSTPARK_so':'JUST PARK US',
   'BUTTERNUTBOX':'BUTTERNUT BOX','Medexpress':'MEDEXPRESS','PICKNPAY':'PICKNPAY',
   'ROYALCANIN':'ROYAL CANIN','HUNZAG':'HUNZAG','GOODLIFESORTED':'GOOD LIFE SORTED',
   'PINTER':'PINTER','BEER52':'BEER52','1LIFE':'1LIFE',
@@ -707,7 +707,7 @@ const SLUG_TO_CAMPKEY = {
   medexpress:'Medexpress', picknpay:'PICKNPAY', butternutbox:'BUTTERNUTBOX',
   pinter:'PINTER', beer52:'BEER52', '1life':'1LIFE', gousto:'Gousto',
   hunzag:'HUNZAG', royalcanin:'ROYALCANIN', thegoodlifesorted:'GOODLIFESORTED',
-  lintbells:'VETNIQUE', justpark:'JUSTPARK_uk', 'justpark-event-pass':'JUSTPARK_so',
+  lintbells:'VETNIQUE', justpark:'JUSTPARK_uk', 'justpark-us':'JUSTPARK_usa', 'justpark-event-pass':'JUSTPARK_usa',
   'justpark-us':'JUSTPARK_usa',
 };
 
@@ -912,7 +912,7 @@ const SHIFT_PATTERNS = [
   [/^gousto/i,        'Gousto'],
   [/^hunza\s*g/i,     'HUNZAG'],
   [/^just\s*park\s*us/i,            'JUSTPARK_usa'],
-  [/^just\s*park\s*(event|sp)/i,    'JUSTPARK_so'],
+  [/^just\s*park\s*(event|sp)/i,    'JUSTPARK_usa'],
   [/^just\s*park/i,                 'JUSTPARK_uk'],
   [/^medexpress/i,    'Medexpress'],
   [/^pic?k\s*n\s*pay/i,             'PICKNPAY'],
