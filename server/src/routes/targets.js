@@ -127,4 +127,62 @@ router.delete('/rules/version', requireRole('admin'), async (req, res) => {
   res.json({ ok: true });
 });
 
+// ── Ad-hoc approved additional hours (per campaign, per day) ────────────────
+
+// All additional-hours rows (tm+ read; folded into Required + shown on Summary).
+router.get('/additional', requireRole('tm'), async (req, res) => {
+  const { rows } = await query(
+    `SELECT a.id, a.campaign_id, c.slug, c.name,
+            to_char(a.work_date, 'YYYY-MM-DD') AS work_date,
+            a.hours, a.note
+       FROM campaign_additional_hours a
+       JOIN campaigns c ON c.id = a.campaign_id
+      ORDER BY a.work_date DESC, c.name`
+  );
+  res.json({ additional: rows });
+});
+
+const additionalSchema = z.object({
+  campaign_id: z.number().int().positive(),
+  work_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  hours: z.number().min(0).max(1000000),
+  note: z.string().max(300).nullable().optional(),
+});
+
+// Upsert one campaign+day's approved additional hours.
+router.put('/additional', requireRole('admin'), async (req, res) => {
+  const parsed = additionalSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: 'invalid_input', detail: parsed.error.flatten() });
+  const { campaign_id, work_date, hours, note } = parsed.data;
+  try {
+    const { rows } = await query(
+      `INSERT INTO campaign_additional_hours (campaign_id, work_date, hours, note, updated_by)
+       VALUES ($1, $2::date, $3, $4, $5)
+       ON CONFLICT (campaign_id, work_date)
+       DO UPDATE SET hours = EXCLUDED.hours, note = EXCLUDED.note, updated_by = EXCLUDED.updated_by, updated_at = NOW()
+       RETURNING id`,
+      [campaign_id, work_date, hours, note ?? null, req.user.id]
+    );
+    await query(
+      `INSERT INTO audit_log (user_id, action, target_id, metadata)
+       VALUES ($1, 'additional_hours.upsert', $2, $3)`,
+      [req.user.id, campaign_id, { work_date, hours }]
+    );
+    res.json({ ok: true, id: rows[0].id });
+  } catch (err) {
+    if (err.code === '23503') return res.status(400).json({ error: 'unknown_campaign' });
+    throw err;
+  }
+});
+
+router.delete('/additional', requireRole('admin'), async (req, res) => {
+  const campaignId = parseInt(req.query.campaign_id, 10);
+  const wd = String(req.query.work_date || '');
+  if (!Number.isFinite(campaignId) || !/^\d{4}-\d{2}-\d{2}$/.test(wd)) {
+    return res.status(400).json({ error: 'invalid_input' });
+  }
+  await query(`DELETE FROM campaign_additional_hours WHERE campaign_id = $1 AND work_date = $2::date`, [campaignId, wd]);
+  res.json({ ok: true });
+});
+
 export default router;

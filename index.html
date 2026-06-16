@@ -770,6 +770,43 @@ async function loadTargets() {
     buildTargetVersions();
     buildRoleTargets();
   } catch (e) { /* keep defaults */ }
+  await loadAdditionalHours();
+}
+
+// Ad-hoc approved additional hours (per campaign, per day). Loaded into a
+// per-campaignKey list of {date,hours,note} for the period resolver.
+let ADDITIONAL_RAW = [];               // [{campaign_id,slug,work_date,hours,note}]
+let ADDITIONAL_BY_CAMP = {};           // campKey -> [{date:Date, hours, note, work_date, campaign_id}]
+async function loadAdditionalHours() {
+  try {
+    const r = await apiFetch('/api/targets/additional');
+    if (!r.ok) return;
+    ADDITIONAL_RAW = (await r.json()).additional || [];
+    buildAdditionalHours();
+  } catch (e) { /* keep whatever we had */ }
+}
+function buildAdditionalHours() {
+  ADDITIONAL_BY_CAMP = {};
+  for (const x of ADDITIONAL_RAW) {
+    const ck = SLUG_TO_CAMPKEY[x.slug]; if (!ck) continue;
+    const d = parseDate(x.work_date); if (!d) continue;
+    (ADDITIONAL_BY_CAMP[ck] ??= []).push({ date: d, hours: +x.hours || 0, note: x.note, work_date: x.work_date, campaign_id: x.campaign_id });
+  }
+}
+// Approved additional hours for one campaign within a period (week/day/month).
+function additionalHrsForPeriod(campKey, periodLabel) {
+  const list = ADDITIONAL_BY_CAMP[campKey]; if (!list) return 0;
+  const r = periodDateRange(periodLabel, STATE.granularity); if (!r) return 0;
+  const lo = r.start.getTime(), hi = r.end.getTime();
+  let sum = 0;
+  for (const e of list) { const t = e.date.getTime(); if (t >= lo && t <= hi) sum += e.hours; }
+  return sum;
+}
+// Approved additional hours across all campaigns for a period.
+function additionalHrsTotal(periodLabel) {
+  let sum = 0;
+  for (const ck in ADDITIONAL_BY_CAMP) sum += additionalHrsForPeriod(ck, periodLabel);
+  return sum;
 }
 
 function ymLabel(mo) { const [y, m] = mo.split('-'); return `${_MONTH_NAMES[+m - 1]} ${y}`; }
@@ -2022,7 +2059,7 @@ function render() {
   // Footer
   const now = new Date();
   $('footer').innerHTML = `
-    <span>Boomerang BPO · Operations Dashboard v11 · billable by shift+role</span>
+    <span>Boomerang BPO · Operations Dashboard v12 · billable + approved additional hours</span>
     <span>Source: ${STATE.dataSource === 'live' ? 'Zoho User_metrics_3 (live)' : 'Embedded W19–W22 snapshot'} · Rendered ${now.toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})}</span>
   `;
   // Granularity toggle active state
@@ -2408,6 +2445,26 @@ async function deleteTargetVersion(cid, eff) {
   if (r.ok) { TARGETS_STATE.selEff = null; await loadTargetsAdmin(); rebuildAggregates(); render(); } else alert('Delete failed.');
 }
 
+async function saveAdditionalHours() {
+  const cid = parseInt($('ah-camp')?.value, 10);
+  const work_date = $('ah-date')?.value;
+  const hours = parseFloat($('ah-hours')?.value);
+  const note = ($('ah-note')?.value || '').trim() || null;
+  if (!Number.isFinite(cid) || !/^\d{4}-\d{2}-\d{2}$/.test(work_date || '') || !(hours >= 0)) {
+    alert('Pick a campaign, a date and a (non-negative) hours value.'); return;
+  }
+  const r = await apiFetch('/api/targets/additional', {
+    method: 'PUT', body: JSON.stringify({ campaign_id: cid, work_date, hours, note }),
+  });
+  if (r.ok) { await loadAdditionalHours(); rebuildAggregates(); render(); }
+  else alert('Save failed: ' + (await r.text()).slice(0, 160));
+}
+async function deleteAdditionalHours(cid, work_date) {
+  if (!confirm(`Remove approved additional hours for ${work_date}?`)) return;
+  const r = await apiFetch(`/api/targets/additional?campaign_id=${cid}&work_date=${work_date}`, { method: 'DELETE' });
+  if (r.ok) { await loadAdditionalHours(); rebuildAggregates(); render(); } else alert('Delete failed.');
+}
+
 // Admin diagnostics: every attendance shift whose hours were NOT counted as
 // billable in the selected period, with the reason. Helps spot shift names that
 // need a campaign pattern or a billable-role target fix.
@@ -2440,6 +2497,44 @@ function excludedShiftsPanel() {
         <div class="agent-tbl-sub">${rows.length} shift name(s) · ${Math.round(total).toLocaleString()}h not counted · change period above to re-scope</div>
       </div>
       ${body}
+    </div>`;
+}
+
+// Admin entry + log for ad-hoc approved additional hours (per campaign, per
+// day). These are folded into Required for the matching period and shown in the
+// Summary breakdown. Read-only for EXCO.
+function additionalHoursPanel(camps, canEdit) {
+  const rows = ADDITIONAL_RAW.slice(0, 40);
+  const today = new Date().toISOString().slice(0, 10);
+  const form = canEdit ? `
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding:12px 14px;border-bottom:1px solid var(--border-light)">
+      <select id="ah-camp" class="modal-month" style="font-size:12px;padding:6px 8px">
+        ${camps.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select>
+      <input id="ah-date" type="date" value="${today}" class="modal-month" style="font-size:12px;padding:6px 8px">
+      <input id="ah-hours" type="number" min="0" step="0.5" placeholder="hours" style="width:90px;font-size:12px;padding:6px 8px;border:1px solid var(--border-light);border-radius:6px;background:var(--bg-2);color:var(--text)">
+      <input id="ah-note" placeholder="note (optional)" style="flex:1;min-width:140px;font-size:12px;padding:6px 8px;border:1px solid var(--border-light);border-radius:6px;background:var(--bg-2);color:var(--text)">
+      <button id="ah-add" class="btn-primary">Save</button>
+    </div>` : '';
+  const body = rows.length
+    ? `<table class="agent-tbl"><thead><tr>
+         <th>Date</th><th>Campaign</th><th class="numeric">Hours</th><th>Note</th>${canEdit ? '<th></th>' : ''}
+       </tr></thead><tbody>
+       ${rows.map(r => `<tr>
+         <td class="name" style="white-space:nowrap">${esc(r.work_date)}</td>
+         <td>${esc(r.name)}</td>
+         <td class="numeric">${(+r.hours).toLocaleString()}</td>
+         <td>${esc(r.note || '')}</td>
+         ${canEdit ? `<td class="numeric"><button class="row-btn danger ah-del" data-cid="${r.campaign_id}" data-date="${r.work_date}">Remove</button></td>` : ''}
+       </tr>`).join('')}
+       </tbody></table>`
+    : `<div class="flag-empty" style="padding:20px">No approved additional hours logged yet.</div>`;
+  return `
+    <div class="agent-tbl-wrap" style="margin-top:18px">
+      <div class="agent-tbl-head">
+        <div class="agent-tbl-title">Approved additional hours</div>
+        <div class="agent-tbl-sub">Ad-hoc hours a campaign approves on the day · added to Required for that day's period</div>
+      </div>
+      ${form}${body}
     </div>`;
 }
 
@@ -2503,6 +2598,7 @@ function renderTargets() {
         `<table class="agent-tbl"><thead><tr><th>Rule</th><th>Value (effective ${eff.slice(0,7)})</th></tr></thead>
           <tbody>${groups}</tbody></table>`}
       </div>`}
+    ${additionalHoursPanel(camps, canEdit)}
     ${excludedShiftsPanel()}
   `;
 
@@ -2528,6 +2624,9 @@ function renderTargets() {
   });
   $('tg-save')?.addEventListener('click', () => saveTargetVersion(cid, eff));
   $('tg-del')?.addEventListener('click', () => deleteTargetVersion(cid, eff));
+  $('ah-add')?.addEventListener('click', saveAdditionalHours);
+  $('targetsView').querySelectorAll('.ah-del').forEach(b =>
+    b.addEventListener('click', () => deleteAdditionalHours(parseInt(b.dataset.cid, 10), b.dataset.date)));
 }
 
 // ─── Rules view (admin only) ─────────────────────────────────────
@@ -3146,7 +3245,12 @@ function renderSummary() {
   // month/week's target.
   const tgtVerMonth = chosenVersionMonth(wk);
   const tgtVerLabel = tgtVerMonth ? ymLabel(tgtVerMonth) : null;
-  const reqHrsExpected = reqHrsTotal * frac;
+  // Ad-hoc approved additional hours land on specific days, so they're added to
+  // the (pro-rated) base required for the period rather than pro-rated again —
+  // only elapsed days can have entries. Keeps billable vs required apples-to-apples.
+  const baseReqExpected = reqHrsTotal * frac;
+  const addHrsPeriod = additionalHrsTotal(wk);
+  const reqHrsExpected = baseReqExpected + addHrsPeriod;
   const slippage = reqHrsExpected > 0 ? ((reqHrsExpected - totalBillable) / reqHrsExpected) * 100 : null;
   let prevSlippage = null;
   if (prevWk) {
@@ -3155,6 +3259,7 @@ function renderSummary() {
     for (const c of camps) {
       if (STATE.campaignWeek[c][prevWk] && prevRules[c]) prevReqHrs += reqHrsForPeriod(prevRules[c]);
     }
+    prevReqHrs += additionalHrsTotal(prevWk);
     prevSlippage = prevReqHrs > 0 ? ((prevReqHrs - prevBillable) / prevReqHrs) * 100 : null;
   }
   const slipDelta = slippage != null && prevSlippage != null ?
@@ -3210,7 +3315,8 @@ function renderSummary() {
   const billSeries = STATE.weeks.map(w => camps.reduce((a, c) => a + (STATE.campaignWeek[c]?.[w]?.billable || 0), 0));
   const reqSeries = STATE.weeks.map(w => {
     const rv = rulesForPeriod(w) || {};
-    return camps.reduce((a, c) => a + (STATE.campaignWeek[c]?.[w] && rv[c] ? reqHrsForPeriod(rv[c]) : 0), 0);
+    const base = camps.reduce((a, c) => a + (STATE.campaignWeek[c]?.[w] && rv[c] ? reqHrsForPeriod(rv[c]) : 0), 0);
+    return base + additionalHrsTotal(w);   // dashed required line includes approved extra
   });
   const weekLabels = STATE.weeks.map(w => pLbl(w));
   const fulfilment = reqHrsExpected > 0 ? (totalBillable / reqHrsExpected) * 100 : null;
@@ -3253,7 +3359,9 @@ function renderSummary() {
     hero(absStatus, 'Absence', absenceRate != null ? absenceRate.toFixed(1)+'%' : '—', null,
       absDeltaTxt || { dir:'', txt:'target ≤5%' }),
     hero(slipStatus, 'Slippage', slippage != null ? slippage.toFixed(1)+'%' : '—', null,
-      slipDeltaTxt || { dir:'', txt:`${Math.round(reqHrsExpected).toLocaleString()} hrs req` }),
+      slipDeltaTxt || { dir:'', txt: addHrsPeriod > 0
+        ? `${Math.round(reqHrsExpected).toLocaleString()} hrs req (incl +${Math.round(addHrsPeriod).toLocaleString()})`
+        : `${Math.round(reqHrsExpected).toLocaleString()} hrs req` }),
   ].join('');
 
   // Flag attendance shifts that didn't map to a campaign (their billable is
@@ -3277,8 +3385,15 @@ function renderSummary() {
       ${_nbKeys.map(k => `${k} (${Math.round(_nb[k])}h)`).join(' · ')}
     </div>` : '';
 
+  // Required = base plan + ad-hoc approved additional hours. Show the split.
+  const additionalNote = addHrsPeriod > 0 ? `
+    <div class="err-banner show" style="background:rgba(59,130,246,.08);border-color:rgba(59,130,246,.35);color:var(--text2);margin-bottom:12px">
+      Required ${Math.round(reqHrsExpected).toLocaleString()}h = base ${Math.round(baseReqExpected).toLocaleString()}h
+      + ${Math.round(addHrsPeriod).toLocaleString()}h approved additional this ${periodNoun()}.
+    </div>` : '';
+
   $('summaryView').innerHTML = `
-    ${unmatchedNote}${nonBillableNote}
+    ${unmatchedNote}${nonBillableNote}${additionalNote}
     <div class="hero-row">${heroCards}</div>
     <div class="sum-grid2">
       <div class="chart-card">
