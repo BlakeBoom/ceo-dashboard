@@ -907,24 +907,22 @@ const UNCLASSIFIED_STATUSES = new Set();
 //   "JustPark UK Evening"
 // We extract the leading campaign identifier.
 // ════════════════════════════════════════════════════════════════════════
+// The campaign name appears somewhere in the Shift string (not always at the
+// start), so these are contains-matches, ordered specific-first.
 const SHIFT_PATTERNS = [
-  [/^pinter/i,        'PINTER'],
-  [/^beer\s*52/i,     'BEER52'],
-  [/^gousto/i,        'Gousto'],
-  [/^hunza\s*g/i,     'HUNZAG'],
-  [/^just\s*park\s*event/i,         'JUSTPARK_uk'],
-  [/^just\s*park\s*(sp|space)/i,    'JUSTPARK_uk'],
-  [/^just\s*park\s*us/i,            'JUSTPARK_usa'],
-  [/^just\s*park/i,                 'JUSTPARK_uk'],
-  [/^medexpress/i,    'Medexpress'],
-  [/^pic?k\s*n\s*pay/i,             'PICKNPAY'],
-  [/^pnp/i,           'PICKNPAY'],
-  [/^royal\s*canin/i, 'ROYALCANIN'],
-  [/^the\s*good\s*life/i,           'GOODLIFESORTED'],
-  [/^good\s*life/i,                 'GOODLIFESORTED'],
-  [/^butternut|^bbox/i,             'BUTTERNUTBOX'],
-  [/^lint\s*bells|^vetnique/i,      'VETNIQUE'],
-  [/^1\s*life/i,      '1LIFE'],
+  [/beer\s*52/i,                  'BEER52'],
+  [/butternut|\bbbox\b/i,         'BUTTERNUTBOX'],
+  [/gousto/i,                     'Gousto'],
+  [/hunza\s*g/i,                  'HUNZAG'],
+  [/med\s*express/i,              'Medexpress'],
+  [/pic?k\s*n\s*pay|\bpnp\b/i,    'PICKNPAY'],
+  [/royal\s*canin/i,              'ROYALCANIN'],
+  [/good\s*life/i,                'GOODLIFESORTED'],
+  [/lint\s*bells|vetnique/i,      'VETNIQUE'],
+  [/pinter/i,                     'PINTER'],
+  [/1\s*life|one\s*life/i,        '1LIFE'],
+  [/just\s*park.*\bus\b/i,        'JUSTPARK_usa'], // only the genuine US shift
+  [/just\s*park/i,                'JUSTPARK_uk'],  // UK incl Event Pass / Space Owner
 ];
 function shiftToCampaign(shiftName) {
   if (!shiftName) return null;
@@ -1685,6 +1683,7 @@ function rebuildAggregates() {
   STATE.weeks = agg.weeks;
   STATE.wgDebug = agg.wgDebug; STATE.wgSkipped = agg.wgSkipped; logWgDebug();
   rebuildShrinkage();
+  applyShiftBillable();
   if (!STATE.selectedWeek || !STATE.weeks.includes(STATE.selectedWeek)) {
     // Latest period is often partial → default to penultimate when available.
     STATE.selectedWeek = STATE.weeks[STATE.weeks.length - 2] || STATE.weeks[STATE.weeks.length - 1];
@@ -1709,7 +1708,67 @@ function rebuildShrinkage() {
     STATE.shrinkageAvailable = false;
   }
 }
+// ── Billable from Attendance, attributed by Shift ───────────────────────────
+// Billable = (Payable Hours (Min) − Unpaid Break (Min))/60 per attendance row,
+// bucketed by the campaign named in the Shift column (so an agent who works
+// both UK and US shifts is split correctly). Overrides the workgroup-based
+// billable from User_metrics_3 wherever attendance covers a campaign/period.
+function buildBillableByShift(attRows, empProfileRows, agentMeta, gran) {
+  const nameMatch = buildNameMatcher(empProfileRows);
+  const empToUid = new Map();
+  for (const [uid, meta] of Object.entries(agentMeta || {})) {
+    const e = nameMatch(meta.name); if (e) empToUid.set(String(e), uid);
+  }
+  const byCampWeek = {};   // camp -> week -> hrs
+  const byTeamWeek = {};   // "camp||team" -> week -> hrs
+  const unmatched = {};    // shift name -> hrs (no campaign match)
+  for (const row of attRows) {
+    const payable = +row['Payable Hours (Mins)'] || parseHMS(row['Payable Hours']) || 0;
+    const unpaid  = +row['Unpaid Break (Mins)']  || parseHMS(row['Unpaid Break']) || 0;
+    const hrs = Math.max(0, payable - unpaid) / 60;
+    if (hrs <= 0) continue;
+    const week = periodKeyForDate(row['Date'] ?? row.date, gran);
+    if (!week) continue;
+    const shift = (row['Shift'] ?? row.shift ?? '').toString();
+    const camp = shiftToCampaign(shift);
+    if (!camp) { const s = shift || '(blank)'; unmatched[s] = (unmatched[s] || 0) + hrs; continue; }
+    (byCampWeek[camp] ??= {})[week] = (byCampWeek[camp][week] || 0) + hrs;
+    const uid = empToUid.get(String(row['Employee'] ?? row.employee ?? ''));
+    const team = (uid && agentMeta[uid] && agentMeta[uid].team) || '— Unassigned';
+    const tk = camp + '||' + team;
+    (byTeamWeek[tk] ??= {})[week] = (byTeamWeek[tk][week] || 0) + hrs;
+  }
+  return { byCampWeek, byTeamWeek, unmatched };
+}
 
+// Override billable in the already-built campaign/team rollups with the
+// attendance-by-shift figures (only where a bucket already exists, so we never
+// invent phantom campaigns; campaigns/periods with no attendance keep the
+// User_metrics_3 value).
+function applyShiftBillable() {
+  STATE.unmatchedShifts = {};
+  const att = STATE.rawAttRows, emp = STATE.rawEmpRows;
+  if (!att || !emp || !att.length || !emp.length) return;
+  let b;
+  try { b = buildBillableByShift(att, emp, STATE.agentMeta, STATE.granularity); }
+  catch (e) { console.error('Shift-billable failed:', e); return; }
+  STATE.shiftBillable = b;
+  STATE.unmatchedShifts = b.unmatched;
+  for (const camp in b.byCampWeek)
+    for (const wk in b.byCampWeek[camp])
+      if (STATE.campaignWeek[camp] && STATE.campaignWeek[camp][wk])
+        STATE.campaignWeek[camp][wk].billable = b.byCampWeek[camp][wk];
+  for (const tk in b.byTeamWeek) {
+    const i = tk.indexOf('||'); const camp = tk.slice(0, i), team = tk.slice(i + 2);
+    for (const wk in b.byTeamWeek[tk])
+      if (STATE.teamWeek[camp] && STATE.teamWeek[camp][team] && STATE.teamWeek[camp][team][wk])
+        STATE.teamWeek[camp][team][wk].billable = b.byTeamWeek[tk][wk];
+  }
+  if (Object.keys(b.unmatched).length) {
+    console.warn('[shift] billable not attributed — unmatched shift names:',
+      Object.fromEntries(Object.entries(b.unmatched).map(([k, v]) => [k, Math.round(v) + 'h'])));
+  }
+}
 function setGranularity(g) {
   if (g === STATE.granularity) return;
   STATE.granularity = g;
@@ -1835,7 +1894,7 @@ function render() {
   // Footer
   const now = new Date();
   $('footer').innerHTML = `
-    <span>Boomerang BPO · Operations Dashboard v9 · computed req-hrs</span>
+    <span>Boomerang BPO · Operations Dashboard v10 · billable by shift</span>
     <span>Source: ${STATE.dataSource === 'live' ? 'Zoho User_metrics_3 (live)' : 'Embedded W19–W22 snapshot'} · Rendered ${now.toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})}</span>
   `;
   // Granularity toggle active state
@@ -3033,7 +3092,18 @@ function renderSummary() {
       slipDeltaTxt || { dir:'', txt:`${Math.round(reqHrsExpected).toLocaleString()} hrs req` }),
   ].join('');
 
+  // Flag attendance shifts that didn't map to a campaign (their billable is
+  // excluded) so the shift→campaign patterns can be extended.
+  const _unm = STATE.unmatchedShifts || {};
+  const _unmKeys = Object.keys(_unm).sort((a, b) => _unm[b] - _unm[a]);
+  const unmatchedNote = _unmKeys.length ? `
+    <div class="err-banner show" style="background:rgba(245,158,11,.08);border-color:rgba(245,158,11,.4);color:var(--amber-text);margin-bottom:12px">
+      ⚠ ${_unmKeys.length} shift name(s) didn't map to a campaign (billable excluded):
+      ${_unmKeys.slice(0, 6).map(s => `${s} (${Math.round(_unm[s])}h)`).join(' · ')}${_unmKeys.length > 6 ? ' …' : ''}
+    </div>` : '';
+
   $('summaryView').innerHTML = `
+    ${unmatchedNote}
     <div class="hero-row">${heroCards}</div>
     <div class="sum-grid2">
       <div class="chart-card">
@@ -3675,6 +3745,7 @@ function applyData(rows, attendanceRows, empProfileRows) {
   STATE.rawAttRows = (attendanceRows && attendanceRows.length) ? attendanceRows : null;
   STATE.rawEmpRows = (empProfileRows && empProfileRows.length) ? empProfileRows : null;
   rebuildShrinkage();
+  applyShiftBillable();
 
   // Default selected week = penultimate (latest week is often incomplete)
   if (!STATE.selectedWeek || !STATE.weeks.includes(STATE.selectedWeek)) {
