@@ -985,6 +985,30 @@ function shiftBillableFraction(shiftName) {
   return 1;
 }
 
+// Split shifts cover two campaigns in one shift, e.g.
+//   "HYVE (11:00-12:00) +Gousto Split Shift (12:00 -20:00)"
+// The shift's hours are proportioned between the campaigns by each segment's
+// duration (here HYVE 1h, Gousto 8h → 1/9 vs 8/9). Returns null when the shift
+// isn't a split (fewer than two segments that each name a campaign AND a time
+// range), so it falls through to the normal single-campaign path.
+const _TIME_RANGE_RE = /(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})/;
+function parseSplitShift(shiftName) {
+  if (!shiftName || shiftName.indexOf('+') < 0) return null;
+  const segs = [];
+  for (const part of shiftName.split('+')) {
+    const camp = shiftToCampaign(part);
+    const m = part.match(_TIME_RANGE_RE);
+    if (!camp || !m) continue;
+    let mins = (+m[3] * 60 + +m[4]) - (+m[1] * 60 + +m[2]);
+    if (mins <= 0) mins += 24 * 60;   // shift crosses midnight
+    if (mins > 0) segs.push({ camp, mins });
+  }
+  if (segs.length < 2) return null;
+  const total = segs.reduce((a, s) => a + s.mins, 0);
+  if (total <= 0) return null;
+  return segs.map(s => ({ camp: s.camp, fraction: s.mins / total }));
+}
+
 // Detect the role from the Shift text. Anything that matches none of these is a
 // front-line agent (always billable). Ordered specific-first.
 const ROLE_PATTERNS = [
@@ -1887,6 +1911,34 @@ function buildBillableByShift(attRows, empProfileRows, agentMeta, gran) {
     const ym = date ? `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}` : null;
     const shift = (row['Shift'] ?? row.shift ?? '').toString();
     const role = detectRole(shift);
+    const uid = empToUid.get(String(row['Employee'] ?? row.employee ?? ''));
+    const team = (uid && agentMeta[uid] && agentMeta[uid].team) || '— Unassigned';
+    // Attribute an amount of billable hours to a campaign (and its team bucket).
+    const attribute = (c, amt) => {
+      (byCampWeek[c] ??= {})[week] = (byCampWeek[c][week] || 0) + amt;
+      const tk = c + '||' + team;
+      (byTeamWeek[tk] ??= {})[week] = (byTeamWeek[tk][week] || 0) + amt;
+    };
+    const markNonBillable = (c, lbl, reason, amt) => {
+      nonBillable[lbl] = (nonBillable[lbl] || 0) + amt;
+      addExcluded(week, shift, reason, role, c, amt);
+    };
+
+    // Split shifts: one shift spanning two campaigns by time range → proportion
+    // the hours by each segment's duration.
+    const split = parseSplitShift(shift);
+    if (split) {
+      for (const seg of split) {
+        const segHrs = hrs * seg.fraction;
+        if (!roleIsBillable(role, seg.camp, ym)) {
+          markNonBillable(seg.camp, ROLE_LABEL[role] || role, 'Non-billable role on campaign', segHrs);
+        } else {
+          attribute(seg.camp, segHrs);
+        }
+      }
+      continue;
+    }
+
     const camp = shiftToCampaign(shift);
     if (!camp) {
       // No campaign → can't attribute billable. Agents are flagged for review;
@@ -1895,8 +1947,7 @@ function buildBillableByShift(attRows, empProfileRows, agentMeta, gran) {
         const s = shift || '(blank)'; unmatched[s] = (unmatched[s] || 0) + hrs;
         addExcluded(week, shift, 'No campaign match', role, null, hrs);
       } else {
-        nonBillable[ROLE_LABEL[role] || role] = (nonBillable[ROLE_LABEL[role] || role] || 0) + hrs;
-        addExcluded(week, shift, 'Off-campaign non-billable role', role, null, hrs);
+        markNonBillable(null, ROLE_LABEL[role] || role, 'Off-campaign non-billable role', hrs);
       }
       continue;
     }
@@ -1905,22 +1956,15 @@ function buildBillableByShift(attRows, empProfileRows, agentMeta, gran) {
     const pct = shiftBillableFraction(shift);
     // Campaign-aware: is this role billable on this campaign for this month?
     if (pct >= 1 && !roleIsBillable(role, camp, ym)) {
-      nonBillable[ROLE_LABEL[role] || role] = (nonBillable[ROLE_LABEL[role] || role] || 0) + hrs;
-      addExcluded(week, shift, 'Non-billable role on campaign', role, camp, hrs);
+      markNonBillable(camp, ROLE_LABEL[role] || role, 'Non-billable role on campaign', hrs);
       continue;
     }
     const bill = hrs * pct;
     if (pct < 1) {
       const excl = hrs - bill;
-      const lbl = `Partial shift (${Math.round((1 - pct) * 100)}% non-billable)`;
-      nonBillable[lbl] = (nonBillable[lbl] || 0) + excl;
-      addExcluded(week, shift, lbl, role, camp, excl);
+      markNonBillable(camp, `Partial shift (${Math.round((1 - pct) * 100)}% non-billable)`, `Partial shift (${Math.round((1 - pct) * 100)}% non-billable)`, excl);
     }
-    (byCampWeek[camp] ??= {})[week] = (byCampWeek[camp][week] || 0) + bill;
-    const uid = empToUid.get(String(row['Employee'] ?? row.employee ?? ''));
-    const team = (uid && agentMeta[uid] && agentMeta[uid].team) || '— Unassigned';
-    const tk = camp + '||' + team;
-    (byTeamWeek[tk] ??= {})[week] = (byTeamWeek[tk][week] || 0) + bill;
+    attribute(camp, bill);
   }
   return { byCampWeek, byTeamWeek, unmatched, nonBillable, excluded };
 }
