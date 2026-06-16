@@ -914,10 +914,10 @@ const SHIFT_PATTERNS = [
   [/butternut|\bbbox\b/i,         'BUTTERNUTBOX'],
   [/gousto/i,                     'Gousto'],
   [/hunza\s*g/i,                  'HUNZAG'],
-  [/med\s*express/i,              'Medexpress'],
+  [/med\s*express|\bmedx\b/i,     'Medexpress'],
   [/pic?k\s*n\s*pay|\bpnp\b/i,    'PICKNPAY'],
   [/royal\s*canin/i,              'ROYALCANIN'],
-  [/good\s*life/i,                'GOODLIFESORTED'],
+  [/good\s*life|\bgls\b/i,        'GOODLIFESORTED'],
   [/lint\s*bells|vetnique/i,      'VETNIQUE'],
   [/pinter/i,                     'PINTER'],
   [/1\s*life|one\s*life/i,        '1LIFE'],
@@ -927,6 +927,24 @@ const SHIFT_PATTERNS = [
 function shiftToCampaign(shiftName) {
   if (!shiftName) return null;
   for (const [re, key] of SHIFT_PATTERNS) if (re.test(shiftName)) return key;
+  return null;
+}
+
+// Roles whose hours are NOT billable, per the Targets matrix:
+//   • "Non-billable shifts"  → Office Admin, GLS Team Leader
+//   • "Non Billable Resources" → Campaign Manager, Team Leader, Real Time Analyst
+// Detected from the Shift text and excluded from billable BEFORE campaign
+// attribution (a Team Leader on JustPark UK is still non-billable). Front-line
+// agents and other support roles (QA, Trainer, BAE, SME…) remain billable.
+const NON_BILLABLE_ROLE_PATTERNS = [
+  [/office\s*admin/i,                          'Office Admin'],
+  [/real\s*time\s*analyst|\brta\b/i,           'Real Time Analyst'],
+  [/campaign\s*manager/i,                      'Campaign Manager'],
+  [/team\s*lead(er)?\b/i,                       'Team Leader'],
+];
+function nonBillableRole(shiftName) {
+  if (!shiftName) return null;
+  for (const [re, role] of NON_BILLABLE_ROLE_PATTERNS) if (re.test(shiftName)) return role;
   return null;
 }
 
@@ -1722,6 +1740,7 @@ function buildBillableByShift(attRows, empProfileRows, agentMeta, gran) {
   const byCampWeek = {};   // camp -> week -> hrs
   const byTeamWeek = {};   // "camp||team" -> week -> hrs
   const unmatched = {};    // shift name -> hrs (no campaign match)
+  const nonBillable = {};  // role -> hrs (excluded: non-billable role)
   for (const row of attRows) {
     const payable = +row['Payable Hours (Mins)'] || parseHMS(row['Payable Hours']) || 0;
     const unpaid  = +row['Unpaid Break (Mins)']  || parseHMS(row['Unpaid Break']) || 0;
@@ -1730,6 +1749,9 @@ function buildBillableByShift(attRows, empProfileRows, agentMeta, gran) {
     const week = periodKeyForDate(row['Date'] ?? row.date, gran);
     if (!week) continue;
     const shift = (row['Shift'] ?? row.shift ?? '').toString();
+    // Drop non-billable roles first, regardless of which campaign they sit on.
+    const nbRole = nonBillableRole(shift);
+    if (nbRole) { nonBillable[nbRole] = (nonBillable[nbRole] || 0) + hrs; continue; }
     const camp = shiftToCampaign(shift);
     if (!camp) { const s = shift || '(blank)'; unmatched[s] = (unmatched[s] || 0) + hrs; continue; }
     (byCampWeek[camp] ??= {})[week] = (byCampWeek[camp][week] || 0) + hrs;
@@ -1738,7 +1760,7 @@ function buildBillableByShift(attRows, empProfileRows, agentMeta, gran) {
     const tk = camp + '||' + team;
     (byTeamWeek[tk] ??= {})[week] = (byTeamWeek[tk][week] || 0) + hrs;
   }
-  return { byCampWeek, byTeamWeek, unmatched };
+  return { byCampWeek, byTeamWeek, unmatched, nonBillable };
 }
 
 // Override billable in the already-built campaign/team rollups with the
@@ -1767,6 +1789,10 @@ function applyShiftBillable() {
   if (Object.keys(b.unmatched).length) {
     console.warn('[shift] billable not attributed — unmatched shift names:',
       Object.fromEntries(Object.entries(b.unmatched).map(([k, v]) => [k, Math.round(v) + 'h'])));
+  }
+  if (Object.keys(b.nonBillable || {}).length) {
+    console.info('[shift] excluded as non-billable roles (per Targets):',
+      Object.fromEntries(Object.entries(b.nonBillable).map(([k, v]) => [k, Math.round(v) + 'h'])));
   }
 }
 function setGranularity(g) {
