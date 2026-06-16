@@ -1000,19 +1000,19 @@ function roleTargetsFor(campKey, ym) {
   for (const mo of Object.keys(tl).sort()) if (!ym || mo <= ym) chosen = tl[mo];
   return chosen;
 }
-// Fraction [0,1] of a role's hours that are billable on a campaign in a given
-// month. Agents = 1. Roles with both sbr & nbr counts split proportionally
-// (e.g. 3 billable + 1 non-billable TL → 0.75).
-function roleBillableFraction(role, campKey, ym) {
-  if (!role || role === 'agent') return 1;
+// Is a role billable on a campaign in a given month? Binary, per the Targets
+// matrix: billable iff the campaign budgets any Support-Billable FTE for the
+// role (sbr_* > 0). The actual headcount is irrelevant — any number of people
+// can cover that role's billable FTE hours — so this is a yes/no, not a split.
+function roleIsBillable(role, campKey, ym) {
+  if (!role || role === 'agent') return true;
   const map = ROLE_TARGET_KEYS[role];
-  if (!map) return 1;
-  if (map.always != null) return map.always;
+  if (!map) return true;
+  if (map.always != null) return !!map.always;       // Office Admin → never
   const t = roleTargetsFor(campKey, ym);
-  const sbr = (t && map.sbr) ? (+t[map.sbr] || 0) : 0;
-  const nbr = (t && map.nbr) ? (+t[map.nbr] || 0) : 0;
-  if (sbr === 0 && nbr === 0) return FALLBACK_BILLABLE[role] ? 1 : 0;
-  return sbr / (sbr + nbr);
+  if (!t) return !!FALLBACK_BILLABLE[role];           // campaign not configured → fallback
+  const sbr = map.sbr ? (+t[map.sbr] || 0) : 0;
+  return sbr > 0;                                     // campaign budgets this role as billable
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -1827,18 +1827,16 @@ function buildBillableByShift(attRows, empProfileRows, agentMeta, gran) {
       else nonBillable[ROLE_LABEL[role] || role] = (nonBillable[ROLE_LABEL[role] || role] || 0) + hrs;
       continue;
     }
-    // Campaign-aware split: how much of this role's hours are billable on this
-    // campaign for this month (per sbr_*/nbr_* targets).
-    const frac = roleBillableFraction(role, camp, ym);
-    const nbHrs = hrs * (1 - frac);
-    if (nbHrs > 0.0001) nonBillable[ROLE_LABEL[role] || role] = (nonBillable[ROLE_LABEL[role] || role] || 0) + nbHrs;
-    const billHrs = hrs * frac;
-    if (billHrs <= 0.0001) continue;
-    (byCampWeek[camp] ??= {})[week] = (byCampWeek[camp][week] || 0) + billHrs;
+    // Campaign-aware: is this role billable on this campaign for this month?
+    if (!roleIsBillable(role, camp, ym)) {
+      nonBillable[ROLE_LABEL[role] || role] = (nonBillable[ROLE_LABEL[role] || role] || 0) + hrs;
+      continue;
+    }
+    (byCampWeek[camp] ??= {})[week] = (byCampWeek[camp][week] || 0) + hrs;
     const uid = empToUid.get(String(row['Employee'] ?? row.employee ?? ''));
     const team = (uid && agentMeta[uid] && agentMeta[uid].team) || '— Unassigned';
     const tk = camp + '||' + team;
-    (byTeamWeek[tk] ??= {})[week] = (byTeamWeek[tk][week] || 0) + billHrs;
+    (byTeamWeek[tk] ??= {})[week] = (byTeamWeek[tk][week] || 0) + hrs;
   }
   return { byCampWeek, byTeamWeek, unmatched, nonBillable };
 }
