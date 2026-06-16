@@ -19,6 +19,7 @@ import teamRoutes from './routes/teams.js';
 import bonusRoutes from './routes/bonus.js';
 import syncRoutes from './routes/sync.js';
 import zohoRoutes from './routes/zoho.js';
+import targetRoutes from './routes/targets.js';
 import debugRoutes from './routes/debug.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -64,6 +65,7 @@ app.use('/api', (req, res, next) => {
 app.use('/api/users', userRoutes);
 app.use('/api/teams', teamRoutes);
 app.use('/api/bonus', bonusRoutes);
+app.use('/api/targets', targetRoutes);
 app.use('/api/sync', syncRoutes);
 app.use('/api/zoho', zohoRoutes);
 app.use('/api/debug', debugRoutes);

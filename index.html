@@ -445,6 +445,7 @@ svg.ring .rs{font-size:8px;letter-spacing:.5px;text-transform:uppercase}
         <button class="tab" data-view="campaigns" data-min-role="tm">Campaigns</button>
         <button class="tab" data-view="trends" data-min-role="tm">Trends</button>
         <button class="tab" data-view="bonus" data-min-role="agent">Bonus</button>
+        <button class="tab" data-view="targets" data-min-role="exco">Targets</button>
         <button class="tab" data-view="rules" data-min-role="admin">Rules</button>
         <button class="tab" data-view="users" data-min-role="admin">Users</button>
       </div>
@@ -498,6 +499,7 @@ svg.ring .rs{font-size:8px;letter-spacing:.5px;text-transform:uppercase}
   <div id="campaignsView" class="view"></div>
   <div id="trendsView" class="view"></div>
   <div id="bonusView" class="view"></div>
+  <div id="targetsView" class="view"></div>
   <div id="rulesView" class="view"></div>
   <div id="usersView" class="view"></div>
 
@@ -652,26 +654,62 @@ const DEFAULT_TARGET_VERSIONS = {
     'JUSTPARK_so': { req_fte: 4, req_hrs_month: 696 },
   },
 };
-const TARGET_LS_KEY = 'ceo_target_versions';   // per-browser edited target versions
-let TARGET_VERSIONS = {};                       // working set (defaults ⊕ overrides)
+const TARGET_LS_KEY = 'ceo_target_versions';   // legacy (no longer written)
+let TARGET_VERSIONS = {};                       // month → {campKey → {req_fte,req_hrs_month,req_hrs_week}}
+let DB_TARGETS = [];                            // rows from /api/targets
 
-// Build the working target set: saved versions (localStorage) replace defaults
-// wholesale when present, then pre-compute weekly hours.
+// DB campaign slug → the dashboard's campaign key (used by slippage). Mirrors
+// the WG_MAP / CAMP_DISPLAY worlds so DB targets feed the right campaign.
+const SLUG_TO_CAMPKEY = {
+  medexpress:'Medexpress', picknpay:'PICKNPAY', butternutbox:'BUTTERNUTBOX',
+  pinter:'PINTER', beer52:'BEER52', '1life':'1LIFE', gousto:'Gousto',
+  hunzag:'HUNZAG', royalcanin:'ROYALCANIN', thegoodlifesorted:'GOODLIFESORTED',
+  lintbells:'VETNIQUE', justpark:'JUSTPARK_uk', 'justpark-event-pass':'JUSTPARK_so',
+  'justpark-us':'JUSTPARK_usa',
+};
+
+// Build TARGET_VERSIONS as a COMPLETE per-month snapshot (every campaign's
+// latest effective target on/before that month), merging hardcoded defaults
+// with DB targets (DB wins for the same campaign+month). Each month key holds
+// all campaigns, so the existing month-based resolver keeps working even though
+// campaigns can have different effective dates.
 function buildTargetVersions() {
-  let saved = null;
-  try { saved = JSON.parse(localStorage.getItem(TARGET_LS_KEY) || 'null'); } catch (e) { saved = null; }
-  const base = (saved && typeof saved === 'object' && Object.keys(saved).length)
-    ? saved : DEFAULT_TARGET_VERSIONS;
-  const merged = JSON.parse(JSON.stringify(base));
-  for (const mo in merged) {
-    for (const c in merged[mo]) {
-      const r = merged[mo][c];
-      if (r && r.req_hrs_month != null) r.req_hrs_week = r.req_hrs_month / WEEKS_PER_MONTH;
+  const timeline = {}; // campKey → { 'YYYY-MM' → {req_fte, req_hrs_month} }
+  for (const ym in DEFAULT_TARGET_VERSIONS)
+    for (const ck in DEFAULT_TARGET_VERSIONS[ym])
+      (timeline[ck] ??= {})[ym] = { ...DEFAULT_TARGET_VERSIONS[ym][ck] };
+  for (const t of DB_TARGETS) {
+    const ck = SLUG_TO_CAMPKEY[t.slug];
+    if (!ck) continue;
+    const ym = String(t.effective_from).slice(0, 7);
+    (timeline[ck] ??= {})[ym] = {
+      req_fte: t.req_fte != null ? +t.req_fte : null,
+      req_hrs_month: t.req_hrs_month != null ? +t.req_hrs_month : null,
+    };
+  }
+  const months = [...new Set(Object.values(timeline).flatMap(o => Object.keys(o)))].sort();
+  const out = {};
+  for (const ym of months) {
+    out[ym] = {};
+    for (const ck in timeline) {
+      let chosen = null;
+      for (const vy of Object.keys(timeline[ck]).sort()) if (vy <= ym) chosen = timeline[ck][vy];
+      if (chosen && chosen.req_hrs_month != null) {
+        out[ym][ck] = { ...chosen, req_hrs_week: chosen.req_hrs_month / WEEKS_PER_MONTH };
+      }
     }
   }
-  TARGET_VERSIONS = merged;
+  TARGET_VERSIONS = out;
 }
 buildTargetVersions();
+
+// Pull DB targets and rebuild the working set. Called after login.
+async function loadTargets() {
+  try {
+    const r = await apiFetch('/api/targets');
+    if (r.ok) { DB_TARGETS = (await r.json()).targets || []; buildTargetVersions(); }
+  } catch (e) { /* keep defaults */ }
+}
 
 function ymLabel(mo) { const [y, m] = mo.split('-'); return `${_MONTH_NAMES[+m - 1]} ${y}`; }
 
@@ -1712,7 +1750,7 @@ function render() {
   // Footer
   const now = new Date();
   $('footer').innerHTML = `
-    <span>Boomerang BPO · Operations Dashboard v6 · EXCO + user editing</span>
+    <span>Boomerang BPO · Operations Dashboard v7 · DB targets</span>
     <span>Source: ${STATE.dataSource === 'live' ? 'Zoho User_metrics_3 (live)' : 'Embedded W19–W22 snapshot'} · Rendered ${now.toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})}</span>
   `;
   // Granularity toggle active state
@@ -1736,6 +1774,7 @@ function render() {
   else if (STATE.view === 'campaigns') renderCampaigns();
   else if (STATE.view === 'trends') renderTrends();
   else if (STATE.view === 'bonus') renderBonus();
+  else if (STATE.view === 'targets') renderTargets();
   else if (STATE.view === 'rules') renderRules();
   else if (STATE.view === 'users') renderUsers();
 }
@@ -2052,6 +2091,116 @@ function renderBonus() {
     loadBonusSummary(BONUS_STATE.month);
   });
   $('bonusSyncBtn')?.addEventListener('click', triggerBonusSync);
+}
+
+// ─── Targets view (admin edits, EXCO views) ──────────────────────
+// DB-backed required-FTE / required-hours per campaign, effective-dated. Each
+// row applies from its effective month forward until a later one supersedes it.
+const TARGETS_STATE = { loaded: false, loading: false, campaigns: [], targets: [], error: null, msg: null };
+
+async function loadTargetsAdmin() {
+  TARGETS_STATE.loading = true; renderTargets();
+  try {
+    const [cr, tr] = await Promise.all([apiFetch('/api/teams/campaigns'), apiFetch('/api/targets')]);
+    if (cr.ok) TARGETS_STATE.campaigns = (await cr.json()).campaigns || [];
+    if (tr.ok) TARGETS_STATE.targets = (await tr.json()).targets || [];
+    TARGETS_STATE.error = null;
+  } catch (e) { TARGETS_STATE.error = `Could not load targets (${e.message})`; }
+  TARGETS_STATE.loading = false; renderTargets();
+}
+
+async function saveTarget(campaignId, effectiveFrom, fte, hrs) {
+  const r = await apiFetch('/api/targets', {
+    method: 'PUT',
+    body: JSON.stringify({
+      campaign_id: campaignId, effective_from: effectiveFrom,
+      req_fte: fte === '' ? null : Number(fte),
+      req_hrs_month: hrs === '' ? null : Number(hrs),
+    }),
+  });
+  if (r.ok) { TARGETS_STATE.msg = 'Saved. Re-syncs into slippage on next load.'; await loadTargets(); await loadTargetsAdmin(); render(); }
+  else { alert('Save failed: ' + (await r.text()).slice(0, 160)); }
+}
+async function deleteTarget(id) {
+  if (!confirm('Delete this target version?')) return;
+  const r = await apiFetch(`/api/targets/${id}`, { method: 'DELETE' });
+  if (r.ok) { await loadTargets(); await loadTargetsAdmin(); render(); } else alert('Delete failed.');
+}
+
+function renderTargets() {
+  const u = AUTH.user;
+  if (!isExec(u)) { $('targetsView').innerHTML = '<div class="flag-empty" style="padding:32px">Admins / EXCO only.</div>'; return; }
+  if (!TARGETS_STATE.loaded) { TARGETS_STATE.loaded = true; loadTargetsAdmin(); }
+  const canEdit = u.role === 'admin';
+
+  const byCamp = new Map();
+  for (const t of TARGETS_STATE.targets) {
+    if (!byCamp.has(t.campaign_id)) byCamp.set(t.campaign_id, []);
+    byCamp.get(t.campaign_id).push(t);
+  }
+  const monthInput = (id, val) => `<input id="${id}" type="month" value="${val||''}" class="mono" style="font-size:11px;padding:5px 7px;border:1px solid var(--border-light);border-radius:6px;background:var(--bg-2);color:var(--text)">`;
+  const numInput = (cls, val) => `<input class="${cls} mono" value="${val ?? ''}" placeholder="—" style="width:90px;font-size:11px;padding:5px 7px;border:1px solid var(--border-light);border-radius:6px;background:var(--bg-2);color:var(--text);text-align:right">`;
+
+  const cards = TARGETS_STATE.campaigns.map(c => {
+    const versions = (byCamp.get(c.id) || []).slice().sort((a, b) => b.effective_from.localeCompare(a.effective_from));
+    const rows = versions.map(v => {
+      const fte = v.req_fte != null ? +v.req_fte : null, hrs = v.req_hrs_month != null ? +v.req_hrs_month : null;
+      const perFte = (fte && hrs) ? (hrs / fte).toFixed(1) : '—';
+      if (!canEdit) {
+        return `<tr><td class="mono">${v.effective_from.slice(0,7)}</td><td class="numeric">${fte ?? '—'}</td>
+          <td class="numeric">${hrs != null ? Math.round(hrs).toLocaleString() : '—'}</td><td class="numeric dim">${perFte}</td><td></td></tr>`;
+      }
+      return `<tr data-tid="${v.id}" data-cid="${c.id}" data-eff="${v.effective_from}">
+        <td class="mono">${v.effective_from.slice(0,7)}</td>
+        <td class="numeric">${numInput('t-fte', fte)}</td>
+        <td class="numeric">${numInput('t-hrs', hrs)}</td>
+        <td class="numeric dim">${perFte}</td>
+        <td class="numeric" style="white-space:nowrap"><button class="row-btn t-save">Save</button><button class="row-btn danger t-del">Delete</button></td>
+      </tr>`;
+    }).join('');
+    const addRow = canEdit ? `<tr data-add-cid="${c.id}">
+      <td>${monthInput(`tadd-m-${c.id}`, '')}</td>
+      <td class="numeric">${numInput('t-add-fte', '')}</td>
+      <td class="numeric">${numInput('t-add-hrs', '')}</td>
+      <td class="numeric dim">—</td>
+      <td class="numeric"><button class="row-btn t-add">+ Add version</button></td>
+    </tr>` : '';
+    return `<div class="agent-tbl-wrap" style="margin-bottom:14px">
+      <div class="agent-tbl-head"><div class="agent-tbl-title">${c.name}</div>
+        <div class="agent-tbl-sub">${versions.length} version${versions.length===1?'':'s'}</div></div>
+      <table class="agent-tbl">
+        <thead><tr><th>Effective from</th><th class="numeric">Req FTE</th><th class="numeric">Req hrs / month</th><th class="numeric">hrs / FTE</th><th></th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="5" class="flag-empty" style="padding:14px">No target set${canEdit?' — add one below.':'.'}</td></tr>`}${addRow}</tbody>
+      </table>
+    </div>`;
+  }).join('');
+
+  $('targetsView').innerHTML = `
+    <div class="users-panel" style="margin:0 0 14px">
+      <div class="users-panel-h">Campaign targets ${canEdit ? '' : '<span class="chip">read-only</span>'}</div>
+      <div class="agent-tbl-sub" style="text-transform:none;letter-spacing:0;font-family:inherit;font-size:12px;line-height:1.6">
+        Required FTE and monthly billable hours per campaign. Each version applies <b>from its effective month forward</b>
+        until a later version supersedes it — so editing one month never changes the past. These drive the
+        <b>Slippage</b> KPI (week = hrs ÷ 4.33, day = hrs ÷ 30.31).
+      </div>
+      ${TARGETS_STATE.msg ? `<div class="chip ok" style="margin-top:8px">${TARGETS_STATE.msg}</div>` : ''}
+      ${TARGETS_STATE.error ? `<div class="err-banner show" style="margin-top:8px">${TARGETS_STATE.error}</div>` : ''}
+    </div>
+    ${TARGETS_STATE.loading ? '<div class="loading"><div class="spinner"></div><div>Loading targets…</div></div>' : cards}
+  `;
+
+  if (!canEdit) return;
+  $('targetsView').querySelectorAll('.t-save').forEach(b => b.onclick = () => {
+    const tr = b.closest('tr');
+    saveTarget(+tr.dataset.cid, tr.dataset.eff, tr.querySelector('.t-fte').value.trim(), tr.querySelector('.t-hrs').value.trim());
+  });
+  $('targetsView').querySelectorAll('.t-del').forEach(b => b.onclick = () => deleteTarget(+b.closest('tr').dataset.tid));
+  $('targetsView').querySelectorAll('.t-add').forEach(b => b.onclick = () => {
+    const tr = b.closest('tr'); const cid = +tr.dataset.addCid;
+    const mo = $(`tadd-m-${cid}`).value;
+    if (!mo) { alert('Pick an effective month.'); return; }
+    saveTarget(cid, `${mo}-01`, tr.querySelector('.t-add-fte').value.trim(), tr.querySelector('.t-add-hrs').value.trim());
+  });
 }
 
 // ─── Rules view (admin only) ─────────────────────────────────────
@@ -3457,6 +3606,10 @@ async function init() {
   document.querySelectorAll('.tab').forEach(t => t.onclick = () => setView(t.dataset.view));
   // Wire granularity toggle (Day / Week / Month)
   document.querySelectorAll('#granNav .gran-btn').forEach(b => b.onclick = () => setGranularity(b.dataset.gran));
+  // Targets now live in the DB on the Targets tab; load them so slippage uses
+  // the real numbers, and retire the old per-browser ⚙ Targets modal.
+  await loadTargets();
+  $('targetsBtn').style.display = 'none';
   // Wire targets editor
   $('targetsBtn').onclick = openTargetsEditor;
   $('targetsMonth').onchange = (e) => changeTargetsMonth(e.target.value);
