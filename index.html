@@ -1319,6 +1319,15 @@ function fmtPeriodLabel(label, gran) {
 
 // Convenience wrappers that read the live granularity from STATE.
 function pLbl(w) { return fmtPeriodLabel(w, STATE.granularity); }
+function esc(s) { return String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+// Human period title (date range) for a period label — global counterpart to
+// the local helper inside render().
+function periodTitleFor(w) {
+  const r = periodDateRange(w, STATE.granularity);
+  if (!r) return pLbl(w);
+  const fday = (d) => `${String(d.getUTCDate()).padStart(2, '0')} ${_MONTH_NAMES[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
+  return r.start.getTime() === r.end.getTime() ? fday(r.start) : `${fday(r.start)} – ${fday(r.end)}`;
+}
 function periodNoun() {
   return STATE.granularity === 'day' ? 'day' : STATE.granularity === 'month' ? 'month' : 'week';
 }
@@ -1808,6 +1817,13 @@ function buildBillableByShift(attRows, empProfileRows, agentMeta, gran) {
   const byTeamWeek = {};   // "camp||team" -> week -> hrs
   const unmatched = {};    // shift name -> hrs (no campaign match)
   const nonBillable = {};  // role -> hrs (excluded: non-billable role)
+  const excluded = {};     // week -> "shift||reason" -> {shift,reason,role,camp,hrs}
+  const addExcluded = (week, shift, reason, role, camp, hrs) => {
+    const wk = (excluded[week] ??= {});
+    const k = shift + '||' + reason;
+    if (!wk[k]) wk[k] = { shift: shift || '(blank)', reason, role: ROLE_LABEL[role] || role, camp: camp || '—', hrs: 0 };
+    wk[k].hrs += hrs;
+  };
   for (const row of attRows) {
     const payable = +row['Payable Hours (Mins)'] || parseHMS(row['Payable Hours']) || 0;
     const unpaid  = +row['Unpaid Break (Mins)']  || parseHMS(row['Unpaid Break']) || 0;
@@ -1823,13 +1839,19 @@ function buildBillableByShift(attRows, empProfileRows, agentMeta, gran) {
     if (!camp) {
       // No campaign → can't attribute billable. Agents are flagged for review;
       // off-campaign support/admin shifts (e.g. Office Admin) are non-billable.
-      if (role === 'agent') { const s = shift || '(blank)'; unmatched[s] = (unmatched[s] || 0) + hrs; }
-      else nonBillable[ROLE_LABEL[role] || role] = (nonBillable[ROLE_LABEL[role] || role] || 0) + hrs;
+      if (role === 'agent') {
+        const s = shift || '(blank)'; unmatched[s] = (unmatched[s] || 0) + hrs;
+        addExcluded(week, shift, 'No campaign match', role, null, hrs);
+      } else {
+        nonBillable[ROLE_LABEL[role] || role] = (nonBillable[ROLE_LABEL[role] || role] || 0) + hrs;
+        addExcluded(week, shift, 'Off-campaign non-billable role', role, null, hrs);
+      }
       continue;
     }
     // Campaign-aware: is this role billable on this campaign for this month?
     if (!roleIsBillable(role, camp, ym)) {
       nonBillable[ROLE_LABEL[role] || role] = (nonBillable[ROLE_LABEL[role] || role] || 0) + hrs;
+      addExcluded(week, shift, 'Non-billable role on campaign', role, camp, hrs);
       continue;
     }
     (byCampWeek[camp] ??= {})[week] = (byCampWeek[camp][week] || 0) + hrs;
@@ -1838,7 +1860,7 @@ function buildBillableByShift(attRows, empProfileRows, agentMeta, gran) {
     const tk = camp + '||' + team;
     (byTeamWeek[tk] ??= {})[week] = (byTeamWeek[tk][week] || 0) + hrs;
   }
-  return { byCampWeek, byTeamWeek, unmatched, nonBillable };
+  return { byCampWeek, byTeamWeek, unmatched, nonBillable, excluded };
 }
 
 // Override billable in the already-built campaign/team rollups with the
@@ -1855,6 +1877,7 @@ function applyShiftBillable() {
   STATE.shiftBillable = b;
   STATE.unmatchedShifts = b.unmatched;
   STATE.nonBillableHours = b.nonBillable || {};
+  STATE.excludedShifts = b.excluded || {};
   for (const camp in b.byCampWeek)
     for (const wk in b.byCampWeek[camp])
       if (STATE.campaignWeek[camp] && STATE.campaignWeek[camp][wk])
@@ -2385,6 +2408,41 @@ async function deleteTargetVersion(cid, eff) {
   if (r.ok) { TARGETS_STATE.selEff = null; await loadTargetsAdmin(); rebuildAggregates(); render(); } else alert('Delete failed.');
 }
 
+// Admin diagnostics: every attendance shift whose hours were NOT counted as
+// billable in the selected period, with the reason. Helps spot shift names that
+// need a campaign pattern or a billable-role target fix.
+function excludedShiftsPanel() {
+  const wk = STATE.selectedWeek;
+  const byWeek = (STATE.excludedShifts || {})[wk] || {};
+  const rows = Object.values(byWeek).sort((a, b) => b.hrs - a.hrs);
+  const label = wk ? periodTitleFor(wk) : '—';
+  const total = rows.reduce((s, r) => s + r.hrs, 0);
+  const reasonChip = (r) => r === 'No campaign match'
+    ? '<span class="chip warn">no campaign</span>'
+    : '<span class="chip">non-billable role</span>';
+  const body = rows.length
+    ? `<table class="agent-tbl"><thead><tr>
+         <th>Shift</th><th>Reason</th><th>Campaign</th><th>Role</th><th class="numeric">Hours</th>
+       </tr></thead><tbody>
+       ${rows.map(r => `<tr>
+         <td class="name" style="white-space:nowrap">${esc(r.shift)}</td>
+         <td>${reasonChip(r.reason)}</td>
+         <td>${esc(r.camp)}</td>
+         <td>${esc(r.role)}</td>
+         <td class="numeric">${Math.round(r.hrs).toLocaleString()}</td>
+       </tr>`).join('')}
+       </tbody></table>`
+    : `<div class="flag-empty" style="padding:20px">Every shift in this period mapped to billable. Nothing excluded. 🎉</div>`;
+  return `
+    <div class="agent-tbl-wrap" style="margin-top:18px">
+      <div class="agent-tbl-head">
+        <div class="agent-tbl-title">Shifts excluded from billable · ${esc(label)}</div>
+        <div class="agent-tbl-sub">${rows.length} shift name(s) · ${Math.round(total).toLocaleString()}h not counted · change period above to re-scope</div>
+      </div>
+      ${body}
+    </div>`;
+}
+
 function renderTargets() {
   const u = AUTH.user;
   if (!isExec(u)) { $('targetsView').innerHTML = '<div class="flag-empty" style="padding:32px">Admins / EXCO only.</div>'; return; }
@@ -2445,6 +2503,7 @@ function renderTargets() {
         `<table class="agent-tbl"><thead><tr><th>Rule</th><th>Value (effective ${eff.slice(0,7)})</th></tr></thead>
           <tbody>${groups}</tbody></table>`}
       </div>`}
+    ${excludedShiftsPanel()}
   `;
 
   // Live-recompute requested hours as FTE / SLA hrs-per-FTE change.
