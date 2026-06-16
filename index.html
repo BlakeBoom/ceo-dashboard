@@ -1240,6 +1240,19 @@ function periodNoun() {
   return STATE.granularity === 'day' ? 'day' : STATE.granularity === 'month' ? 'month' : 'week';
 }
 
+// Print which raw workgroups feed each campaign (and which are dropped), so we
+// can verify billable is attributed to the right campaign. Open the console.
+function logWgDebug() {
+  const d = STATE.wgDebug || {};
+  const tbl = Object.entries(d).map(([wg, o]) => ({ workgroup: wg, campaign: o.camp, billable_hrs: Math.round(o.hrs) }))
+    .sort((a, b) => b.billable_hrs - a.billable_hrs);
+  console.log('%c[workgroup → campaign → billable hrs]', 'font-weight:bold');
+  console.table(tbl);
+  if (STATE.wgSkipped && Object.keys(STATE.wgSkipped).length) {
+    console.warn('[workgroups with NO campaign mapping — billable dropped]', STATE.wgSkipped);
+  }
+}
+
 function buildAggregates(rows, gran = 'week') {
   // Index of records by campaign / period / team / user
   const weeks = new Set();
@@ -1247,6 +1260,8 @@ function buildAggregates(rows, gran = 'week') {
   const teamWeekRows = {};   // camp -> team -> week -> rows[]
   const agentWeekRows = {};  // camp -> team -> user_id -> week -> rows[]
   const agentMeta = {};
+  const wgDebug = {};        // workgroup → { camp, hrs } : where billable lands
+  const wgSkipped = {};      // workgroup → hrs : rows dropped (no campaign mapping)
 
   for (const r of rows) {
     let camp = r.campaign_key;
@@ -1254,7 +1269,10 @@ function buildAggregates(rows, gran = 'week') {
       camp = WG_MAP[r.workgroup];
       if (!camp && r.workgroup === 'HYVE' && r.shift_WG === 'Beer52') camp = 'BEER52';
     }
-    if (!camp) continue;
+    const _wg = (r.workgroup ?? '(blank)');
+    const _bh = +r.billable_hours || 0;
+    if (!camp) { wgSkipped[_wg] = (wgSkipped[_wg] || 0) + _bh; continue; }
+    (wgDebug[_wg] ??= { camp, hrs: 0 }).hrs += _bh;
     const week = periodKeyFor(r, gran);
     if (!week) continue;
     weeks.add(week);
@@ -1310,7 +1328,7 @@ function buildAggregates(rows, gran = 'week') {
 
   const sortedWeeks = [...weeks].sort((a,b) => periodSortVal(a, gran) - periodSortVal(b, gran));
 
-  return { campaignWeek, teamWeek, agentWeek, agentMeta, weeks: sortedWeeks };
+  return { campaignWeek, teamWeek, agentWeek, agentMeta, weeks: sortedWeeks, wgDebug, wgSkipped };
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -1659,6 +1677,7 @@ function rebuildAggregates() {
   STATE.agentWeek = agg.agentWeek;
   STATE.agentMeta = agg.agentMeta;
   STATE.weeks = agg.weeks;
+  STATE.wgDebug = agg.wgDebug; STATE.wgSkipped = agg.wgSkipped; logWgDebug();
   rebuildShrinkage();
   if (!STATE.selectedWeek || !STATE.weeks.includes(STATE.selectedWeek)) {
     // Latest period is often partial → default to penultimate when available.
@@ -3314,7 +3333,7 @@ function campaignCardHtml(c, wk) {
       <div class="kpi-grid">${kpis}</div>
       ${eff.has ? `<div class="eff-label">Efficiency</div><div class="team-stats">${eff.cells}</div>` : ''}
       <div class="spark-row">
-        <span class="spark-lbl">Billable</span>
+        <span class="spark-lbl" data-tip="${Object.entries(STATE.wgDebug||{}).filter(([,o])=>o.camp===c).sort((a,b)=>b[1].hrs-a[1].hrs).map(([wg,o])=>`${wg}: ${Math.round(o.hrs)}h`).join(' · ').replace(/"/g,'&quot;')||'no source workgroups'}">Billable ⓘ</span>
         <div class="spark">${spark}</div>
       </div>
     </div>
@@ -3643,6 +3662,7 @@ function applyData(rows, attendanceRows, empProfileRows) {
   STATE.agentWeek = agg.agentWeek;
   STATE.agentMeta = agg.agentMeta;
   STATE.weeks = agg.weeks;
+  STATE.wgDebug = agg.wgDebug; STATE.wgSkipped = agg.wgSkipped; logWgDebug();
 
   // Cache raw attendance + profile rows so shrinkage can be re-bucketed when
   // the granularity changes, then build it for the current granularity.
