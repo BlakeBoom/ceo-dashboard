@@ -656,7 +656,50 @@ const DEFAULT_TARGET_VERSIONS = {
 };
 const TARGET_LS_KEY = 'ceo_target_versions';   // legacy (no longer written)
 let TARGET_VERSIONS = {};                       // month → {campKey → {req_fte,req_hrs_month,req_hrs_week}}
-let DB_TARGETS = [];                            // rows from /api/targets
+let DB_TARGETS = [];                            // derived {slug,effective_from,req_fte,req_hrs_month} for slippage
+let RULES_RAW = [];                             // full matrix rows from /api/targets/rules
+
+// The full automation-rules matrix, grouped. key = stored rule_key; the two
+// slippage drivers are 'req_hrs_month' and 'target_fte'.
+const RULE_DEFS = [
+  ['Currency', [['currency', 'Currency']]],
+  ['Client Billing', [['client_billing', 'Billable basis']]],
+  ['Rates', [
+    ['productive_bae_rate','Productive BAE rate'],['bae_sunday_rate','Productive BAE Sunday rate'],
+    ['bae_saturday_rate','Productive BAE Saturday rate'],['public_holiday_rate','Productive public holiday rate'],
+    ['additional_hours_rate','Additional hours rate'],['tl_rate','TL rate'],['qa_rate','QA rate'],
+    ['cm_rate','CM rate'],['ic2_rate','2IC rate'],['trainer_rate','Trainer rate'],
+    ['tl_sunday_rate','TL Sunday rate'],['qa_sunday_rate','QA Sunday rate'],
+    ['special_agent_rate_1','Special agent rate #1'],['special_agent_rate_2','Special agent rate #2'],
+    ['headcount_discount','Head count discount'],['comm_reactivation_rate','Sales commission reactivation rate'],
+    ['comm_retention_rate','Sales commission retention rate'],
+  ]],
+  ['Working Days', [
+    ['wd_monday','Monday'],['wd_tuesday','Tuesday'],['wd_wednesday','Wednesday'],['wd_thursday','Thursday'],
+    ['wd_friday','Friday'],['wd_saturday','Saturday'],['wd_sunday','Sunday'],['wd_public_holidays','Public holidays'],
+  ]],
+  ['Shifts', [['evening_cutoff','Evening cut off'],['morning_cutoff','Morning cut off']]],
+  ['Non-billable shifts', [['nb_office_admin','Office Admin'],['nb_gls_team_leader','GLS Team Leader']]],
+  ['Training', [['training_duration','Duration']]],
+  ['Billable Training', [
+    ['training_days_billable','Training days billable'],['training_rate_daily','Training rate: daily'],
+    ['training_rate_monthly','Training rate: monthly'],['training_rate_hourly','Training rate: hourly'],
+  ]],
+  ['Non-Billable Training', [['training_days_not_billable','Training days NOT billable'],['training_coaching_hours','Training/coaching hours']]],
+  ['Non Billable Resources', [['nbr_campaign_manager','Campaign Manager'],['nbr_team_leader','Team Leader'],['nbr_real_time_analyst','Real Time Analyst']]],
+  ['Support Billable Resources', [
+    ['sbr_team_leader','Team Leader'],['sbr_baes','BAEs'],['sbr_smes','SMEs'],['sbr_2ic','2IC'],
+    ['sbr_campaign_manager','Campaign Manager'],['sbr_quality_analyst','Quality Analyst'],['sbr_trainer','Trainer'],['sbr_zendesk_specialist','Zendesk Specialist'],
+  ]],
+  ['Productive hours requested', [
+    ['sla_min_hrs_fte','SLA min productive hrs per FTE / month'],['target_fte','Target number of FTE'],
+    ['target_baes','Target number of BAEs'],['req_hrs_month','Target / Requested hours per month'],
+  ]],
+  ['FTE Targets (billable + non-billable)', [
+    ['fte_baes','Baes, SMEs, 2ICs'],['fte_support','Support (TLs, QAs, RTs, Trainers)'],['fte_cms','CMs'],
+  ]],
+];
+const SLIP_HRS_KEY = 'req_hrs_month', SLIP_FTE_KEY = 'target_fte';
 
 // DB campaign slug → the dashboard's campaign key (used by slippage). Mirrors
 // the WG_MAP / CAMP_DISPLAY worlds so DB targets feed the right campaign.
@@ -703,11 +746,24 @@ function buildTargetVersions() {
 }
 buildTargetVersions();
 
-// Pull DB targets and rebuild the working set. Called after login.
+// Pull the rules matrix and rebuild the slippage target set. Called after login.
 async function loadTargets() {
   try {
-    const r = await apiFetch('/api/targets');
-    if (r.ok) { DB_TARGETS = (await r.json()).targets || []; buildTargetVersions(); }
+    const r = await apiFetch('/api/targets/rules');
+    if (!r.ok) return;
+    RULES_RAW = (await r.json()).rules || [];
+    // Derive the slippage inputs (FTE + required hours) per campaign+version.
+    const byCE = {};
+    for (const x of RULES_RAW) {
+      const k = x.slug + '|' + x.effective_from;
+      (byCE[k] ??= { slug: x.slug, effective_from: x.effective_from })[x.rule_key] = x.value;
+    }
+    DB_TARGETS = Object.values(byCE).map(o => ({
+      slug: o.slug, effective_from: o.effective_from,
+      req_fte: parseFloat(o[SLIP_FTE_KEY]),
+      req_hrs_month: parseFloat(o[SLIP_HRS_KEY]),
+    })).filter(o => !isNaN(o.req_hrs_month));
+    buildTargetVersions();
   } catch (e) { /* keep defaults */ }
 }
 
@@ -1750,7 +1806,7 @@ function render() {
   // Footer
   const now = new Date();
   $('footer').innerHTML = `
-    <span>Boomerang BPO · Operations Dashboard v7 · DB targets</span>
+    <span>Boomerang BPO · Operations Dashboard v8 · rules matrix</span>
     <span>Source: ${STATE.dataSource === 'live' ? 'Zoho User_metrics_3 (live)' : 'Embedded W19–W22 snapshot'} · Rendered ${now.toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})}</span>
   `;
   // Granularity toggle active state
@@ -2094,37 +2150,46 @@ function renderBonus() {
 }
 
 // ─── Targets view (admin edits, EXCO views) ──────────────────────
-// DB-backed required-FTE / required-hours per campaign, effective-dated. Each
-// row applies from its effective month forward until a later one supersedes it.
-const TARGETS_STATE = { loaded: false, loading: false, campaigns: [], targets: [], error: null, msg: null };
+// Full automation-rules matrix per campaign, effective-dated. Pick a campaign
+// and an effective month; every rule is an input (admin) or read-only (EXCO).
+// A version applies from its month forward; editing one month never rewrites
+// the past. req_hrs_month + target_fte feed Slippage.
+const TARGETS_STATE = { loaded: false, loading: false, campaigns: [], selCid: null, selEff: null, error: null, msg: null };
 
 async function loadTargetsAdmin() {
   TARGETS_STATE.loading = true; renderTargets();
   try {
-    const [cr, tr] = await Promise.all([apiFetch('/api/teams/campaigns'), apiFetch('/api/targets')]);
+    const cr = await apiFetch('/api/teams/campaigns');
     if (cr.ok) TARGETS_STATE.campaigns = (await cr.json()).campaigns || [];
-    if (tr.ok) TARGETS_STATE.targets = (await tr.json()).targets || [];
+    await loadTargets(); // refresh RULES_RAW + slippage
+    if (!TARGETS_STATE.selCid && TARGETS_STATE.campaigns.length) TARGETS_STATE.selCid = TARGETS_STATE.campaigns[0].id;
     TARGETS_STATE.error = null;
-  } catch (e) { TARGETS_STATE.error = `Could not load targets (${e.message})`; }
+  } catch (e) { TARGETS_STATE.error = `Could not load (${e.message})`; }
   TARGETS_STATE.loading = false; renderTargets();
 }
 
-async function saveTarget(campaignId, effectiveFrom, fte, hrs) {
-  const r = await apiFetch('/api/targets', {
-    method: 'PUT',
-    body: JSON.stringify({
-      campaign_id: campaignId, effective_from: effectiveFrom,
-      req_fte: fte === '' ? null : Number(fte),
-      req_hrs_month: hrs === '' ? null : Number(hrs),
-    }),
-  });
-  if (r.ok) { TARGETS_STATE.msg = 'Saved. Re-syncs into slippage on next load.'; await loadTargets(); await loadTargetsAdmin(); render(); }
-  else { alert('Save failed: ' + (await r.text()).slice(0, 160)); }
+// effective months that exist for a campaign (slug), newest first.
+function targetMonthsFor(slug) {
+  return [...new Set(RULES_RAW.filter(r => r.slug === slug).map(r => r.effective_from))].sort().reverse();
 }
-async function deleteTarget(id) {
-  if (!confirm('Delete this target version?')) return;
-  const r = await apiFetch(`/api/targets/${id}`, { method: 'DELETE' });
-  if (r.ok) { await loadTargets(); await loadTargetsAdmin(); render(); } else alert('Delete failed.');
+function ruleValue(slug, eff, key) {
+  const r = RULES_RAW.find(x => x.slug === slug && x.effective_from === eff && x.rule_key === key);
+  return r ? (r.value ?? '') : '';
+}
+
+async function saveTargetVersion(cid, eff) {
+  const values = {};
+  document.querySelectorAll('#targetsView [data-rk]').forEach(i => { values[i.dataset.rk] = i.value.trim(); });
+  const r = await apiFetch('/api/targets/rules', {
+    method: 'PUT', body: JSON.stringify({ campaign_id: cid, effective_from: eff, values }),
+  });
+  if (r.ok) { TARGETS_STATE.msg = 'Saved.'; await loadTargetsAdmin(); render(); }
+  else alert('Save failed: ' + (await r.text()).slice(0, 160));
+}
+async function deleteTargetVersion(cid, eff) {
+  if (!confirm(`Delete the ${eff.slice(0,7)} version entirely?`)) return;
+  const r = await apiFetch(`/api/targets/rules/version?campaign_id=${cid}&effective_from=${eff}`, { method: 'DELETE' });
+  if (r.ok) { TARGETS_STATE.selEff = null; await loadTargetsAdmin(); render(); } else alert('Delete failed.');
 }
 
 function renderTargets() {
@@ -2133,74 +2198,60 @@ function renderTargets() {
   if (!TARGETS_STATE.loaded) { TARGETS_STATE.loaded = true; loadTargetsAdmin(); }
   const canEdit = u.role === 'admin';
 
-  const byCamp = new Map();
-  for (const t of TARGETS_STATE.targets) {
-    if (!byCamp.has(t.campaign_id)) byCamp.set(t.campaign_id, []);
-    byCamp.get(t.campaign_id).push(t);
-  }
-  const monthInput = (id, val) => `<input id="${id}" type="month" value="${val||''}" class="mono" style="font-size:11px;padding:5px 7px;border:1px solid var(--border-light);border-radius:6px;background:var(--bg-2);color:var(--text)">`;
-  const numInput = (cls, val) => `<input class="${cls} mono" value="${val ?? ''}" placeholder="—" style="width:90px;font-size:11px;padding:5px 7px;border:1px solid var(--border-light);border-radius:6px;background:var(--bg-2);color:var(--text);text-align:right">`;
+  const camps = TARGETS_STATE.campaigns;
+  const cid = TARGETS_STATE.selCid;
+  const camp = camps.find(c => c.id === cid);
+  const slug = camp?.slug;
+  const months = slug ? targetMonthsFor(slug) : [];
+  let eff = TARGETS_STATE.selEff;
+  if (!eff || !months.includes(eff)) eff = months[0] || null;
 
-  const cards = TARGETS_STATE.campaigns.map(c => {
-    const versions = (byCamp.get(c.id) || []).slice().sort((a, b) => b.effective_from.localeCompare(a.effective_from));
-    const rows = versions.map(v => {
-      const fte = v.req_fte != null ? +v.req_fte : null, hrs = v.req_hrs_month != null ? +v.req_hrs_month : null;
-      const perFte = (fte && hrs) ? (hrs / fte).toFixed(1) : '—';
-      if (!canEdit) {
-        return `<tr><td class="mono">${v.effective_from.slice(0,7)}</td><td class="numeric">${fte ?? '—'}</td>
-          <td class="numeric">${hrs != null ? Math.round(hrs).toLocaleString() : '—'}</td><td class="numeric dim">${perFte}</td><td></td></tr>`;
-      }
-      return `<tr data-tid="${v.id}" data-cid="${c.id}" data-eff="${v.effective_from}">
-        <td class="mono">${v.effective_from.slice(0,7)}</td>
-        <td class="numeric">${numInput('t-fte', fte)}</td>
-        <td class="numeric">${numInput('t-hrs', hrs)}</td>
-        <td class="numeric dim">${perFte}</td>
-        <td class="numeric" style="white-space:nowrap"><button class="row-btn t-save">Save</button><button class="row-btn danger t-del">Delete</button></td>
-      </tr>`;
-    }).join('');
-    const addRow = canEdit ? `<tr data-add-cid="${c.id}">
-      <td>${monthInput(`tadd-m-${c.id}`, '')}</td>
-      <td class="numeric">${numInput('t-add-fte', '')}</td>
-      <td class="numeric">${numInput('t-add-hrs', '')}</td>
-      <td class="numeric dim">—</td>
-      <td class="numeric"><button class="row-btn t-add">+ Add version</button></td>
-    </tr>` : '';
-    return `<div class="agent-tbl-wrap" style="margin-bottom:14px">
-      <div class="agent-tbl-head"><div class="agent-tbl-title">${c.name}</div>
-        <div class="agent-tbl-sub">${versions.length} version${versions.length===1?'':'s'}</div></div>
-      <table class="agent-tbl">
-        <thead><tr><th>Effective from</th><th class="numeric">Req FTE</th><th class="numeric">Req hrs / month</th><th class="numeric">hrs / FTE</th><th></th></tr></thead>
-        <tbody>${rows || `<tr><td colspan="5" class="flag-empty" style="padding:14px">No target set${canEdit?' — add one below.':'.'}</td></tr>`}${addRow}</tbody>
-      </table>
-    </div>`;
-  }).join('');
+  const campSel = `<select id="tg-camp" class="modal-month" style="font-size:13px;padding:7px 10px">${
+    camps.map(c => `<option value="${c.id}"${c.id===cid?' selected':''}>${c.name}</option>`).join('')}</select>`;
+  const monthSel = `<select id="tg-eff" class="modal-month" style="font-size:13px;padding:7px 10px">${
+    months.length ? months.map(m => `<option value="${m}"${m===eff?' selected':''}>${m.slice(0,7)}</option>`).join('')
+                  : '<option value="">no versions yet</option>'}</select>`;
+
+  const cell = (key) => canEdit
+    ? `<input data-rk="${key}" value="${(eff?ruleValue(slug,eff,key):'').replace(/"/g,'&quot;')}" style="width:160px;font-size:12px;padding:5px 8px;border:1px solid var(--border-light);border-radius:6px;background:var(--bg-2);color:var(--text)">`
+    : `<span class="mono">${eff?(ruleValue(slug,eff,key)||'—'):'—'}</span>`;
+  const groups = RULE_DEFS.map(([g, items]) => `
+    <tr class="team-row"><td colspan="2"><b>${g}</b></td></tr>
+    ${items.map(([key, label]) => `<tr><td class="name" style="white-space:nowrap">${label}</td><td>${cell(key)}</td></tr>`).join('')}
+  `).join('');
 
   $('targetsView').innerHTML = `
-    <div class="users-panel" style="margin:0 0 14px">
-      <div class="users-panel-h">Campaign targets ${canEdit ? '' : '<span class="chip">read-only</span>'}</div>
-      <div class="agent-tbl-sub" style="text-transform:none;letter-spacing:0;font-family:inherit;font-size:12px;line-height:1.6">
-        Required FTE and monthly billable hours per campaign. Each version applies <b>from its effective month forward</b>
-        until a later version supersedes it — so editing one month never changes the past. These drive the
-        <b>Slippage</b> KPI (week = hrs ÷ 4.33, day = hrs ÷ 30.31).
+    <div class="agent-tbl-head" style="background:var(--card);border:1px solid var(--border-light);border-radius:12px 12px 0 0">
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;flex:1">
+        ${campSel} ${monthSel}
+        ${canEdit ? `<input id="tg-newmo" type="month" class="modal-month" style="font-size:12px;padding:6px 8px" title="Add a new effective month">
+        <button id="tg-add" class="btn-ghost">+ Add month</button>` : '<span class="chip">read-only</span>'}
       </div>
-      ${TARGETS_STATE.msg ? `<div class="chip ok" style="margin-top:8px">${TARGETS_STATE.msg}</div>` : ''}
-      ${TARGETS_STATE.error ? `<div class="err-banner show" style="margin-top:8px">${TARGETS_STATE.error}</div>` : ''}
+      ${canEdit && eff ? `<button id="tg-save" class="btn-primary">Save ${eff.slice(0,7)}</button>
+        <button id="tg-del" class="row-btn danger" style="margin-left:6px">Delete version</button>` : ''}
     </div>
-    ${TARGETS_STATE.loading ? '<div class="loading"><div class="spinner"></div><div>Loading targets…</div></div>' : cards}
+    ${TARGETS_STATE.msg ? `<div class="chip ok" style="margin:8px 0">${TARGETS_STATE.msg}</div>` : ''}
+    ${TARGETS_STATE.error ? `<div class="err-banner show" style="margin:8px 0">${TARGETS_STATE.error}</div>` : ''}
+    ${TARGETS_STATE.loading ? '<div class="loading"><div class="spinner"></div><div>Loading…</div></div>' :
+      `<div class="agent-tbl-wrap" style="border-radius:0 0 12px 12px;border-top:none">
+        ${!eff ? `<div class="flag-empty" style="padding:24px">No version for ${camp?.name||'this campaign'} yet.${canEdit?' Pick a month above and Add it.':''}</div>` :
+        `<table class="agent-tbl"><thead><tr><th>Rule</th><th>Value (effective ${eff.slice(0,7)})</th></tr></thead>
+          <tbody>${groups}</tbody></table>`}
+      </div>`}
   `;
 
-  if (!canEdit) return;
-  $('targetsView').querySelectorAll('.t-save').forEach(b => b.onclick = () => {
-    const tr = b.closest('tr');
-    saveTarget(+tr.dataset.cid, tr.dataset.eff, tr.querySelector('.t-fte').value.trim(), tr.querySelector('.t-hrs').value.trim());
+  $('tg-camp')?.addEventListener('change', e => { TARGETS_STATE.selCid = +e.target.value; TARGETS_STATE.selEff = null; renderTargets(); });
+  $('tg-eff')?.addEventListener('change', e => { TARGETS_STATE.selEff = e.target.value; renderTargets(); });
+  $('tg-add')?.addEventListener('click', () => {
+    const mo = $('tg-newmo').value;
+    if (!mo) { alert('Pick a month to add.'); return; }
+    TARGETS_STATE.selEff = `${mo}-01`;
+    // Render an empty editable version, then admin fills + saves.
+    if (!months.includes(`${mo}-01`)) RULES_RAW.push({ slug, effective_from: `${mo}-01`, rule_key: '__new', value: '' });
+    renderTargets();
   });
-  $('targetsView').querySelectorAll('.t-del').forEach(b => b.onclick = () => deleteTarget(+b.closest('tr').dataset.tid));
-  $('targetsView').querySelectorAll('.t-add').forEach(b => b.onclick = () => {
-    const tr = b.closest('tr'); const cid = +tr.dataset.addCid;
-    const mo = $(`tadd-m-${cid}`).value;
-    if (!mo) { alert('Pick an effective month.'); return; }
-    saveTarget(cid, `${mo}-01`, tr.querySelector('.t-add-fte').value.trim(), tr.querySelector('.t-add-hrs').value.trim());
-  });
+  $('tg-save')?.addEventListener('click', () => saveTargetVersion(cid, eff));
+  $('tg-del')?.addEventListener('click', () => deleteTargetVersion(cid, eff));
 }
 
 // ─── Rules view (admin only) ─────────────────────────────────────
