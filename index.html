@@ -1164,9 +1164,66 @@ function buildNameMatcher(empProfileRows) {
   };
 }
 
+// EmployeeProfile job title → role in our hierarchy (mirrors provision.js).
+function titleToRole(title) {
+  const t = String(title ?? '').toLowerCase();
+  if (t.includes('campaign manager')) return 'campaign_lead';
+  if (t.includes('team leader') || t.includes('team lead') || t.includes('shift leader')) return 'tm';
+  return 'agent';
+}
+
+// Build a name → role index from EmployeeProfile so the team drill-down can tell
+// Team Leaders (real team nodes) from Campaign Managers (a management level, not
+// a team). Keyed by both the full normalised name and a first+last key for
+// fuzzy matching against the metrics view's names. Returns null when no job
+// title column is present, so callers fall back to the raw team_name grouping.
+const _ROLE_RANK = { agent: 0, tm: 1, campaign_lead: 2 };
+function buildTeamRoleIndex(empRows) {
+  if (!empRows || !empRows.length) return null;
+  const normKey = k => String(k).toLowerCase().replace(/[^a-z0-9]/g, '');
+  const titleCands = new Set(['jobtitle', 'designation', 'title', 'position']);
+  const sample = empRows.find(r => r) || {};
+  let titleKey = null;
+  for (const k of Object.keys(sample)) if (titleCands.has(normKey(k))) { titleKey = k; break; }
+  if (!titleKey) return null;
+  const roleByKey = new Map();
+  let tlCount = 0;
+  const put = (key, role) => {
+    if (!key) return;
+    const cur = roleByKey.get(key);
+    if (cur == null || _ROLE_RANK[role] > _ROLE_RANK[cur]) roleByKey.set(key, role); // leader role wins ties
+  };
+  for (const r of empRows) {
+    const rawName = r['Employee Name'] || r.employee_name;
+    if (!rawName) continue;
+    const role = titleToRole(r[titleKey]);
+    const clean = stripKnownNameSuffix(rawName);
+    put(normalizeName(clean), role);
+    put(firstLastKey(clean), role);
+    if (role === 'tm') tlCount++;
+  }
+  const roleOf = (name) => roleByKey.get(normalizeName(name)) ?? roleByKey.get(firstLastKey(name)) ?? null;
+  return { roleOf, isTL: n => roleOf(n) === 'tm', tlCount };
+}
+let TEAM_ROLE_INDEX = null;  // set from EmployeeProfile in applyData
+
+// Which team node a metrics row belongs to. Only Team Leaders are team nodes:
+//   • a Team Leader's own row  → their own team (their name)
+//   • an agent under a TL      → that TL's team
+//   • anyone under a Campaign Manager (or an unknown leader) → "— Unassigned"
+// Falls back to the raw leader name when we have no role info (EmployeeProfile
+// missing), preserving the previous behaviour.
+const UNASSIGNED_TEAM = '— Unassigned';
+function resolveTeamNode(personName, leaderName) {
+  const idx = TEAM_ROLE_INDEX;
+  if (!idx || idx.tlCount === 0) return leaderName || UNASSIGNED_TEAM;
+  if (idx.roleOf(personName) === 'tm') return personName || UNASSIGNED_TEAM;
+  if (leaderName && idx.isTL(leaderName)) return leaderName;
+  return UNASSIGNED_TEAM;
+}
+
 // "h:mm" or "h:mm:ss" → minutes (number)
-function parseHMS(s) {
-  if (s == null || s === '') return 0;
+function parseHMS(s) {  if (s == null || s === '') return 0;
   if (typeof s === 'number') return s;
   const parts = String(s).split(':').map(Number);
   if (parts.some(isNaN)) return 0;
@@ -1450,7 +1507,7 @@ function buildAggregates(rows, gran = 'week') {
     // billable shown for the selected period (not an all-time sum).
     ((wgDebug[camp] ??= {})[week] ??= {})[_wg] = (wgDebug[camp][week][_wg] || 0) + _bh;
     weeks.add(week);
-    const team = r.team_name || '— Unassigned';
+    const team = resolveTeamNode(r.fullname, r.team_name);
     const uid = r.user_id;
 
     campWeekRows[camp] ??= {};
@@ -2128,7 +2185,7 @@ function render() {
   // Footer
   const now = new Date();
   $('footer').innerHTML = `
-    <span>Boomerang BPO · Operations Dashboard v12 · billable + approved additional hours</span>
+    <span>Boomerang BPO · Operations Dashboard v13 · team-leader drill-down</span>
     <span>Source: ${STATE.dataSource === 'live' ? 'Zoho User_metrics_3 (live)' : 'Embedded W19–W22 snapshot'} · Rendered ${now.toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})}</span>
   `;
   // Granularity toggle active state
@@ -4091,6 +4148,9 @@ function renderTrends() {
 function applyData(rows, attendanceRows, empProfileRows) {
   STATE.rawAgentWeek = rows;
   _DATE_COL = detectDateCol(rows);
+  // Role index (from EmployeeProfile) drives the team-leader-only drill-down.
+  // Built before aggregation so buildAggregates can group rows by Team Leader.
+  TEAM_ROLE_INDEX = buildTeamRoleIndex(empProfileRows);
   const agg = buildAggregates(rows, STATE.granularity);
   STATE.campaignWeek = agg.campaignWeek;
   STATE.teamWeek = agg.teamWeek;
