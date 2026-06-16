@@ -40,6 +40,8 @@ const CAMPAIGN_BY_KEY = {
   gousto:            { name: 'Gousto',              slug: 'gousto' },
   justpark:          { name: 'Just Park UK',       slug: 'justpark' },
   justparkuk:        { name: 'Just Park UK',       slug: 'justpark' },
+  justparkspaceowner:{ name: 'Just Park UK',       slug: 'justpark' }, // Space Owner is UK
+  justparksp:        { name: 'Just Park UK',       slug: 'justpark' },
   justparkus:        { name: 'Just Park US',       slug: 'justpark-us' },
   justparkusa:       { name: 'Just Park US',       slug: 'justpark-us' },
   justparkeventpass: { name: 'Just Park US',       slug: 'justpark-us' }, // Event Pass folds into US
