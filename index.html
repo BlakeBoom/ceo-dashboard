@@ -1244,9 +1244,13 @@ function periodNoun() {
 // can verify billable is attributed to the right campaign. Open the console.
 function logWgDebug() {
   const d = STATE.wgDebug || {};
-  const tbl = Object.entries(d).map(([wg, o]) => ({ workgroup: wg, campaign: o.camp, billable_hrs: Math.round(o.hrs) }))
-    .sort((a, b) => b.billable_hrs - a.billable_hrs);
-  console.log('%c[workgroup → campaign → billable hrs]', 'font-weight:bold');
+  const totals = {}; // workgroup → {camp, hrs} across all loaded periods
+  for (const camp in d) for (const wk in d[camp]) for (const wg in d[camp][wk]) {
+    (totals[wg] ??= { camp, hrs: 0 }).hrs += d[camp][wk][wg];
+  }
+  const tbl = Object.entries(totals).map(([wg, o]) => ({ workgroup: wg, campaign: o.camp, billable_hrs_all_periods: Math.round(o.hrs) }))
+    .sort((a, b) => b.billable_hrs_all_periods - a.billable_hrs_all_periods);
+  console.log('%c[workgroup → campaign → billable hrs, ALL loaded periods]', 'font-weight:bold');
   console.table(tbl);
   if (STATE.wgSkipped && Object.keys(STATE.wgSkipped).length) {
     console.warn('[workgroups with NO campaign mapping — billable dropped]', STATE.wgSkipped);
@@ -1270,11 +1274,13 @@ function buildAggregates(rows, gran = 'week') {
       if (!camp && r.workgroup === 'HYVE' && r.shift_WG === 'Beer52') camp = 'BEER52';
     }
     const _wg = (r.workgroup ?? '(blank)');
-    const _bh = +r.billable_hours || 0;
+    const _bh = (r.billable_hours != null ? +r.billable_hours : +r.billable) || 0;
     if (!camp) { wgSkipped[_wg] = (wgSkipped[_wg] || 0) + _bh; continue; }
-    (wgDebug[_wg] ??= { camp, hrs: 0 }).hrs += _bh;
     const week = periodKeyFor(r, gran);
     if (!week) continue;
+    // Per camp → period → workgroup billable, so the breakdown matches the
+    // billable shown for the selected period (not an all-time sum).
+    ((wgDebug[camp] ??= {})[week] ??= {})[_wg] = (wgDebug[camp][week][_wg] || 0) + _bh;
     weeks.add(week);
     const team = r.team_name || '— Unassigned';
     const uid = r.user_id;
@@ -3333,7 +3339,7 @@ function campaignCardHtml(c, wk) {
       <div class="kpi-grid">${kpis}</div>
       ${eff.has ? `<div class="eff-label">Efficiency</div><div class="team-stats">${eff.cells}</div>` : ''}
       <div class="spark-row">
-        <span class="spark-lbl" data-tip="${Object.entries(STATE.wgDebug||{}).filter(([,o])=>o.camp===c).sort((a,b)=>b[1].hrs-a[1].hrs).map(([wg,o])=>`${wg}: ${Math.round(o.hrs)}h`).join(' · ').replace(/"/g,'&quot;')||'no source workgroups'}">Billable ⓘ</span>
+        <span class="spark-lbl" data-tip="${pLbl(wk)} · ${Object.entries(STATE.wgDebug?.[c]?.[wk]||{}).sort((a,b)=>b[1]-a[1]).map(([wg,h])=>`${wg}: ${Math.round(h)}h`).join(' · ').replace(/"/g,'&quot;')||'no source workgroups'}">Billable ⓘ</span>
         <div class="spark">${spark}</div>
       </div>
     </div>
