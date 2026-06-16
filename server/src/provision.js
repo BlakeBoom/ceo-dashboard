@@ -44,7 +44,7 @@ const CAMPAIGN_BY_KEY = {
   justparksp:        { name: 'Just Park UK',       slug: 'justpark' },
   justparkus:        { name: 'Just Park US',       slug: 'justpark-us' },
   justparkusa:       { name: 'Just Park US',       slug: 'justpark-us' },
-  justparkeventpass: { name: 'Just Park US',       slug: 'justpark-us' }, // Event Pass folds into US
+  justparkeventpass: { name: 'Just Park UK',       slug: 'justpark' }, // Event Pass = Space Owner = UK
   lintbells:         { name: 'Lintbells',           slug: 'lintbells' },
   hunzag:            { name: 'HunzaG',              slug: 'hunzag' },
   royalcanin:        { name: 'RoyalCanin',          slug: 'royalcanin' },
