@@ -659,6 +659,7 @@ const TARGET_LS_KEY = 'ceo_target_versions';   // legacy (no longer written)
 let TARGET_VERSIONS = {};                       // month → {campKey → {req_fte,req_hrs_month,req_hrs_week}}
 let DB_TARGETS = [];                            // derived {slug,effective_from,req_fte,req_hrs_month} for slippage
 let RULES_RAW = [];                             // full matrix rows from /api/targets/rules
+let ROLE_TARGET_TIMELINE = {};                  // campKey → { 'YYYY-MM' → {sbr_*/nbr_* → count} }
 
 // The full automation-rules matrix, grouped. key = stored rule_key; the two
 // slippage drivers are 'req_hrs_month' and 'target_fte'.
@@ -767,6 +768,7 @@ async function loadTargets() {
       return { slug: o.slug, effective_from: o.effective_from, req_fte: fte, req_hrs_month: hrs };
     }).filter(o => !isNaN(o.req_hrs_month));
     buildTargetVersions();
+    buildRoleTargets();
   } catch (e) { /* keep defaults */ }
 }
 
@@ -930,22 +932,87 @@ function shiftToCampaign(shiftName) {
   return null;
 }
 
-// Roles whose hours are NOT billable, per the Targets matrix:
-//   • "Non-billable shifts"  → Office Admin, GLS Team Leader
-//   • "Non Billable Resources" → Campaign Manager, Team Leader, Real Time Analyst
-// Detected from the Shift text and excluded from billable BEFORE campaign
-// attribution (a Team Leader on JustPark UK is still non-billable). Front-line
-// agents and other support roles (QA, Trainer, BAE, SME…) remain billable.
-const NON_BILLABLE_ROLE_PATTERNS = [
-  [/office\s*admin/i,                          'Office Admin'],
-  [/real\s*time\s*analyst|\brta\b/i,           'Real Time Analyst'],
-  [/campaign\s*manager/i,                      'Campaign Manager'],
-  [/team\s*lead(er)?\b/i,                       'Team Leader'],
+// Detect the role from the Shift text. Anything that matches none of these is a
+// front-line agent (always billable). Ordered specific-first.
+const ROLE_PATTERNS = [
+  [/office\s*admin/i,                'office_admin'],
+  [/real\s*time\s*analyst|\brta\b/i, 'real_time_analyst'],
+  [/campaign\s*manager/i,            'campaign_manager'],
+  [/quality\s*analyst|\bqa\b/i,      'quality_analyst'],
+  [/zendesk/i,                       'zendesk_specialist'],
+  [/trainer/i,                       'trainer'],
+  [/\b2ic\b/i,                       '2ic'],
+  [/\bbaes?\b/i,                     'baes'],
+  [/\bsmes?\b/i,                     'smes'],
+  [/team\s*lead(er)?\b|\btl\b/i,     'team_leader'],
 ];
-function nonBillableRole(shiftName) {
-  if (!shiftName) return null;
-  for (const [re, role] of NON_BILLABLE_ROLE_PATTERNS) if (re.test(shiftName)) return role;
-  return null;
+function detectRole(shiftName) {
+  if (!shiftName) return 'agent';
+  for (const [re, role] of ROLE_PATTERNS) if (re.test(shiftName)) return role;
+  return 'agent';
+}
+const ROLE_LABEL = {
+  office_admin:'Office Admin', real_time_analyst:'Real Time Analyst', campaign_manager:'Campaign Manager',
+  quality_analyst:'Quality Analyst', zendesk_specialist:'Zendesk Specialist', trainer:'Trainer',
+  '2ic':'2IC', baes:'BAEs', smes:'SMEs', team_leader:'Team Leader', agent:'Agent',
+};
+// Maps each role to its Support-Billable (sbr_) and Non-Billable (nbr_) target
+// rule keys. `always` forces a verdict regardless of targets. Agents and any
+// role absent here are billable.
+const ROLE_TARGET_KEYS = {
+  office_admin:       { always: 0 },                                              // Non-billable shift
+  real_time_analyst:  { sbr: null,                  nbr: 'nbr_real_time_analyst' },
+  campaign_manager:   { sbr: 'sbr_campaign_manager', nbr: 'nbr_campaign_manager' },
+  team_leader:        { sbr: 'sbr_team_leader',      nbr: 'nbr_team_leader' },
+  quality_analyst:    { sbr: 'sbr_quality_analyst',  nbr: null },
+  trainer:            { sbr: 'sbr_trainer',          nbr: null },
+  zendesk_specialist: { sbr: 'sbr_zendesk_specialist', nbr: null },
+  '2ic':              { sbr: 'sbr_2ic',              nbr: null },
+  baes:               { sbr: 'sbr_baes',             nbr: null },
+  smes:               { sbr: 'sbr_smes',             nbr: null },
+};
+// When a campaign+month has no sbr/nbr target data for a role, fall back to this
+// (TLs/CMs/QAs are "normally billable"; RTAs and Office Admin never are).
+const FALLBACK_BILLABLE = {
+  office_admin: false, real_time_analyst: false,
+  campaign_manager: true, team_leader: true, quality_analyst: true,
+  trainer: true, zendesk_specialist: true, '2ic': true, baes: true, smes: true,
+};
+
+// Build the per-campaign, per-month timeline of sbr_*/nbr_* counts from the
+// rules matrix. Called after RULES_RAW loads.
+function buildRoleTargets() {
+  ROLE_TARGET_TIMELINE = {};
+  for (const x of RULES_RAW) {
+    if (!/^(sbr_|nbr_)/.test(x.rule_key)) continue;
+    const ck = SLUG_TO_CAMPKEY[x.slug]; if (!ck) continue;
+    const ym = String(x.effective_from).slice(0, 7);
+    const v = parseFloat(x.value);
+    ((ROLE_TARGET_TIMELINE[ck] ??= {})[ym] ??= {})[x.rule_key] = isNaN(v) ? 0 : v;
+  }
+}
+// Resolved sbr/nbr counts for a campaign at a given YYYY-MM (latest effective
+// version on/before that month).
+function roleTargetsFor(campKey, ym) {
+  const tl = ROLE_TARGET_TIMELINE[campKey];
+  if (!tl) return null;
+  let chosen = null;
+  for (const mo of Object.keys(tl).sort()) if (!ym || mo <= ym) chosen = tl[mo];
+  return chosen;
+}
+// Fraction [0,1] of a role's hours that are billable on a campaign in a given
+// month. Agents = 1. Roles with both sbr & nbr counts split proportionally
+// (e.g. 3 billable + 1 non-billable TL → 0.75).
+function roleBillableFraction(role, campKey, ym) {
+  if (!role || role === 'agent') return 1;
+  const map = ROLE_TARGET_KEYS[role];
+  if (!map) return 1;
+  if (map.always != null) return map.always;
+  const t = roleTargetsFor(campKey, ym);
+  const sbr = (t && map.sbr) ? (+t[map.sbr] || 0) : 0;
+  const nbr = (t && map.nbr) ? (+t[map.nbr] || 0) : 0;
+  if (sbr === 0 && nbr === 0) return FALLBACK_BILLABLE[role] ? 1 : 0;
+  return sbr / (sbr + nbr);
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -1746,19 +1813,32 @@ function buildBillableByShift(attRows, empProfileRows, agentMeta, gran) {
     const unpaid  = +row['Unpaid Break (Mins)']  || parseHMS(row['Unpaid Break']) || 0;
     const hrs = Math.max(0, payable - unpaid) / 60;
     if (hrs <= 0) continue;
+    const date = parseDate(row['Date'] ?? row.date);
     const week = periodKeyForDate(row['Date'] ?? row.date, gran);
     if (!week) continue;
+    const ym = date ? `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}` : null;
     const shift = (row['Shift'] ?? row.shift ?? '').toString();
-    // Drop non-billable roles first, regardless of which campaign they sit on.
-    const nbRole = nonBillableRole(shift);
-    if (nbRole) { nonBillable[nbRole] = (nonBillable[nbRole] || 0) + hrs; continue; }
+    const role = detectRole(shift);
     const camp = shiftToCampaign(shift);
-    if (!camp) { const s = shift || '(blank)'; unmatched[s] = (unmatched[s] || 0) + hrs; continue; }
-    (byCampWeek[camp] ??= {})[week] = (byCampWeek[camp][week] || 0) + hrs;
+    if (!camp) {
+      // No campaign → can't attribute billable. Agents are flagged for review;
+      // off-campaign support/admin shifts (e.g. Office Admin) are non-billable.
+      if (role === 'agent') { const s = shift || '(blank)'; unmatched[s] = (unmatched[s] || 0) + hrs; }
+      else nonBillable[ROLE_LABEL[role] || role] = (nonBillable[ROLE_LABEL[role] || role] || 0) + hrs;
+      continue;
+    }
+    // Campaign-aware split: how much of this role's hours are billable on this
+    // campaign for this month (per sbr_*/nbr_* targets).
+    const frac = roleBillableFraction(role, camp, ym);
+    const nbHrs = hrs * (1 - frac);
+    if (nbHrs > 0.0001) nonBillable[ROLE_LABEL[role] || role] = (nonBillable[ROLE_LABEL[role] || role] || 0) + nbHrs;
+    const billHrs = hrs * frac;
+    if (billHrs <= 0.0001) continue;
+    (byCampWeek[camp] ??= {})[week] = (byCampWeek[camp][week] || 0) + billHrs;
     const uid = empToUid.get(String(row['Employee'] ?? row.employee ?? ''));
     const team = (uid && agentMeta[uid] && agentMeta[uid].team) || '— Unassigned';
     const tk = camp + '||' + team;
-    (byTeamWeek[tk] ??= {})[week] = (byTeamWeek[tk][week] || 0) + hrs;
+    (byTeamWeek[tk] ??= {})[week] = (byTeamWeek[tk][week] || 0) + billHrs;
   }
   return { byCampWeek, byTeamWeek, unmatched, nonBillable };
 }
@@ -1776,6 +1856,7 @@ function applyShiftBillable() {
   catch (e) { console.error('Shift-billable failed:', e); return; }
   STATE.shiftBillable = b;
   STATE.unmatchedShifts = b.unmatched;
+  STATE.nonBillableHours = b.nonBillable || {};
   for (const camp in b.byCampWeek)
     for (const wk in b.byCampWeek[camp])
       if (STATE.campaignWeek[camp] && STATE.campaignWeek[camp][wk])
@@ -1920,7 +2001,7 @@ function render() {
   // Footer
   const now = new Date();
   $('footer').innerHTML = `
-    <span>Boomerang BPO · Operations Dashboard v10 · billable by shift</span>
+    <span>Boomerang BPO · Operations Dashboard v11 · billable by shift+role</span>
     <span>Source: ${STATE.dataSource === 'live' ? 'Zoho User_metrics_3 (live)' : 'Embedded W19–W22 snapshot'} · Rendered ${now.toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})}</span>
   `;
   // Granularity toggle active state
@@ -2297,13 +2378,13 @@ async function saveTargetVersion(cid, eff) {
   const r = await apiFetch('/api/targets/rules', {
     method: 'PUT', body: JSON.stringify({ campaign_id: cid, effective_from: eff, values }),
   });
-  if (r.ok) { TARGETS_STATE.msg = 'Saved.'; await loadTargetsAdmin(); render(); }
+  if (r.ok) { TARGETS_STATE.msg = 'Saved.'; await loadTargetsAdmin(); rebuildAggregates(); render(); }
   else alert('Save failed: ' + (await r.text()).slice(0, 160));
 }
 async function deleteTargetVersion(cid, eff) {
   if (!confirm(`Delete the ${eff.slice(0,7)} version entirely?`)) return;
   const r = await apiFetch(`/api/targets/rules/version?campaign_id=${cid}&effective_from=${eff}`, { method: 'DELETE' });
-  if (r.ok) { TARGETS_STATE.selEff = null; await loadTargetsAdmin(); render(); } else alert('Delete failed.');
+  if (r.ok) { TARGETS_STATE.selEff = null; await loadTargetsAdmin(); rebuildAggregates(); render(); } else alert('Delete failed.');
 }
 
 function renderTargets() {
@@ -3128,8 +3209,19 @@ function renderSummary() {
       ${_unmKeys.slice(0, 6).map(s => `${s} (${Math.round(_unm[s])}h)`).join(' · ')}${_unmKeys.length > 6 ? ' …' : ''}
     </div>` : '';
 
+  // Hours excluded from billable because the role is non-billable on that
+  // campaign (per the sbr_*/nbr_* targets).
+  const _nb = STATE.nonBillableHours || {};
+  const _nbKeys = Object.keys(_nb).sort((a, b) => _nb[b] - _nb[a]);
+  const _nbTotal = _nbKeys.reduce((s, k) => s + _nb[k], 0);
+  const nonBillableNote = _nbKeys.length ? `
+    <div class="err-banner show" style="background:rgba(100,116,139,.10);border-color:rgba(100,116,139,.35);color:var(--text2);margin-bottom:12px">
+      ${Math.round(_nbTotal).toLocaleString()}h excluded as non-billable roles (per targets):
+      ${_nbKeys.map(k => `${k} (${Math.round(_nb[k])}h)`).join(' · ')}
+    </div>` : '';
+
   $('summaryView').innerHTML = `
-    ${unmatchedNote}
+    ${unmatchedNote}${nonBillableNote}
     <div class="hero-row">${heroCards}</div>
     <div class="sum-grid2">
       <div class="chart-card">
