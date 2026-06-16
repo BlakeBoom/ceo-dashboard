@@ -531,7 +531,7 @@ const WG_MAP = {
   'Royal Canin':'ROYALCANIN','RoyalCanin':'ROYALCANIN',
   'The Good Life Sorted':'GOODLIFESORTED',
   'VETNIQUE':'VETNIQUE','Lint Bells':'VETNIQUE','Lintbells':'VETNIQUE',
-  'Beer52':'BEER52',
+  'Beer52':'BEER52','HYVE':'HYVE',
 };
 
 const CAMP_DISPLAY = {
@@ -539,7 +539,7 @@ const CAMP_DISPLAY = {
   'JUSTPARK_uk':'JUST PARK UK','JUSTPARK_so':'JUST PARK US',
   'BUTTERNUTBOX':'BUTTERNUT BOX','Medexpress':'MEDEXPRESS','PICKNPAY':'PICKNPAY',
   'ROYALCANIN':'ROYAL CANIN','HUNZAG':'HUNZAG','GOODLIFESORTED':'GOOD LIFE SORTED',
-  'PINTER':'PINTER','BEER52':'BEER52','1LIFE':'1LIFE',
+  'PINTER':'PINTER','BEER52':'BEER52','1LIFE':'1LIFE','HYVE':'HYVE',
 };
 
 const CAMP_SECTION = {
@@ -547,6 +547,7 @@ const CAMP_SECTION = {
   'JUSTPARK_usa':'Customer Services','JUSTPARK_uk':'Customer Services','JUSTPARK_so':'Customer Services',
   'BUTTERNUTBOX':'Customer Services','Medexpress':'Customer Services','PICKNPAY':'Customer Services',
   'ROYALCANIN':'Customer Services','HUNZAG':'Customer Services','GOODLIFESORTED':'Customer Services',
+  'HYVE':'Customer Services',
   'PINTER':'Sales','BEER52':'Sales','1LIFE':'Sales',
 };
 
@@ -710,7 +711,7 @@ const SLUG_TO_CAMPKEY = {
   pinter:'PINTER', beer52:'BEER52', '1life':'1LIFE', gousto:'Gousto',
   hunzag:'HUNZAG', royalcanin:'ROYALCANIN', thegoodlifesorted:'GOODLIFESORTED',
   lintbells:'VETNIQUE', justpark:'JUSTPARK_uk', 'justpark-us':'JUSTPARK_usa', 'justpark-event-pass':'JUSTPARK_uk',
-  'justpark-us':'JUSTPARK_usa',
+  'justpark-us':'JUSTPARK_usa', hyve:'HYVE',
 };
 
 // Build TARGET_VERSIONS as a COMPLETE per-month snapshot (every campaign's
@@ -950,6 +951,7 @@ const UNCLASSIFIED_STATUSES = new Set();
 // start), so these are contains-matches, ordered specific-first.
 const SHIFT_PATTERNS = [
   [/beer\s*52/i,                  'BEER52'],
+  [/\bhyve\b/i,                   'HYVE'],
   [/bb\s*marro|\bmarro\b/i,       'BUTTERNUTBOX'], // "BB Marro" summer shift = Butternut Box
   [/butternut|\bbbox\b/i,         'BUTTERNUTBOX'],
   [/gousto/i,                     'Gousto'],
@@ -1414,7 +1416,6 @@ function buildAggregates(rows, gran = 'week') {
     let camp = r.campaign_key;
     if (!camp) {
       camp = WG_MAP[r.workgroup];
-      if (!camp && r.workgroup === 'HYVE' && r.shift_WG === 'Beer52') camp = 'BEER52';
     }
     const _wg = (r.workgroup ?? '(blank)');
     const _bh = (r.billable_hours != null ? +r.billable_hours : +r.billable) || 0;
