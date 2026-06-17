@@ -209,6 +209,12 @@ input:focus-visible,select:focus-visible{outline:none;border-color:var(--accent)
 .camp-meta{display:flex;align-items:center;gap:8px;font-size:10px;font-family:var(--mono);text-transform:uppercase;letter-spacing:0.6px;color:var(--text3)}
 .camp-meta-chip{background:var(--bg-2);padding:3px 8px;border-radius:5px;border:1px solid var(--border-light);color:var(--text2)}
 
+.camp-tile-body{display:flex;align-items:center;gap:14px}
+.camp-tile-meta{display:flex;flex-direction:column;gap:7px;flex:1;min-width:0}
+.camp-risk{align-self:flex-start;font-size:10px;font-family:var(--mono);text-transform:uppercase;letter-spacing:0.6px;padding:2px 8px;border-radius:5px}
+.camp-risk.red{background:var(--red-bg);color:var(--red-text)}
+.camp-risk.amber{background:var(--amber-bg);color:var(--amber-text)}
+.camp-risk.green{background:var(--green-bg);color:var(--green-text)}
 .kpi-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(86px,1fr));gap:5px}
 .kpi{padding:7px 9px;border-radius:6px;border-left:2px solid transparent;background:var(--bg-2)}
 .kpi.green{background:var(--green-bg);border-left-color:var(--green-border)}
@@ -1270,6 +1276,7 @@ let STATE = {
   selectedWeek: null,    // selected period label
   selectedCampaign: null,
   selectedTeam: null,
+  showTeams: false,      // campaigns drill: false = campaign-detail view, true = team list
   view: 'summary',
   dataSource: 'static',
   sortKey: 'billable',
@@ -1888,6 +1895,7 @@ function setView(name) {
   if (name !== 'campaigns') {
     STATE.selectedCampaign = null;
     STATE.selectedTeam = null;
+    STATE.showTeams = false;
   }
   render();
 }
@@ -2185,7 +2193,7 @@ function render() {
   // Footer
   const now = new Date();
   $('footer').innerHTML = `
-    <span>Boomerang BPO · Operations Dashboard v15 · FTE from billable hours</span>
+    <span>Boomerang BPO · Operations Dashboard v16 · campaign detail drill-down</span>
     <span>Source: ${STATE.dataSource === 'live' ? 'Zoho User_metrics_3 (live)' : 'Embedded W19–W22 snapshot'} · Rendered ${now.toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})}</span>
   `;
   // Granularity toggle active state
@@ -3676,8 +3684,9 @@ function buildFlags(wk, prevWk, camps) {
 function renderCampaigns() {
   const root = $('campaignsView');
   if (!STATE.selectedCampaign) renderCampaignList(root);
-  else if (!STATE.selectedTeam) renderTeamList(root);
-  else renderAgentList(root);
+  else if (!STATE.showTeams) renderCampaignDetail(root);   // first drill-down: campaign dashboard
+  else if (!STATE.selectedTeam) renderTeamList(root);      // then team-leader list
+  else renderAgentList(root);                              // then agents
 }
 
 function renderCampaignList(root) {
@@ -3707,19 +3716,12 @@ function renderCampaignList(root) {
 
   root.querySelectorAll('.camp-card').forEach(el => {
     el.onclick = () => {
-      const c = el.dataset.camp;
-      const hasTeams = STATE.teamWeek[c] && Object.keys(STATE.teamWeek[c]).length > 0;
-      const hasMultiTeam = hasTeams && Object.keys(STATE.teamWeek[c]).length > 1;
-      if (hasMultiTeam) {
-        STATE.selectedCampaign = c;
-        STATE.selectedTeam = null;
-        render();
-      } else if (hasTeams) {
-        // single team — jump straight to agents
-        STATE.selectedCampaign = c;
-        STATE.selectedTeam = Object.keys(STATE.teamWeek[c])[0];
-        render();
-      }
+      // Every tile opens the campaign-dedicated dashboard first; team/agent
+      // drill-downs hang off that view.
+      STATE.selectedCampaign = el.dataset.camp;
+      STATE.selectedTeam = null;
+      STATE.showTeams = false;
+      render();
     };
   });
 }
@@ -3785,6 +3787,9 @@ function deliveredFte(campKey, wk, billableHrs) {
   return billableHrs / (reqHrs / ar.req_fte);
 }
 
+// Light campaign tile: at-a-glance only (health, fulfilment ring, HC/FTE, how
+// many KPIs are at risk, a billable spark). The full breakdown lives in the
+// campaign-dedicated view that opens when the tile is clicked.
 function campaignCardHtml(c, wk) {
   const m = STATE.campaignWeek[c][wk];
   const tgts = TARGETS[c] || {};
@@ -3792,8 +3797,117 @@ function campaignCardHtml(c, wk) {
   const overall = overallRag(m, tgts, cfg);
   const sparkVals = STATE.weeks.map(w => STATE.campaignWeek[c][w]?.billable || 0);
   const sparkMax = Math.max(...sparkVals, 1);
-  const hasTeams = STATE.teamWeek[c] && Object.keys(STATE.teamWeek[c]).length > 0;
 
+  // Count KPIs at risk (red/amber) for the at-a-glance badge.
+  let red = 0, amber = 0;
+  for (const [k,,dir] of cfg) {
+    if (dir === 'none') continue;
+    const r = rag(m[k], tgts[k], dir);
+    if (r === 'red') red++; else if (r === 'amber') amber++;
+  }
+  const riskBadge = red > 0
+    ? `<span class="camp-risk red" title="${red} KPI(s) red">${red} red</span>`
+    : amber > 0
+      ? `<span class="camp-risk amber" title="${amber} KPI(s) amber">${amber} amber</span>`
+      : `<span class="camp-risk green" title="All KPIs on target">on track</span>`;
+
+  let spark = '';
+  sparkVals.forEach((v, i) => {
+    const h = Math.max(2, (v / sparkMax) * 16);
+    spark += `<div class="spark-bar${STATE.weeks[i] === wk ? ' act' : ''}" style="height:${Math.round(h)}px"></div>`;
+  });
+
+  const creq = reqHrsForCampaign(c, wk);
+  const cfulfil = creq != null && creq > 0 ? Math.min(100, (m.billable / creq) * 100) : null;
+  const ring = svgRing(cfulfil != null ? cfulfil : 0, {
+    size: 52, stroke: 9, color: ragColor(overall),
+    val: cfulfil != null ? Math.round(cfulfil) + '%' : '—', sub: 'of req',
+  });
+  const fte = deliveredFte(c, wk, m.billable);
+
+  return `
+    <div class="camp-card" data-camp="${c}">
+      <div class="camp-head">
+        <div class="camp-name"><span class="camp-overall ${overall}"></span>${CAMP_DISPLAY[c]||c}</div>
+        <span class="camp-drill">Open ›</span>
+      </div>
+      <div class="camp-tile-body">
+        <span class="ring-wrap">${ring}</span>
+        <div class="camp-tile-meta">
+          ${riskBadge}
+          <div class="camp-meta">
+            <span class="camp-meta-chip" title="Headcount — distinct people active this ${periodNoun()}">${m.fte} HC</span>
+            ${fte != null ? `<span class="camp-meta-chip" title="Delivered FTE = billable hrs ÷ hours-per-FTE (from Targets)">${fte.toFixed(1)} FTE</span>` : ''}
+          </div>
+          <div class="spark">${spark}</div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// First drill-down: a single-campaign dashboard. Pulls together everything we
+// already compute (KPIs vs target, efficiency/shrinkage, billable-vs-required
+// trend, and a team summary) before drilling into team leaders.
+function renderCampaignDetail(root) {
+  const c = STATE.selectedCampaign;
+  const wk = STATE.selectedWeek;
+  const prevWk = prevWeek(wk);
+  const m = STATE.campaignWeek[c]?.[wk];
+  const tgts = TARGETS[c] || {};
+  const cfg = KPI_CONFIG[c] || [];
+  const teams = Object.keys(STATE.teamWeek[c] || {}).sort();
+  const hasTeams = teams.length > 0;
+
+  if (!m) {
+    root.innerHTML = `
+      <div class="crumbs">
+        <button class="crumb" data-act="root">All campaigns</button>
+        <span class="crumb-sep">›</span>
+        <span class="crumb current">${CAMP_DISPLAY[c]||c}</span>
+      </div>
+      <div class="flag-empty" style="padding:32px">No data for ${CAMP_DISPLAY[c]||c} in ${pLbl(wk)}.</div>`;
+    root.querySelector('[data-act="root"]').onclick = () => {
+      STATE.selectedCampaign = null; STATE.selectedTeam = null; STATE.showTeams = false; render();
+    };
+    return;
+  }
+
+  const overall = overallRag(m, tgts, cfg);
+  const creq = reqHrsForCampaign(c, wk);
+  const fulfil = creq != null && creq > 0 ? (m.billable / creq) * 100 : null;
+  const fte = deliveredFte(c, wk, m.billable);
+  const sh = STATE.shrinkageAvailable ? STATE.shrinkageCampaignWeek?.[c]?.[wk] : null;
+
+  // Hero stat tiles (reuse the summary view's hero cards).
+  const band = (v, goodMax, warnMax) => v == null ? 'info' : v <= goodMax ? 'good' : v <= warnMax ? 'warn' : 'bad';
+  const bandHi = (v, goodMin, warnMin) => v == null ? 'info' : v >= goodMin ? 'good' : v >= warnMin ? 'warn' : 'bad';
+  const onColour = (s) => s !== 'info';
+  const hero = (cls, lbl, val, ringHtml, subTxt) => `
+    <div class="hero ${cls}">
+      <div class="hero-body"><div class="hero-lbl">${lbl}</div><div class="hero-val">${val}</div>${subTxt ? `<div class="hero-delta">${subTxt}</div>` : ''}</div>
+      ${ringHtml ? `<div class="ring-wrap">${ringHtml}</div>` : ''}
+    </div>`;
+  const fulfilStatus = bandHi(fulfil, 95, 85);
+  const absStatus = band(m.absence, 5, 10);
+  const shrStatus = sh && sh.shrinkage_total_pct != null ? band(sh.shrinkage_total_pct, 25, 35) : 'info';
+
+  const heroCards = [
+    hero(fulfilStatus, 'Billable Hours', Math.round(m.billable).toLocaleString(),
+      svgRing(fulfil != null ? Math.min(100, fulfil) : 0, { light: onColour(fulfilStatus), val: fulfil != null ? Math.round(fulfil) + '%' : '—', sub: 'of req' }),
+      creq != null ? `${Math.round(creq).toLocaleString()} hrs required` : 'no target set'),
+    hero('info', 'Capacity', `${m.fte} HC`, null,
+      fte != null ? `${fte.toFixed(1)} delivered FTE${rulesForPeriod(wk)?.[c]?.req_fte ? ` · ${rulesForPeriod(wk)[c].req_fte} target` : ''}` : 'distinct people active'),
+    sh && sh.shrinkage_total_pct != null
+      ? hero(shrStatus, 'Shrinkage', sh.shrinkage_total_pct.toFixed(1) + '%',
+          svgRing(Math.min(100, sh.shrinkage_total_pct), { light: onColour(shrStatus), val: sh.shrinkage_total_pct.toFixed(0) + '%', sub: 'shrink' }),
+          `Planned ${sh.shrinkage_planned_pct?.toFixed(1) ?? '—'}% · Unplanned ${sh.shrinkage_unplanned_pct?.toFixed(1) ?? '—'}%`)
+      : hero('info', 'Volume', (Math.round((m.calls || 0) + (m.tickets || 0))).toLocaleString(), null,
+          `${Math.round(m.calls || 0).toLocaleString()} calls · ${Math.round(m.tickets || 0).toLocaleString()} tkts`),
+    hero(absStatus, 'Absence', m.absence != null ? m.absence.toFixed(1) + '%' : '—', null, 'target ≤5%'),
+  ].join('');
+
+  // KPI grid vs target.
   let kpis = '';
   for (const [k, lbl, dir] of cfg) {
     const v = m[k], t = tgts[k];
@@ -3805,47 +3919,77 @@ function campaignCardHtml(c, wk) {
     </div>`;
   }
 
-  let spark = '';
-  sparkVals.forEach((v, i) => {
-    const h = Math.max(2, (v / sparkMax) * 16);
-    const isSel = STATE.weeks[i] === wk;
-    spark += `<div class="spark-bar${isSel?' act':''}" style="height:${Math.round(h)}px"></div>`;
+  // Efficiency / shrinkage cells.
+  const eff = efficiencyStats(sh, m.billable, creq);
+
+  // Billable vs required trend across all loaded periods.
+  const billSeries = STATE.weeks.map(w => STATE.campaignWeek[c]?.[w]?.billable || 0);
+  const reqSeries = STATE.weeks.map(w => {
+    const ar = rulesForPeriod(w)?.[c];
+    return ar ? reqHrsForPeriod(ar) : 0;
   });
+  const weekLabels = STATE.weeks.map(w => pLbl(w));
+  const fmtK = (n) => Math.abs(n) >= 1000 ? (n/1000).toFixed(n>=10000?0:1)+'k' : Math.round(n);
 
-  // Shrinkage chip (only if available)
-  const sh = STATE.shrinkageAvailable ? STATE.shrinkageCampaignWeek?.[c]?.[wk] : null;
-  const shrinkChip = sh && sh.shrinkage_total_pct != null ?
-    `<span class="camp-meta-chip" title="Planned ${sh.shrinkage_planned_pct?.toFixed(1)}% · Unplanned ${sh.shrinkage_unplanned_pct?.toFixed(1)}%" style="background:${sh.shrinkage_total_pct > 35 ? 'var(--red-bg)' : sh.shrinkage_total_pct > 25 ? 'var(--amber-bg)' : 'var(--green-bg)'};color:${sh.shrinkage_total_pct > 35 ? 'var(--red-text)' : sh.shrinkage_total_pct > 25 ? 'var(--amber-text)' : 'var(--green-text)'}">${sh.shrinkage_total_pct.toFixed(1)}% shrink</span>` : '';
+  // Team summary (mini table), clickable through to the team view.
+  let teamRows = '';
+  for (const t of teams) {
+    const tm = STATE.teamWeek[c][t][wk];
+    if (!tm) continue;
+    const tRag = overallRag(tm, tgts, cfg);
+    const tFte = deliveredFte(c, wk, tm.billable);
+    teamRows += `<tr data-team="${t}" style="cursor:pointer">
+      <td><span class="camp-overall ${tRag}" style="display:inline-block;margin-right:7px;vertical-align:middle"></span>${t}</td>
+      <td class="numeric">${tm.fte}</td>
+      <td class="numeric">${tFte != null ? tFte.toFixed(1) : '—'}</td>
+      <td class="numeric">${Math.round(tm.billable).toLocaleString()}</td>
+    </tr>`;
+  }
 
-  const eff = efficiencyStats(sh, m.billable, reqHrsForCampaign(c, wk));
-  // Header ring: % of required hours delivered, coloured by overall health.
-  const creq = reqHrsForCampaign(c, wk);
-  const cfulfil = creq != null && creq > 0 ? Math.min(100, (m.billable / creq) * 100) : null;
-  const headRing = svgRing(cfulfil != null ? cfulfil : 0, {
-    size: 58, stroke: 10, color: ragColor(overall),
-    val: cfulfil != null ? Math.round(cfulfil) + '%' : '—', sub: 'of req',
-  });
-
-  return `
-    <div class="camp-card ${hasTeams?'':'no-detail'}" data-camp="${c}">
-      <div class="camp-head">
-        <div class="camp-name"><span class="camp-overall ${overall}"></span>${CAMP_DISPLAY[c]||c}</div>
-        <div class="camp-meta">
-          <span class="camp-meta-chip" title="Headcount — distinct people active this ${periodNoun()}">${m.fte} HC</span>
-          ${(() => { const f = deliveredFte(c, wk, m.billable); return f != null ? `<span class="camp-meta-chip" title="Delivered FTE = billable hrs ÷ hours-per-FTE (Target FTE × SLA hrs/FTE, from Targets)">${f.toFixed(1)} FTE</span>` : ''; })()}
-          ${shrinkChip}
-          <span class="ring-wrap">${headRing}</span>
-          ${hasTeams ? `<span class="camp-drill">Drill ›</span>` : ''}
-        </div>
+  root.innerHTML = `
+    <div class="crumbs">
+      <button class="crumb" data-act="root">All campaigns</button>
+      <span class="crumb-sep">›</span>
+      <span class="crumb current"><span class="camp-overall ${overall}" style="margin-right:7px"></span>${CAMP_DISPLAY[c]||c}</span>
+      <span style="margin-left:auto;font-size:11px;color:var(--text3)">${pLbl(wk)}</span>
+    </div>
+    <div class="hero-row">${heroCards}</div>
+    <div class="sum-grid2">
+      <div class="chart-card">
+        <div class="chart-head"><div class="chart-title">KPIs vs target</div><div class="chart-sub">${pLbl(wk)}</div></div>
+        <div class="kpi-grid" style="margin-top:4px">${kpis || '<div class="flag-empty">No KPIs configured.</div>'}</div>
+        ${eff.has ? `<div class="eff-label">Efficiency</div><div class="team-stats">${eff.cells}</div>` : ''}
       </div>
-      <div class="kpi-grid">${kpis}</div>
-      ${eff.has ? `<div class="eff-label">Efficiency</div><div class="team-stats">${eff.cells}</div>` : ''}
-      <div class="spark-row">
-        <span class="spark-lbl" data-tip="${pLbl(wk)} · ${Object.entries(STATE.wgDebug?.[c]?.[wk]||{}).sort((a,b)=>b[1]-a[1]).map(([wg,h])=>`${wg}: ${Math.round(h)}h`).join(' · ').replace(/"/g,'&quot;')||'no source workgroups'}">Billable ⓘ</span>
-        <div class="spark">${spark}</div>
+      <div class="chart-card">
+        <div class="chart-head"><div class="chart-title">Billable hours over time</div><div class="chart-sub">vs required (dashed)</div></div>
+        ${svgArea(billSeries, { labels: weekLabels, series2: reqSeries.some(v=>v>0) ? reqSeries : null, fmt: fmtK })}
       </div>
     </div>
+    ${hasTeams ? `
+      <div class="sum-card">
+        <div class="agent-tbl-head" style="padding:0 0 10px">
+          <h3 style="margin:0">Teams</h3>
+          <button class="crumb" data-act="teams" style="margin-left:auto">View teams ›</button>
+        </div>
+        <table class="trend-tbl">
+          <thead><tr><th>Team Leader</th><th class="numeric" title="Headcount">HC</th><th class="numeric" title="Delivered FTE">FTE</th><th class="numeric">Billable</th></tr></thead>
+          <tbody>${teamRows || `<tr><td colspan="4" style="text-align:center;color:var(--text3);padding:24px">No team activity in ${pLbl(wk)}.</td></tr>`}</tbody>
+        </table>
+      </div>` : ''}
   `;
+
+  root.querySelector('[data-act="root"]').onclick = () => {
+    STATE.selectedCampaign = null; STATE.selectedTeam = null; STATE.showTeams = false; render();
+  };
+  const goTeams = (team) => { STATE.showTeams = true; STATE.selectedTeam = team || null; render(); };
+  const teamsBtn = root.querySelector('[data-act="teams"]');
+  if (teamsBtn) teamsBtn.onclick = () => {
+    // Single-team campaigns skip the team list and open agents directly.
+    goTeams(teams.length === 1 ? teams[0] : null);
+  };
+  root.querySelectorAll('tr[data-team]').forEach(tr => {
+    tr.onclick = () => goTeams(tr.dataset.team);
+  });
 }
 
 function renderTeamList(root) {
@@ -3857,7 +4001,9 @@ function renderTeamList(root) {
     <div class="crumbs">
       <button class="crumb" data-act="root">All campaigns</button>
       <span class="crumb-sep">›</span>
-      <span class="crumb current">${CAMP_DISPLAY[c]||c}</span>
+      <button class="crumb" data-act="camp">${CAMP_DISPLAY[c]||c}</button>
+      <span class="crumb-sep">›</span>
+      <span class="crumb current">Teams</span>
     </div>
     <div class="team-list">
   `;
@@ -3903,6 +4049,12 @@ function renderTeamList(root) {
 
   root.querySelector('[data-act="root"]').onclick = () => {
     STATE.selectedCampaign = null;
+    STATE.selectedTeam = null;
+    STATE.showTeams = false;
+    render();
+  };
+  root.querySelector('[data-act="camp"]').onclick = () => {
+    STATE.showTeams = false;   // back to the campaign dashboard
     STATE.selectedTeam = null;
     render();
   };
@@ -3959,8 +4111,9 @@ function renderAgentList(root) {
     <div class="crumbs">
       <button class="crumb" data-act="root">All campaigns</button>
       <span class="crumb-sep">›</span>
-      ${showTeamCrumb ? `<button class="crumb" data-act="camp">${CAMP_DISPLAY[c]||c}</button><span class="crumb-sep">›</span>` :
-        `<span class="crumb current">${CAMP_DISPLAY[c]||c}</span><span class="crumb-sep">·</span>`}
+      <button class="crumb" data-act="camp">${CAMP_DISPLAY[c]||c}</button>
+      <span class="crumb-sep">›</span>
+      ${showTeamCrumb ? `<button class="crumb" data-act="teams">Teams</button><span class="crumb-sep">›</span>` : ''}
       <span class="crumb current">${t}</span>
     </div>
     <div class="agent-tbl-wrap">
@@ -3999,10 +4152,17 @@ function renderAgentList(root) {
   root.querySelector('[data-act="root"]').onclick = () => {
     STATE.selectedCampaign = null;
     STATE.selectedTeam = null;
+    STATE.showTeams = false;
+    render();
+  };
+  root.querySelector('[data-act="camp"]').onclick = () => {
+    STATE.showTeams = false;   // back to the campaign dashboard
+    STATE.selectedTeam = null;
     render();
   };
   if (showTeamCrumb) {
-    root.querySelector('[data-act="camp"]').onclick = () => {
+    root.querySelector('[data-act="teams"]').onclick = () => {
+      STATE.showTeams = true;  // back to the team list
       STATE.selectedTeam = null;
       render();
     };
