@@ -263,6 +263,8 @@ input:focus-visible,select:focus-visible{outline:none;border-color:var(--accent)
 .team-stat-val{font-size:13px;font-weight:600;margin-top:1px;font-variant-numeric:tabular-nums}
 .team-stat.grey{border-left-color:var(--grey-border)}
 .eff-label{font-size:9px;font-weight:600;letter-spacing:.8px;text-transform:uppercase;color:var(--text3);font-family:var(--mono);margin:12px 0 6px}
+.kpi-panel-lbl{font-size:9px;font-weight:600;letter-spacing:.8px;text-transform:uppercase;color:var(--text3);font-family:var(--mono);margin:10px 0 6px}
+.kpi-panel-lbl:first-child{margin-top:4px}
 
 /* ─── Rich charts: hero cards, rings, area charts ──────────────────── */
 .hero-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px;margin-bottom:14px}
@@ -2193,7 +2195,7 @@ function render() {
   // Footer
   const now = new Date();
   $('footer').innerHTML = `
-    <span>Boomerang BPO · Operations Dashboard v16 · campaign detail drill-down</span>
+    <span>Boomerang BPO · Operations Dashboard v17 · KPI panels + leaderboard</span>
     <span>Source: ${STATE.dataSource === 'live' ? 'Zoho User_metrics_3 (live)' : 'Embedded W19–W22 snapshot'} · Rendered ${now.toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})}</span>
   `;
   // Granularity toggle active state
@@ -3787,6 +3789,46 @@ function deliveredFte(campKey, wk, billableHrs) {
   return billableHrs / (reqHrs / ar.req_fte);
 }
 
+// Group each KPI into a daily-pulse category for the campaign-detail panels.
+// Unlisted keys fall through to "Outcome".
+const KPI_GROUP = {
+  sla:'Operational', aht:'Operational', acw:'Operational', abandon_rate:'Operational',
+  calls_abn:'Operational', adherence:'Operational', res_time:'Operational',
+  avg_resp_time:'Operational', chat_resp:'Operational', email_resp:'Operational',
+  csat:'Quality', qa:'Quality', fcr:'Quality', error_rate:'Quality',
+  sales:'Outcome', sph:'Outcome', cph:'Outcome', cpd:'Outcome',
+  calls:'Outcome', tickets:'Outcome', billable:'Outcome',
+};
+const KPI_GROUP_ORDER = ['Operational', 'Quality', 'Outcome'];
+
+// One KPI tile (shared by the grouped panels).
+function kpiCellHtml(m, tgts, k, lbl, dir) {
+  const v = m[k], t = tgts[k];
+  const r = dir === 'none' ? 'grey' : rag(v, t, dir);
+  return `<div class="kpi ${r}">
+    <div class="kpi-lbl">${lbl}</div>
+    <div class="kpi-val">${fmtVal(v, k)}</div>
+    ${t != null ? `<div class="kpi-tgt">tgt ${fmtTgt(t, k)}</div>` : ''}
+  </div>`;
+}
+
+// Composite attainment score for an agent: mean of per-KPI (actual ÷ target,
+// inverted for lower-is-better), capped at 150%, × 100. null when nothing
+// scorable. Used for the leaderboard ranking.
+function agentScore(m, cfg, tgts) {
+  let sum = 0, n = 0;
+  for (const [k,, dir] of cfg) {
+    if (dir === 'none') continue;
+    const v = m[k], t = tgts[k];
+    if (v == null || t == null || t === 0) continue;
+    let ratio = dir === 'lower' ? t / v : v / t;
+    if (!isFinite(ratio) || ratio <= 0) continue;
+    sum += Math.min(ratio, 1.5);
+    n++;
+  }
+  return n ? (sum / n) * 100 : null;
+}
+
 // Light campaign tile: at-a-glance only (health, fulfilment ring, HC/FTE, how
 // many KPIs are at risk, a billable spark). The full breakdown lives in the
 // campaign-dedicated view that opens when the tile is clicked.
@@ -3907,17 +3949,15 @@ function renderCampaignDetail(root) {
     hero(absStatus, 'Absence', m.absence != null ? m.absence.toFixed(1) + '%' : '—', null, 'target ≤5%'),
   ].join('');
 
-  // KPI grid vs target.
-  let kpis = '';
+  // KPIs grouped into daily-pulse panels (Operational / Quality / Outcome).
+  const groups = {};
   for (const [k, lbl, dir] of cfg) {
-    const v = m[k], t = tgts[k];
-    const r = dir === 'none' ? 'grey' : rag(v, t, dir);
-    kpis += `<div class="kpi ${r}">
-      <div class="kpi-lbl">${lbl}</div>
-      <div class="kpi-val">${fmtVal(v, k)}</div>
-      ${t != null ? `<div class="kpi-tgt">tgt ${fmtTgt(t, k)}</div>` : ''}
-    </div>`;
+    const g = KPI_GROUP[k] || 'Outcome';
+    (groups[g] ??= []).push(kpiCellHtml(m, tgts, k, lbl, dir));
   }
+  const kpiPanels = KPI_GROUP_ORDER.filter(g => groups[g]?.length).map(g =>
+    `<div class="kpi-panel-lbl">${g}</div><div class="kpi-grid">${groups[g].join('')}</div>`
+  ).join('') || '<div class="flag-empty">No KPIs configured.</div>';
 
   // Efficiency / shrinkage cells.
   const eff = efficiencyStats(sh, m.billable, creq);
@@ -3930,6 +3970,36 @@ function renderCampaignDetail(root) {
   });
   const weekLabels = STATE.weeks.map(w => pLbl(w));
   const fmtK = (n) => Math.abs(n) >= 1000 ? (n/1000).toFixed(n>=10000?0:1)+'k' : Math.round(n);
+
+  // Agent leaderboard: flatten every agent in the campaign, rank by composite
+  // attainment score. Pick up to two lead KPIs to show (QA/CSAT preferred).
+  const leadKeys = (() => {
+    const pref = ['qa', 'csat'].filter(k => cfg.some(x => x[0] === k));
+    const rest = cfg.filter(x => x[2] !== 'none' && !pref.includes(x[0])).map(x => x[0]);
+    return [...pref, ...rest].slice(0, 2);
+  })();
+  const leadLbls = leadKeys.map(k => (cfg.find(x => x[0] === k) || [k, k.toUpperCase()])[1]);
+  const agentRanks = [];
+  for (const t of teams) {
+    const byUid = STATE.agentWeek[c]?.[t] || {};
+    for (const uid in byUid) {
+      const am = byUid[uid]?.[wk];
+      if (!am) continue;
+      const meta = STATE.agentMeta[uid] || { name: 'Agent ' + uid };
+      agentRanks.push({ uid, name: meta.name, team: t, score: agentScore(am, cfg, tgts), m: am });
+    }
+  }
+  agentRanks.sort((a, b) => (b.score ?? -1) - (a.score ?? -1));
+  const showTeamCol = teams.length > 1;
+  const leaderRows = agentRanks.slice(0, 10).map((a, i) => `
+    <tr>
+      <td class="numeric" style="color:var(--text3)">${i + 1}</td>
+      <td class="name">${a.name}</td>
+      ${showTeamCol ? `<td style="color:var(--text3);font-size:12px">${a.team}</td>` : ''}
+      <td class="numeric"><b>${a.score != null ? Math.round(a.score) + '%' : '—'}</b></td>
+      ${leadKeys.map(k => `<td class="numeric">${fmtVal(a.m[k], k)}</td>`).join('')}
+      <td class="numeric">${Math.round(a.m.billable || 0).toLocaleString()}</td>
+    </tr>`).join('');
 
   // Team summary (mini table), clickable through to the team view.
   let teamRows = '';
@@ -3957,7 +4027,7 @@ function renderCampaignDetail(root) {
     <div class="sum-grid2">
       <div class="chart-card">
         <div class="chart-head"><div class="chart-title">KPIs vs target</div><div class="chart-sub">${pLbl(wk)}</div></div>
-        <div class="kpi-grid" style="margin-top:4px">${kpis || '<div class="flag-empty">No KPIs configured.</div>'}</div>
+        ${kpiPanels}
         ${eff.has ? `<div class="eff-label">Efficiency</div><div class="team-stats">${eff.cells}</div>` : ''}
       </div>
       <div class="chart-card">
@@ -3974,6 +4044,22 @@ function renderCampaignDetail(root) {
         <table class="trend-tbl">
           <thead><tr><th>Team Leader</th><th class="numeric" title="Headcount">HC</th><th class="numeric" title="Delivered FTE">FTE</th><th class="numeric">Billable</th></tr></thead>
           <tbody>${teamRows || `<tr><td colspan="4" style="text-align:center;color:var(--text3);padding:24px">No team activity in ${pLbl(wk)}.</td></tr>`}</tbody>
+        </table>
+      </div>` : ''}
+    ${agentRanks.length ? `
+      <div class="sum-card">
+        <div class="agent-tbl-head" style="padding:0 0 10px">
+          <h3 style="margin:0">Agent leaderboard</h3>
+          <span class="agent-tbl-sub" style="margin-left:auto">Top ${Math.min(10, agentRanks.length)} of ${agentRanks.length} · composite attainment vs target</span>
+        </div>
+        <table class="trend-tbl">
+          <thead><tr>
+            <th class="numeric">#</th><th>Agent</th>${showTeamCol ? '<th>Team</th>' : ''}
+            <th class="numeric" title="Mean attainment vs target across this campaign's KPIs">Score</th>
+            ${leadLbls.map(l => `<th class="numeric">${l}</th>`).join('')}
+            <th class="numeric">Billable</th>
+          </tr></thead>
+          <tbody>${leaderRows}</tbody>
         </table>
       </div>` : ''}
   `;
