@@ -2185,7 +2185,7 @@ function render() {
   // Footer
   const now = new Date();
   $('footer').innerHTML = `
-    <span>Boomerang BPO · Operations Dashboard v14 · headcount vs FTE</span>
+    <span>Boomerang BPO · Operations Dashboard v15 · FTE from billable hours</span>
     <span>Source: ${STATE.dataSource === 'live' ? 'Zoho User_metrics_3 (live)' : 'Embedded W19–W22 snapshot'} · Rendered ${now.toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})}</span>
   `;
   // Granularity toggle active state
@@ -3770,6 +3770,21 @@ function reqHrsForCampaign(c, wk) {
   return full * (frac < 1 ? frac : 1);
 }
 
+// Delivered FTE for a campaign/period, derived from billable hours and the
+// Targets: required hrs = Target FTE × SLA hrs/FTE, so hours-per-FTE =
+// required hrs ÷ Target FTE, and delivered FTE = billable ÷ hours-per-FTE.
+// reqHrsForCampaign already pro-rates required hours for in-progress periods,
+// so this reads as a run-rate FTE mid-period. The same hours-per-FTE applies to
+// a team inside the campaign (pass the team's billable). Returns null when the
+// campaign has no FTE target configured.
+function deliveredFte(campKey, wk, billableHrs) {
+  const ar = rulesForPeriod(wk)?.[campKey];
+  if (!ar || !(ar.req_fte > 0)) return null;
+  const reqHrs = reqHrsForCampaign(campKey, wk);
+  if (!(reqHrs > 0)) return null;
+  return billableHrs / (reqHrs / ar.req_fte);
+}
+
 function campaignCardHtml(c, wk) {
   const m = STATE.campaignWeek[c][wk];
   const tgts = TARGETS[c] || {};
@@ -3817,7 +3832,7 @@ function campaignCardHtml(c, wk) {
         <div class="camp-name"><span class="camp-overall ${overall}"></span>${CAMP_DISPLAY[c]||c}</div>
         <div class="camp-meta">
           <span class="camp-meta-chip" title="Headcount — distinct people active this ${periodNoun()}">${m.fte} HC</span>
-          ${m.ftes_present > 0 ? `<span class="camp-meta-chip" title="Full-time equivalents (FTEs from source metrics)">${m.ftes_present.toFixed(1)} FTE</span>` : ''}
+          ${(() => { const f = deliveredFte(c, wk, m.billable); return f != null ? `<span class="camp-meta-chip" title="Delivered FTE = billable hrs ÷ hours-per-FTE (Target FTE × SLA hrs/FTE, from Targets)">${f.toFixed(1)} FTE</span>` : ''; })()}
           ${shrinkChip}
           <span class="ring-wrap">${headRing}</span>
           ${hasTeams ? `<span class="camp-drill">Drill ›</span>` : ''}
@@ -3877,7 +3892,7 @@ function renderTeamList(root) {
       <div class="team-card" data-team="${t}">
         <div class="team-head">
           <div class="team-name"><span class="camp-overall ${overall}" style="margin-right:7px"></span>${t}</div>
-          <div class="camp-meta"><span class="camp-meta-chip" title="Headcount — distinct people active this ${periodNoun()}">${m.fte} HC</span>${m.ftes_present > 0 ? `<span class="camp-meta-chip" title="Full-time equivalents (FTEs from source metrics)">${m.ftes_present.toFixed(1)} FTE</span>` : ''}</div>
+          <div class="camp-meta"><span class="camp-meta-chip" title="Headcount — distinct people active this ${periodNoun()}">${m.fte} HC</span>${(() => { const f = deliveredFte(c, wk, m.billable); return f != null ? `<span class="camp-meta-chip" title="Delivered FTE = billable hrs ÷ hours-per-FTE (from Targets)">${f.toFixed(1)} FTE</span>` : ''; })()}</div>
         </div>
         <div class="team-stats">${stats}</div>
       </div>
@@ -4083,7 +4098,7 @@ function renderTrends() {
     return `<tr>
       <td><span class="camp-overall ${overall}" style="display:inline-block;margin-right:7px;vertical-align:middle"></span>${CAMP_DISPLAY[c]||c}</td>
       <td class="numeric">${m.fte}</td>
-      <td class="numeric">${m.ftes_present > 0 ? m.ftes_present.toFixed(1) : '—'}</td>
+      <td class="numeric">${(() => { const f = deliveredFte(c, wk, m.billable); return f != null ? f.toFixed(1) : '—'; })()}</td>
       <td class="numeric">${Math.round(m.billable).toLocaleString()}</td>
       <td>
         <div class="mini-spark">${series.map((v,i)=>`<span class="${STATE.weeks[i]===wk?'act':''}" style="height:${Math.max(2,(v/maxV)*16)}px"></span>`).join('')}</div>
@@ -4133,7 +4148,7 @@ function renderTrends() {
         <thead><tr>
           <th>Campaign</th>
           <th class="numeric" title="Headcount — distinct people active">HC</th>
-          <th class="numeric" title="Full-time equivalents (FTEs from source metrics)">FTE</th>
+          <th class="numeric" title="Delivered FTE = billable hrs ÷ hours-per-FTE (Target FTE × SLA hrs/FTE, from Targets)">FTE</th>
           <th class="numeric">Billable</th>
           <th>Trend</th>
           <th class="numeric">Δ vs prev</th>
