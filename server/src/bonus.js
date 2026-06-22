@@ -100,12 +100,16 @@ function stripKnownNameSuffix(s) {
 export function buildTeamCanonMap(names) {
   const map = new Map();
   const info = [];
+  // Names arrive as "<Leader>'s team"; strip the possessive + trailing "team"
+  // word so the apostrophe-s ("elzettes") doesn't corrupt the first-name token.
+  const canonKey = (n) => normName(String(n).replace(/['’]s\b/gi, '').replace(/\bteam\b/gi, ''));
   for (const n of names) {
     if (!n) continue;
-    const k = normName(n) || '';
+    const k = canonKey(n) || '';
     const toks = k ? k.split(' ') : [];
     if (!toks.length) continue;
-    info.push({ n, k, toks, first: toks[0], fl: firstLastKey(n) });
+    const fl = toks.length >= 2 ? `${toks[0]} ${toks[toks.length - 1]}` : null;
+    info.push({ n, k, toks, first: toks[0], fl });
   }
   const byFirst = new Map();
   for (const it of info) {

@@ -1266,12 +1266,18 @@ function resolveTeamNode(personName, leaderName) {
 function buildTeamCanonMap(names) {
   const map = new Map();
   const info = [];
+  // Team names arrive as "<Leader>'s team" (e.g. "Elzette's team" vs
+  // "Elzette Saaiman's team"). Strip the possessive and the trailing "team"
+  // word before keying so the apostrophe-s ("elzettes") doesn't corrupt the
+  // first-name token and split one leader into two teams.
+  const canonKey = (n) => normalizeName(String(n).replace(/['’]s\b/gi, '').replace(/\bteam\b/gi, ''));
   for (const n of names) {
     if (!n || n === UNASSIGNED_TEAM) continue;
-    const k = normalizeName(n) || '';
+    const k = canonKey(n) || '';
     const toks = k ? k.split(' ') : [];
     if (!toks.length) continue;
-    info.push({ n, k, toks, first: toks[0], fl: firstLastKey(n) });
+    const fl = toks.length >= 2 ? `${toks[0]} ${toks[toks.length - 1]}` : null;
+    info.push({ n, k, toks, first: toks[0], fl });
   }
   const byFirst = new Map();
   for (const it of info) {
@@ -2394,7 +2400,7 @@ function render() {
   // Footer
   const now = new Date();
   $('footer').innerHTML = `
-    <span>Boomerang BPO · Operations Dashboard v22 · merge duplicate teams (bonus)</span>
+    <span>Boomerang BPO · Operations Dashboard v23 · merge duplicate teams (strip "'s team" suffix)</span>
     <span>Source: ${STATE.dataSource === 'live' ? 'Zoho User_metrics_3 (live)' : 'Embedded W19–W22 snapshot'} · Rendered ${now.toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})}</span>
   `;
   // Granularity toggle active state
