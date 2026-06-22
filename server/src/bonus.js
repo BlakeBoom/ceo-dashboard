@@ -90,6 +90,50 @@ function stripKnownNameSuffix(s) {
   return String(s).replace(/\s*\([^)]+\)\s*$/, '').trim();
 }
 
+// Collapse inconsistent team-leader spellings to a single canonical name so one
+// team isn't split across "Elzette" and "Elzette Saaiman". Mirror of
+// buildTeamCanonMap in index.html: group by first name; when a first name maps
+// to exactly one full identity, every variant (incl. the bare first name) folds
+// into the longest spelling; when a first name is shared by different people,
+// only exact first+last duplicates merge so distinct leaders are never fused.
+// Returns a Map(name -> canonicalName) for names that should be remapped.
+export function buildTeamCanonMap(names) {
+  const map = new Map();
+  const info = [];
+  for (const n of names) {
+    if (!n) continue;
+    const k = normName(n) || '';
+    const toks = k ? k.split(' ') : [];
+    if (!toks.length) continue;
+    info.push({ n, k, toks, first: toks[0], fl: firstLastKey(n) });
+  }
+  const byFirst = new Map();
+  for (const it of info) {
+    if (!byFirst.has(it.first)) byFirst.set(it.first, []);
+    byFirst.get(it.first).push(it);
+  }
+  const longest = gs => gs.slice().sort((a, b) => b.k.length - a.k.length)[0].n;
+  for (const group of byFirst.values()) {
+    const fullFls = new Set(group.filter(g => g.toks.length >= 2).map(g => g.fl));
+    if (fullFls.size === 1) {
+      const canonical = longest(group);
+      for (const g of group) map.set(g.n, canonical);
+    } else {
+      const byFl = new Map();
+      for (const g of group) {
+        if (g.toks.length < 2) continue;   // ambiguous bare first name → leave as-is
+        if (!byFl.has(g.fl)) byFl.set(g.fl, []);
+        byFl.get(g.fl).push(g);
+      }
+      for (const gs of byFl.values()) {
+        const canonical = longest(gs);
+        for (const g of gs) map.set(g.n, canonical);
+      }
+    }
+  }
+  return map;
+}
+
 // Build employee_id → user_id map by matching names across User_metrics_3
 // agents and EmployeeProfile records. Mirrors the dashboard's three-pass
 // matcher (buildNameMatcher in index.html): exact normalised name → first+last

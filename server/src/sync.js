@@ -14,7 +14,7 @@
 
 import { query, withTx } from './db.js';
 import { fetchView, fetchViewByDate, VIEW, monthBounds } from './zoho.js';
-import { aggregateUserMetrics, aggregateCallouts, buildEmployeeUserMap, applyRule } from './bonus.js';
+import { aggregateUserMetrics, aggregateCallouts, buildEmployeeUserMap, applyRule, buildTeamCanonMap } from './bonus.js';
 import { canonicalCampaign } from './provision.js';
 
 // A metrics row belongs to a campaign when its workgroup canonicalises to the
@@ -98,31 +98,55 @@ export async function syncCampaign(campaignId, yearMonth = currentYearMonth(), p
   // 6. Within a single tx: auto-create teams, auto-create users, upsert metrics + awards
   let usersCreated = 0, teamsCreated = 0, updated = 0, skipped = 0;
   await withTx(async (client) => {
-    // 6a. Distinct team_names present in this period for this campaign
-    const teamNames = new Set();
+    // 6a. Distinct team_names present in this period, canonicalised so duplicate
+    // leader spellings ("Elzette" vs "Elzette Saaiman") collapse to ONE team.
+    // The canon map is built over both this period's names and the campaign's
+    // existing team rows, so historical spellings fold in too.
+    const periodNames = new Set();
     for (const r of umRows) {
       const tn = (r.team_name || '').trim();
-      if (tn) teamNames.add(tn);
+      if (tn) periodNames.add(tn);
     }
+    const { rows: existingTeams } = await client.query(
+      `SELECT id, name, tm_user_id FROM teams WHERE campaign_id = $1`, [campaignId]);
+    const teamCanon = buildTeamCanonMap([...new Set([...periodNames, ...existingTeams.map(t => t.name)])]);
+    const canonName = (tn) => (tn && teamCanon.get(tn)) || tn;
+
     const teamIdByName = new Map();
-    for (const name of teamNames) {
+    const ensureTeam = async (name) => {
+      if (teamIdByName.has(name)) return teamIdByName.get(name);
       const res = await client.query(
         `INSERT INTO teams (campaign_id, name)
          VALUES ($1, $2)
          ON CONFLICT (campaign_id, name) DO UPDATE SET name = EXCLUDED.name
-         RETURNING id, name, (xmax = 0) AS inserted`,
+         RETURNING id, (xmax = 0) AS inserted`,
         [campaignId, name]
       );
       teamIdByName.set(name, res.rows[0].id);
       if (res.rows[0].inserted) teamsCreated++;
+      return res.rows[0].id;
+    };
+    for (const name of periodNames) await ensureTeam(canonName(name));
+
+    // Merge any pre-existing duplicate team rows into their canonical team:
+    // re-point users + the TM pointer, then delete the duplicate. Heals historic
+    // splits (and the "TM only sees half their team" RBAC bug) on next sync.
+    for (const t of existingTeams) {
+      const canonical = canonName(t.name);
+      if (canonical === t.name) continue;
+      const targetId = await ensureTeam(canonical);
+      if (targetId === t.id) continue;
+      await client.query(`UPDATE users SET team_id = $1, updated_at = NOW() WHERE team_id = $2`, [targetId, t.id]);
+      if (t.tm_user_id) await client.query(`UPDATE teams SET tm_user_id = COALESCE(tm_user_id, $2) WHERE id = $1`, [targetId, t.tm_user_id]);
+      await client.query(`DELETE FROM teams WHERE id = $1`, [t.id]);
     }
 
     // 6b. Auto-create users for every distinct Zoho user_id in this campaign's rows
-    // Pick the most common team per user across the period.
+    // Pick the most common (canonical) team per user across the period.
     const teamCountByUser = new Map(); // zohoUserId → Map(teamName → count)
     for (const r of umRows) {
       const uid = String(r.user_id ?? '');
-      const tn = (r.team_name || '').trim();
+      const tn = canonName((r.team_name || '').trim());
       if (!uid || !tn) continue;
       if (!teamCountByUser.has(uid)) teamCountByUser.set(uid, new Map());
       const m = teamCountByUser.get(uid);
