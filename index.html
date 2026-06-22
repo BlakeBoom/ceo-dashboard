@@ -1256,6 +1256,50 @@ function resolveTeamNode(personName, leaderName) {
   return UNASSIGNED_TEAM;
 }
 
+// The metrics feed spells the same team leader inconsistently — a first-name-only
+// form ("Elzette") alongside the full name ("Elzette Saaiman") — which splits one
+// team into duplicate nodes. Collapse a set of team names to a canonical form:
+// group by first name; when a first name maps to exactly one full identity, every
+// variant (including the bare first name) folds into the longest spelling. When a
+// first name is genuinely shared by different people, only exact first+last
+// duplicates are merged so we never fuse two distinct leaders.
+function buildTeamCanonMap(names) {
+  const map = new Map();
+  const info = [];
+  for (const n of names) {
+    if (!n || n === UNASSIGNED_TEAM) continue;
+    const k = normalizeName(n) || '';
+    const toks = k ? k.split(' ') : [];
+    if (!toks.length) continue;
+    info.push({ n, k, toks, first: toks[0], fl: firstLastKey(n) });
+  }
+  const byFirst = new Map();
+  for (const it of info) {
+    if (!byFirst.has(it.first)) byFirst.set(it.first, []);
+    byFirst.get(it.first).push(it);
+  }
+  const longest = gs => gs.slice().sort((a, b) => b.k.length - a.k.length)[0].n;
+  for (const group of byFirst.values()) {
+    const fullFls = new Set(group.filter(g => g.toks.length >= 2).map(g => g.fl));
+    if (fullFls.size === 1) {
+      const canonical = longest(group);
+      for (const g of group) map.set(g.n, canonical);
+    } else {
+      const byFl = new Map();
+      for (const g of group) {
+        if (g.toks.length < 2) continue;   // ambiguous bare first name → leave as-is
+        if (!byFl.has(g.fl)) byFl.set(g.fl, []);
+        byFl.get(g.fl).push(g);
+      }
+      for (const gs of byFl.values()) {
+        const canonical = longest(gs);
+        for (const g of gs) map.set(g.n, canonical);
+      }
+    }
+  }
+  return map;
+}
+
 // "h:mm" or "h:mm:ss" → minutes (number)
 function parseHMS(s) {  if (s == null || s === '') return 0;
   if (typeof s === 'number') return s;
@@ -1528,6 +1572,19 @@ function buildAggregates(rows, gran = 'week') {
   const wgDebug = {};        // workgroup → { camp, hrs } : where billable lands
   const wgSkipped = {};      // workgroup → hrs : rows dropped (no campaign mapping)
 
+  // Pre-pass: collect raw team-node names per campaign, then build a per-campaign
+  // canonical map so duplicate leader spellings collapse before bucketing (and
+  // stay consistent across team buckets, agentMeta and the shrinkage overlays).
+  const rawTeamsByCamp = {};
+  for (const r of rows) {
+    const camp = r.campaign_key || WG_MAP[r.workgroup];
+    if (!camp) continue;
+    (rawTeamsByCamp[camp] ??= new Set()).add(resolveTeamNode(r.fullname, r.team_name));
+  }
+  const teamCanonByCamp = {};
+  for (const camp in rawTeamsByCamp) teamCanonByCamp[camp] = buildTeamCanonMap([...rawTeamsByCamp[camp]]);
+  const canonTeam = (camp, t) => teamCanonByCamp[camp]?.get(t) || t;
+
   for (const r of rows) {
     let camp = r.campaign_key;
     if (!camp) {
@@ -1542,7 +1599,7 @@ function buildAggregates(rows, gran = 'week') {
     // billable shown for the selected period (not an all-time sum).
     ((wgDebug[camp] ??= {})[week] ??= {})[_wg] = (wgDebug[camp][week][_wg] || 0) + _bh;
     weeks.add(week);
-    const team = resolveTeamNode(r.fullname, r.team_name);
+    const team = canonTeam(camp, resolveTeamNode(r.fullname, r.team_name));
     const uid = r.user_id;
 
     campWeekRows[camp] ??= {};
@@ -2337,7 +2394,7 @@ function render() {
   // Footer
   const now = new Date();
   $('footer').innerHTML = `
-    <span>Boomerang BPO · Operations Dashboard v20 · bonus Excel export</span>
+    <span>Boomerang BPO · Operations Dashboard v21 · merge duplicate teams</span>
     <span>Source: ${STATE.dataSource === 'live' ? 'Zoho User_metrics_3 (live)' : 'Embedded W19–W22 snapshot'} · Rendered ${now.toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})}</span>
   `;
   // Granularity toggle active state
