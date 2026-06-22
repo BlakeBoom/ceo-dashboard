@@ -2394,7 +2394,7 @@ function render() {
   // Footer
   const now = new Date();
   $('footer').innerHTML = `
-    <span>Boomerang BPO · Operations Dashboard v21 · merge duplicate teams</span>
+    <span>Boomerang BPO · Operations Dashboard v22 · merge duplicate teams (bonus)</span>
     <span>Source: ${STATE.dataSource === 'live' ? 'Zoho User_metrics_3 (live)' : 'Embedded W19–W22 snapshot'} · Rendered ${now.toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})}</span>
   `;
   // Granularity toggle active state
@@ -2503,6 +2503,21 @@ async function triggerBonusSync() {
 function fmtZAR(n) { return (n == null || n === 0) ? '—' : 'R' + Math.round(n).toLocaleString(); }
 function fmtPctBonus(p) { return p == null ? '—' : (p * 100).toFixed(0) + '%'; }
 
+// Group the current period's bonus awards by team, collapsing duplicate leader
+// spellings (the bonus sync stores each spelling as its own team row) so a team
+// shows once — same canonicalisation as the Campaigns view.
+function bonusTeamGroups() {
+  const names = [...new Set(BONUS_STATE.awards.map(r => r.team_name).filter(Boolean))];
+  const canon = buildTeamCanonMap(names);
+  const groups = new Map();
+  for (const r of BONUS_STATE.awards) {
+    const key = (r.team_name && canon.get(r.team_name)) || r.team_name || 'Unassigned';
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(r);
+  }
+  return groups;
+}
+
 // ─── Minimal, dependency-free .xlsx writer ───────────────────────
 // Produces a real OOXML workbook (a stored — uncompressed — zip) so the bonus
 // sheet opens in Excel/Sheets with no "format mismatch" warning, preserving
@@ -2582,12 +2597,7 @@ function exportBonusXlsx() {
   const num = (v, s) => (v == null || isNaN(v)) ? null : C(v, 'n', s);
   const headers = ['Agent', 'Absent days', 'Productivity', 'CSAT', 'QA', 'S&A', 'Prod', 'CSAT', 'QA', 'KPI Bonus', 'Final'];
   const rows = [headers.map(h => C(h, 's', 1))];
-  const groups = new Map();
-  for (const r of BONUS_STATE.awards) {
-    const k = r.team_name || 'Unassigned';
-    if (!groups.has(k)) groups.set(k, []);
-    groups.get(k).push(r);
-  }
+  const groups = bonusTeamGroups();
   let grand = 0;
   for (const [team, rs] of groups) {
     const sub = rs.reduce((a, r) => a + (Number(r.final_bonus) || 0), 0); grand += sub;
@@ -2796,12 +2806,10 @@ function renderBonus() {
   };
 
   // Group agents by team: section header per team with leader + subtotals.
-  const groups = new Map();
-  for (const r of BONUS_STATE.awards) {
-    const key = r.team_name || 'Unassigned';
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(r);
-  }
+  // Canonicalise first so duplicate leader spellings (e.g. "Elzette" vs
+  // "Elzette Saaiman") — which the bonus sync stores as separate team rows —
+  // collapse into one section, matching the Campaigns view.
+  const groups = bonusTeamGroups();
   const rowsHtml = [...groups.entries()].map(([team, rs]) => {
     const sub = rs.reduce((a, r) => a + (Number(r.final_bonus) || 0), 0);
     const qual = rs.filter(r => r.qualified).length;
