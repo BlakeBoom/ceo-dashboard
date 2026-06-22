@@ -947,20 +947,24 @@ const SHRINKAGE_STATUS = {
 // Track statuses we've seen but can't classify
 const UNCLASSIFIED_STATUSES = new Set();
 
-// Absenteeism = genuine absence on a rostered day. The Status column is a
-// compound, comma-joined per-shift string, e.g.
+// Absenteeism = absence on a rostered day. The Status column is a compound,
+// comma-joined per-shift string, e.g.
 //   "Absent"
 //   "Public Holiday(Restricted holiday), Absent"
 //   "Sick Leave Shifts(First Half), 0.5 day Absent"
-// so we can't exact-match — we scan each segment for an "Absent" token and
-// honour explicit fractions ("0.5 day Absent") or half-day wording.
-// Returns the fraction of the day marked Absent, capped at 1 (0 = not absent).
+//   "Unpaid Leave"
+// Absence = any "Absent", "Sick Leave" or "Unpaid Leave" segment (Annual Leave,
+// Public Holiday, Training etc. do NOT count). We scan each comma segment and
+// honour explicit fractions ("0.5 day"/"First Half") so a half sick + half
+// absent day reads as one full absent day.
+// Returns the fraction of the day absent, capped at 1 (0 = not absent).
 // This drives the Absence KPI, sourced from AttendanceUserReport (not alpha).
+const ABSENCE_SEGMENT = /\babsent\b|sick\s*leave|unpaid\s*leave/i;
 function absenceFraction(status) {
   if (!status) return 0;
   let total = 0;
   for (const seg of status.split(',')) {
-    if (!/\babsent\b/i.test(seg)) continue;
+    if (!ABSENCE_SEGMENT.test(seg)) continue;
     const m = seg.match(/(\d+(?:\.\d+)?)\s*day/i);
     if (m) total += parseFloat(m[1]);
     else if (/half/i.test(seg)) total += 0.5;
