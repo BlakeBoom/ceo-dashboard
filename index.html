@@ -948,12 +948,12 @@ const SHRINKAGE_STATUS = {
 const UNCLASSIFIED_STATUSES = new Set();
 
 // Absenteeism = genuine unplanned full-day absence. A subset of the 'unplanned'
-// shrinkage statuses above: excludes 'System Downtime' (operational, not an
-// employee absence) and the partial-day column components (late/early/break).
+// shrinkage statuses above: only no-notice absences count. Sick Leave and
+// Unpaid Leave are NOT absenteeism, and 'System Downtime' / partial-day column
+// components (late/early/break) are excluded too.
 // This drives the Absence KPI, sourced from AttendanceUserReport (not alpha).
 const ABSENCE_STATUS = new Set([
-  'Sick Leave', 'Sick Leave Shifts', 'Absent', 'No Show',
-  'Unpaid Leave', 'Unpaid Leave Shifts', 'AWOL',
+  'Absent', 'No Show', 'AWOL',
 ]);
 
 // ════════════════════════════════════════════════════════════════════════
