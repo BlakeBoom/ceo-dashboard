@@ -2523,7 +2523,7 @@ function exportBonusXlsx() {
   if (!BONUS_STATE.awards.length) return;
   const C = (v, t, s) => ({ v, t, s });
   const num = (v, s) => (v == null || isNaN(v)) ? null : C(v, 'n', s);
-  const headers = ['Agent', 'Callouts', 'Productivity', 'CSAT', 'QA', 'S&A', 'Prod', 'CSAT', 'QA', 'KPI Bonus', 'Final'];
+  const headers = ['Agent', 'Absent days', 'Productivity', 'CSAT', 'QA', 'S&A', 'Prod', 'CSAT', 'QA', 'KPI Bonus', 'Final'];
   const rows = [headers.map(h => C(h, 's', 1))];
   const groups = new Map();
   for (const r of BONUS_STATE.awards) {
@@ -2785,7 +2785,7 @@ function renderBonus() {
           <table class="agent-tbl">
             <thead><tr>
               <th>Agent</th>
-              <th class="numeric">Callouts</th>
+              <th class="numeric">Absent days</th>
               <th class="numeric">Productivity</th>
               <th class="numeric">CSAT</th>
               <th class="numeric">QA</th>
