@@ -1815,9 +1815,10 @@ function buildShrinkageByAgentWeek(attRows, empProfileRows, umAgentMeta, gran = 
       payable_mins: 0, total_mins: 0,
       planned_mins: 0, unplanned_mins: 0, productive_mins: 0, unclassified_mins: 0,
       paid_break_mins: 0, unpaid_break_mins: 0, late_entry_mins: 0, early_exit_mins: 0,
-      present_days: 0, leave_days: 0, absence_days: 0,
+      present_days: 0, leave_days: 0, absence_days: 0, scheduled_days: 0,
     };
     const w = result[uid][week];
+    w.scheduled_days += 1;   // every attendance row = one scheduled day (robust denominator)
     w.payable_mins += payableMins;
     w.total_mins += totalMins;
     w.paid_break_mins += paidBreak;
@@ -1864,7 +1865,7 @@ function rollupShrinkage(agentShrinkage, agentMeta) {
     for (const [week, m] of Object.entries(byWeek)) {
       const acc = (host, k) => {
         host[k] ??= {};
-        host[k][week] ??= { payable_mins: 0, planned_mins: 0, unplanned_mins: 0, productive_mins: 0, unclassified_mins: 0, total_mins: 0, absence_days: 0, present_days: 0 };
+        host[k][week] ??= { payable_mins: 0, planned_mins: 0, unplanned_mins: 0, productive_mins: 0, unclassified_mins: 0, total_mins: 0, absence_days: 0, present_days: 0, scheduled_days: 0 };
         const a = host[k][week];
         a.payable_mins      += m.payable_mins;
         a.planned_mins      += m.planned_mins;
@@ -1874,6 +1875,7 @@ function rollupShrinkage(agentShrinkage, agentMeta) {
         a.total_mins        += m.total_mins;
         a.absence_days      += m.absence_days || 0;
         a.present_days      += m.present_days || 0;
+        a.scheduled_days    += m.scheduled_days || 0;
       };
       acc(campaignWeek, camp);
       acc(teamWeek, camp + '||' + team);  // composite key
@@ -1888,9 +1890,10 @@ function rollupShrinkage(agentShrinkage, agentMeta) {
     metrics.shrinkage_unclassified_pct = pay > 0 ? (metrics.unclassified_mins / pay) * 100 : null;
     // Utilization (paid-hours definition): productive / payable
     metrics.utilization_pct = pay > 0 ? (metrics.productive_mins / pay) * 100 : null;
-    // Absence rate = unplanned absence days / scheduled days (present + absent).
-    // Sourced from AttendanceUserReport, replaces the alpha absenteeism column.
-    const schedDays = (metrics.absence_days || 0) + (metrics.present_days || 0);
+    // Absence rate = unplanned absence days / total scheduled days (every
+    // attendance row). Using all rows as the denominator avoids depending on the
+    // exact 'present' status labels. Sourced from AttendanceUserReport.
+    const schedDays = metrics.scheduled_days || 0;
     metrics.absence_pct = schedDays > 0 ? (metrics.absence_days / schedDays) * 100 : null;
     // Realization will be set later (needs billable_hours from User_metrics_3 side)
   }
@@ -1988,7 +1991,7 @@ function overlayAttendanceAbsence() {
   const agentAbsence = (uid, wk) => {
     const m = STATE.shrinkageAgentWeek?.[uid]?.[wk];
     if (!m) return null;
-    const sched = (m.absence_days || 0) + (m.present_days || 0);
+    const sched = m.scheduled_days || 0;
     return sched > 0 ? (m.absence_days / sched) * 100 : null;
   };
   for (const c in (STATE.agentWeek || {})) {
@@ -3405,10 +3408,10 @@ function renderSummary() {
     totalCalls += m.calls;
     totalTickets += m.tickets;
     // Absence is sourced from AttendanceUserReport (shrinkage buckets), not the
-    // alpha absenteeism column.
+    // alpha absenteeism column. Denominator = total scheduled days (all rows).
     const sAbs = STATE.shrinkageCampaignWeek?.[c]?.[wk];
     absentSum += sAbs?.absence_days || 0;
-    presentSum += sAbs?.present_days || 0;
+    presentSum += sAbs?.scheduled_days || 0;
     const ar = curRules[c];
     if (ar) reqHrsTotal += reqHrsForPeriod(ar);
     const o = overallRag(m, TARGETS[c]||{}, KPI_CONFIG[c]||[], frac);
@@ -3422,15 +3425,14 @@ function renderSummary() {
       prevBillable += mp.billable;
       const sAbsP = STATE.shrinkageCampaignWeek?.[c]?.[prevWk];
       prevAbsentSum += sAbsP?.absence_days || 0;
-      prevPresentSum += sAbsP?.present_days || 0;
+      prevPresentSum += sAbsP?.scheduled_days || 0;
     }
   }
 
-  // Org-wide absence rate
-  const absDenom = absentSum + presentSum;
-  const absenceRate = absDenom > 0 ? (absentSum / absDenom) * 100 : null;
-  const prevAbsDenom = prevAbsentSum + prevPresentSum;
-  const prevAbsenceRate = prevAbsDenom > 0 ? (prevAbsentSum / prevAbsDenom) * 100 : null;
+  // Org-wide absence rate. presentSum is now total scheduled days (already
+  // includes absent days), so it IS the denominator — don't add absentSum again.
+  const absenceRate = presentSum > 0 ? (absentSum / presentSum) * 100 : null;
+  const prevAbsenceRate = prevPresentSum > 0 ? (prevAbsentSum / prevPresentSum) * 100 : null;
   const absDelta = absenceRate != null && prevAbsenceRate != null ?
     { val: absenceRate - prevAbsenceRate, dir: absenceRate < prevAbsenceRate ? 'up' : (absenceRate > prevAbsenceRate ? 'down' : 'flat') } : null;
   // Note: absence is "lower is better" so down=bad (red), up=good (green)
