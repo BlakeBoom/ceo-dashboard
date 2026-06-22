@@ -40,11 +40,11 @@ const CAMPAIGN_BY_KEY = {
   gousto:            { name: 'Gousto',              slug: 'gousto' },
   justpark:          { name: 'Just Park UK',       slug: 'justpark' },
   justparkuk:        { name: 'Just Park UK',       slug: 'justpark' },
-  justparkspaceowner:{ name: 'Just Park UK',       slug: 'justpark' }, // Space Owner is UK
-  justparksp:        { name: 'Just Park UK',       slug: 'justpark' },
+  justparkspaceowner:{ name: 'Just Park US',       slug: 'justpark-us' }, // Space Owner = US
+  justparksp:        { name: 'Just Park US',       slug: 'justpark-us' }, // SP = Space Owner = US
   justparkus:        { name: 'Just Park US',       slug: 'justpark-us' },
   justparkusa:       { name: 'Just Park US',       slug: 'justpark-us' },
-  justparkeventpass: { name: 'Just Park UK',       slug: 'justpark' }, // Event Pass = Space Owner = UK
+  justparkeventpass: { name: 'Just Park US',       slug: 'justpark-us' }, // Event Pass = US
   lintbells:         { name: 'Lintbells',           slug: 'lintbells' },
   hunzag:            { name: 'HunzaG',              slug: 'hunzag' },
   royalcanin:        { name: 'RoyalCanin',          slug: 'royalcanin' },

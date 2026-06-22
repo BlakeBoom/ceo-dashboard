@@ -533,8 +533,8 @@ const WG_MAP = {
   '1LIFE':'1LIFE','BBOX':'BUTTERNUTBOX','Butternut Box':'BUTTERNUTBOX',
   'Gousto':'Gousto','HunzaG':'HUNZAG',
   'JUST PARK':'JUSTPARK_uk','Just Park':'JUSTPARK_uk','JustPark':'JUSTPARK_uk',
-  'JustPark Space Owner':'JUSTPARK_uk','Just Park Space Owner':'JUSTPARK_uk','JustPark SP':'JUSTPARK_uk',
-  'JustPark Event Pass':'JUSTPARK_uk','JustPark US':'JUSTPARK_usa','JUST PARK US':'JUSTPARK_usa',
+  'JustPark Space Owner':'JUSTPARK_usa','Just Park Space Owner':'JUSTPARK_usa','JustPark SP':'JUSTPARK_usa',
+  'JustPark Event Pass':'JUSTPARK_usa','JustPark US':'JUSTPARK_usa','JUST PARK US':'JUSTPARK_usa',
   'MedExpress':'Medexpress','PICKnPAY':'PICKNPAY','Pinter':'PINTER',
   'Royal Canin':'ROYALCANIN','RoyalCanin':'ROYALCANIN',
   'The Good Life Sorted':'GOODLIFESORTED',
@@ -718,8 +718,8 @@ const SLUG_TO_CAMPKEY = {
   medexpress:'Medexpress', picknpay:'PICKNPAY', butternutbox:'BUTTERNUTBOX',
   pinter:'PINTER', beer52:'BEER52', '1life':'1LIFE', gousto:'Gousto',
   hunzag:'HUNZAG', royalcanin:'ROYALCANIN', thegoodlifesorted:'GOODLIFESORTED',
-  lintbells:'VETNIQUE', justpark:'JUSTPARK_uk', 'justpark-us':'JUSTPARK_usa', 'justpark-event-pass':'JUSTPARK_uk',
-  'justpark-us':'JUSTPARK_usa', hyve:'HYVE',
+  lintbells:'VETNIQUE', justpark:'JUSTPARK_uk', 'justpark-us':'JUSTPARK_usa', 'justpark-event-pass':'JUSTPARK_usa',
+  'justpark-space-owner':'JUSTPARK_usa', hyve:'HYVE',
 };
 
 // Build TARGET_VERSIONS as a COMPLETE per-month snapshot (every campaign's
@@ -971,8 +971,8 @@ const SHIFT_PATTERNS = [
   [/lint\s*bells|vetnique/i,      'VETNIQUE'],
   [/pinter/i,                     'PINTER'],
   [/1\s*life|one\s*life/i,        '1LIFE'],
-  [/just\s*park.*\bus\b/i,        'JUSTPARK_usa'], // only the genuine US shift
-  [/just\s*park/i,                'JUSTPARK_uk'],  // UK incl Event Pass / Space Owner
+  [/just\s*park.*(space\s*owner|\bsp\b|event\s*pass|\bus\b)/i, 'JUSTPARK_usa'], // US incl Event Pass / Space Owner
+  [/just\s*park/i,                'JUSTPARK_uk'],  // remaining Just Park = UK
 ];
 function shiftToCampaign(shiftName) {
   if (!shiftName) return null;
