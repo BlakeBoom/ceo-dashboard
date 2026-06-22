@@ -2337,7 +2337,7 @@ function render() {
   // Footer
   const now = new Date();
   $('footer').innerHTML = `
-    <span>Boomerang BPO · Operations Dashboard v19 · headcount from attendance</span>
+    <span>Boomerang BPO · Operations Dashboard v20 · bonus Excel export</span>
     <span>Source: ${STATE.dataSource === 'live' ? 'Zoho User_metrics_3 (live)' : 'Embedded W19–W22 snapshot'} · Rendered ${now.toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})}</span>
   `;
   // Granularity toggle active state
@@ -2445,6 +2445,134 @@ async function triggerBonusSync() {
 
 function fmtZAR(n) { return (n == null || n === 0) ? '—' : 'R' + Math.round(n).toLocaleString(); }
 function fmtPctBonus(p) { return p == null ? '—' : (p * 100).toFixed(0) + '%'; }
+
+// ─── Minimal, dependency-free .xlsx writer ───────────────────────
+// Produces a real OOXML workbook (a stored — uncompressed — zip) so the bonus
+// sheet opens in Excel/Sheets with no "format mismatch" warning, preserving
+// currency formatting, percentages and the RAG cell colours from the screen.
+// A cell is { v, t:'s'|'n', s:styleIndex }; style indexes map to <cellXfs> below.
+const _crcTable = (() => { const t = []; for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+function _crc32(b) { let c = 0xFFFFFFFF; for (let i = 0; i < b.length; i++) c = _crcTable[(c ^ b[i]) & 0xFF] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; }
+function _zipStore(files) {
+  const u16 = n => [n & 0xFF, (n >> 8) & 0xFF];
+  const u32 = n => [n & 0xFF, (n >> 8) & 0xFF, (n >> 16) & 0xFF, (n >>> 24) & 0xFF];
+  const enc = new TextEncoder();
+  const parts = [], central = []; let offset = 0;
+  for (const f of files) {
+    const name = enc.encode(f.name), crc = _crc32(f.data), sz = f.data.length;
+    const local = new Uint8Array([].concat(u32(0x04034b50), u16(20), u16(0), u16(0), u16(0), u16(0), u32(crc), u32(sz), u32(sz), u16(name.length), u16(0)));
+    parts.push(local, name, f.data);
+    central.push(new Uint8Array([].concat(u32(0x02014b50), u16(20), u16(20), u16(0), u16(0), u16(0), u16(0), u32(crc), u32(sz), u32(sz), u16(name.length), u16(0), u16(0), u16(0), u16(0), u32(0), u32(offset))), name);
+    offset += local.length + name.length + sz;
+  }
+  let cdSize = 0; for (const c of central) cdSize += c.length;
+  const eocd = new Uint8Array([].concat(u32(0x06054b50), u16(0), u16(0), u16(files.length), u16(files.length), u32(cdSize), u32(offset), u16(0)));
+  const all = [...parts, ...central, eocd];
+  let total = 0; for (const a of all) total += a.length;
+  const out = new Uint8Array(total); let p = 0; for (const a of all) { out.set(a, p); p += a.length; }
+  return out;
+}
+const _xmlEsc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+const _colLetter = n => { let s = ''; n++; while (n > 0) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); } return s; };
+const _XLSX_STYLES = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><numFmts count="1"><numFmt numFmtId="164" formatCode="&quot;R&quot;#,##0"/></numFmts><fonts count="4"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font><font><sz val="11"/><name val="Calibri"/><color rgb="FF006100"/></font><font><sz val="11"/><name val="Calibri"/><color rgb="FF9C0006"/></font></fonts><fills count="4"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFC6EFCE"/><bgColor indexed="64"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFFFC7CE"/><bgColor indexed="64"/></patternFill></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="10"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/><xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/><xf numFmtId="164" fontId="1" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" applyFont="1"/><xf numFmtId="0" fontId="2" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/><xf numFmtId="0" fontId="3" fillId="3" borderId="0" xfId="0" applyFont="1" applyFill="1"/><xf numFmtId="9" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/><xf numFmtId="164" fontId="2" fillId="2" borderId="0" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1"/><xf numFmtId="9" fontId="2" fillId="2" borderId="0" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1"/><xf numFmtId="9" fontId="3" fillId="3" borderId="0" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>`;
+function _xlsxSheet(rows, ncols) {
+  let body = '';
+  rows.forEach((row, ri) => {
+    let cells = '';
+    row.forEach((cell, ci) => {
+      if (cell == null) return;
+      const ref = _colLetter(ci) + (ri + 1), s = cell.s ? ` s="${cell.s}"` : '';
+      cells += cell.t === 'n'
+        ? `<c r="${ref}"${s}><v>${cell.v}</v></c>`
+        : `<c r="${ref}"${s} t="inlineStr"><is><t xml:space="preserve">${_xmlEsc(cell.v)}</t></is></c>`;
+    });
+    body += `<row r="${ri + 1}">${cells}</row>`;
+  });
+  const cols = `<cols><col min="1" max="1" width="30"/><col min="2" max="${ncols}" width="13"/></cols>`;
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">${cols}<sheetData>${body}</sheetData></worksheet>`;
+}
+function buildXlsx(sheetName, rows, ncols) {
+  const enc = new TextEncoder(), E = s => enc.encode(s);
+  const safeName = (sheetName || 'Sheet1').replace(/[\\\/?*\[\]:]/g, ' ').slice(0, 31);
+  const files = [
+    { name: '[Content_Types].xml', data: E(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>`) },
+    { name: '_rels/.rels', data: E(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`) },
+    { name: 'xl/workbook.xml', data: E(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="${_xmlEsc(safeName)}" sheetId="1" r:id="rId1"/></sheets></workbook>`) },
+    { name: 'xl/_rels/workbook.xml.rels', data: E(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`) },
+    { name: 'xl/styles.xml', data: E(_XLSX_STYLES) },
+    { name: 'xl/worksheets/sheet1.xml', data: E(_xlsxSheet(rows, ncols || 11)) },
+  ];
+  return _zipStore(files);
+}
+function downloadBlob(name, bytes, mime) {
+  const url = URL.createObjectURL(new Blob([bytes], { type: mime }));
+  const a = document.createElement('a');
+  a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1500);
+}
+
+// Build the bonus sheet rows (mirrors the on-screen table: team headers with
+// subtotals, RAG colours, ZAR currency) and download as .xlsx.
+function exportBonusXlsx() {
+  if (!BONUS_STATE.awards.length) return;
+  const C = (v, t, s) => ({ v, t, s });
+  const num = (v, s) => (v == null || isNaN(v)) ? null : C(v, 'n', s);
+  const headers = ['Agent', 'Callouts', 'Productivity', 'CSAT', 'QA', 'S&A', 'Prod', 'CSAT', 'QA', 'KPI Bonus', 'Final'];
+  const rows = [headers.map(h => C(h, 's', 1))];
+  const groups = new Map();
+  for (const r of BONUS_STATE.awards) {
+    const k = r.team_name || 'Unassigned';
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(r);
+  }
+  let grand = 0;
+  for (const [team, rs] of groups) {
+    const sub = rs.reduce((a, r) => a + (Number(r.final_bonus) || 0), 0); grand += sub;
+    const qual = rs.filter(r => r.qualified).length;
+    const leader = rs.find(r => r.tm_name)?.tm_name;
+    const trow = new Array(11).fill(null);
+    trow[0] = C(`${team}${leader ? ' · ' + leader : ''} — ${rs.length} agent${rs.length === 1 ? '' : 's'}, ${qual} qualified`, 's', 1);
+    trow[9] = C('subtotal', 's', 1);
+    trow[10] = num(sub, 3);
+    rows.push(trow);
+    for (const r of rs) {
+      const c = r.components || {};
+      const callRag = r.callouts == null ? 0 : (r.callouts === 0 ? 4 : 5);
+      const prodRag = r.productivity == null ? 0 : (r.productivity >= 1470 ? 4 : 5);
+      const csatRag = r.csat_pct == null ? 6 : (r.csat_pct >= 0.9 ? 8 : 9);
+      const qaRag   = r.qa_pct   == null ? 6 : (r.qa_pct   >= 0.9 ? 8 : 9);
+      rows.push([
+        C(r.full_name, 's', 0),
+        num(r.callouts, callRag),
+        num(r.productivity != null ? Math.round(r.productivity) : null, prodRag),
+        r.csat_pct == null ? null : C(r.csat_pct, 'n', csatRag),
+        r.qa_pct   == null ? null : C(r.qa_pct, 'n', qaRag),
+        num(c.sa, c.sa ? 7 : 2),
+        num(c.productivity, c.productivity ? 7 : 2),
+        num(c.csat, c.csat ? 7 : 2),
+        num(c.qa, c.qa ? 7 : 2),
+        num(r.kpi_bonus, 3),
+        num(r.final_bonus, 3),
+      ]);
+    }
+  }
+  const g = new Array(11).fill(null);
+  g[0] = C('TOTAL', 's', 1); g[9] = C('total', 's', 1); g[10] = num(grand, 3);
+  rows.push(g);
+
+  const period = BONUS_STATE.periods.find(p => p.id === BONUS_STATE.selectedPeriodId);
+  const camp = BONUS_STATE.drill?.name || period?.campaign_name || 'Campaign';
+  const month = BONUS_STATE.month || period?.period_start?.slice(0, 7) || '';
+  const bytes = buildXlsx(`${camp} ${month}`, rows, 11);
+  const fname = `Bonus_${camp}_${month}`.replace(/[^\w.-]+/g, '_') + '.xlsx';
+  downloadBlob(fname, bytes, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+}
 
 // Admin: per-campaign financial rollup for a month.
 async function loadBonusSummary(month) {
@@ -2640,7 +2768,10 @@ function renderBonus() {
           : `<select id="bonusPeriodSelect" class="modal-month" style="font-size:13px;padding:7px 10px">${periodOpts || '<option>No periods yet</option>'}</select>`}
         <div class="agent-tbl-sub">${BONUS_STATE.awards.length} agent${BONUS_STATE.awards.length===1?'':'s'} · total payout ${fmtZAR(total)}</div>
       </div>
-      ${canSync ? `<button id="bonusSyncBtn" class="btn-primary" ${BONUS_STATE.syncing ? 'disabled' : ''}>${BONUS_STATE.syncing ? 'Syncing…' : '↻ Refresh from Zoho'}</button>` : ''}
+      <div style="display:flex;gap:8px;align-items:center">
+        ${BONUS_STATE.awards.length ? `<button id="bonusExportBtn" class="btn-ghost" title="Download this campaign + period as an Excel workbook">⤓ Export to Excel</button>` : ''}
+        ${canSync ? `<button id="bonusSyncBtn" class="btn-primary" ${BONUS_STATE.syncing ? 'disabled' : ''}>${BONUS_STATE.syncing ? 'Syncing…' : '↻ Refresh from Zoho'}</button>` : ''}
+      </div>
     </div>
     ${BONUS_STATE.error ? `<div class="err-banner show" style="margin-top:8px">${BONUS_STATE.error}</div>` : ''}
     ${BONUS_STATE.loading ? '<div class="loading"><div class="spinner"></div><div>Loading bonus data…</div></div>' :
@@ -2678,6 +2809,7 @@ function renderBonus() {
     loadBonusSummary(BONUS_STATE.month);
   });
   $('bonusSyncBtn')?.addEventListener('click', triggerBonusSync);
+  $('bonusExportBtn')?.addEventListener('click', exportBonusXlsx);
 }
 
 // ─── Targets view (admin edits, EXCO views) ──────────────────────
