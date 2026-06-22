@@ -1904,12 +1904,9 @@ function rollupShrinkage(agentShrinkage, agentMeta) {
     metrics.shrinkage_unclassified_pct = pay > 0 ? (metrics.unclassified_mins / pay) * 100 : null;
     // Utilization (paid-hours definition): productive / payable
     metrics.utilization_pct = pay > 0 ? (metrics.productive_mins / pay) * 100 : null;
-    // Absence rate = absence days / scheduled working days, where working days =
-    // all attendance rows minus paid planned leave (annual leave/holiday/training).
-    // Day-based because absence rows are unpaid (0 payable mins), so a minutes
-    // basis would always read ~0. Excluding only planned leave keeps the
-    // denominator robust against however the feed labels worked days.
-    const workDays = (metrics.scheduled_days || 0) - (metrics.planned_days || 0);
+    // Absence rate = absence days / working days, where working days = every
+    // attendance row. Day-based because absence rows are unpaid (0 payable mins).
+    const workDays = metrics.scheduled_days || 0;
     metrics.absence_pct = workDays > 0 ? (metrics.absence_days / workDays) * 100 : null;
     metrics.work_days = workDays;
     // Realization will be set later (needs billable_hours from User_metrics_3 side)
@@ -2008,7 +2005,7 @@ function overlayAttendanceAbsence() {
   const agentAbsence = (uid, wk) => {
     const m = STATE.shrinkageAgentWeek?.[uid]?.[wk];
     if (!m) return null;
-    const work = (m.scheduled_days || 0) - (m.planned_days || 0);
+    const work = m.scheduled_days || 0;
     return work > 0 ? (m.absence_days / work) * 100 : null;
   };
   for (const c in (STATE.agentWeek || {})) {
@@ -3425,11 +3422,10 @@ function renderSummary() {
     totalCalls += m.calls;
     totalTickets += m.tickets;
     // Absence is sourced from AttendanceUserReport (shrinkage buckets), not the
-    // alpha absenteeism column. Rate = absence days / scheduled working days
-    // (all rows minus paid planned leave).
+    // alpha absenteeism column. Rate = absence days / working days (all rows).
     const sAbs = STATE.shrinkageCampaignWeek?.[c]?.[wk];
     absentSum += sAbs?.absence_days || 0;
-    presentSum += sAbs ? (sAbs.scheduled_days || 0) - (sAbs.planned_days || 0) : 0;
+    presentSum += sAbs?.scheduled_days || 0;
     const ar = curRules[c];
     if (ar) reqHrsTotal += reqHrsForPeriod(ar);
     const o = overallRag(m, TARGETS[c]||{}, KPI_CONFIG[c]||[], frac);
@@ -3443,7 +3439,7 @@ function renderSummary() {
       prevBillable += mp.billable;
       const sAbsP = STATE.shrinkageCampaignWeek?.[c]?.[prevWk];
       prevAbsentSum += sAbsP?.absence_days || 0;
-      prevPresentSum += sAbsP ? (sAbsP.scheduled_days || 0) - (sAbsP.planned_days || 0) : 0;
+      prevPresentSum += sAbsP?.scheduled_days || 0;
     }
   }
 
