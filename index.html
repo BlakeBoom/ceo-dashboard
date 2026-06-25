@@ -2400,7 +2400,7 @@ function render() {
   // Footer
   const now = new Date();
   $('footer').innerHTML = `
-    <span>Boomerang BPO · Operations Dashboard v23 · merge duplicate teams (strip "'s team" suffix)</span>
+    <span>Boomerang BPO · Operations Dashboard v24 · Targets: new month carries forward previous values</span>
     <span>Source: ${STATE.dataSource === 'live' ? 'Zoho User_metrics_3 (live)' : 'Embedded W19–W22 snapshot'} · Rendered ${now.toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})}</span>
   `;
   // Granularity toggle active state
@@ -3098,9 +3098,24 @@ function renderTargets() {
   $('tg-add')?.addEventListener('click', () => {
     const mo = $('tg-newmo').value;
     if (!mo) { alert('Pick a month to add.'); return; }
-    TARGETS_STATE.selEff = `${mo}-01`;
-    // Render an empty editable version, then admin fills + saves.
-    if (!months.includes(`${mo}-01`)) RULES_RAW.push({ slug, effective_from: `${mo}-01`, rule_key: '__new', value: '' });
+    const newEff = `${mo}-01`;
+    if (months.includes(newEff)) { TARGETS_STATE.selEff = newEff; renderTargets(); return; }
+    // Pre-fill the new month from the previous month's values (carry-forward) so
+    // only the changes need editing. If no earlier version exists, fall back to
+    // whatever is already in the system for this campaign (the earliest version).
+    const asc = [...months].sort();
+    let src = null;
+    for (const m of asc) if (m < newEff) src = m;   // latest version before the new month
+    if (!src) src = asc[0] || null;                 // else nearest existing version
+    const srcRows = src
+      ? RULES_RAW.filter(x => x.slug === slug && x.effective_from === src && x.rule_key !== '__new')
+      : [];
+    if (srcRows.length) {
+      for (const r of srcRows) RULES_RAW.push({ slug, effective_from: newEff, rule_key: r.rule_key, value: r.value });
+    } else {
+      RULES_RAW.push({ slug, effective_from: newEff, rule_key: '__new', value: '' });  // nothing to copy → blank
+    }
+    TARGETS_STATE.selEff = newEff;
     renderTargets();
   });
   $('tg-save')?.addEventListener('click', () => saveTargetVersion(cid, eff));
