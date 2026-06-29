@@ -681,7 +681,7 @@ const RULE_DEFS = [
     ['additional_hours_rate','Additional hours rate'],['tl_rate','TL rate'],['qa_rate','QA rate'],
     ['cm_rate','CM rate'],['ic2_rate','2IC rate'],['trainer_rate','Trainer rate'],
     ['tl_sunday_rate','TL Sunday rate'],['qa_sunday_rate','QA Sunday rate'],
-    ['special_agent_rate_1','Special agent rate #1'],['special_agent_rate_2','Special agent rate #2'],
+    ['special_agent_rate_1','Special BAE rate #1'],['special_agent_rate_2','Special BAE rate #2'],
     ['headcount_discount','Head count discount'],['comm_reactivation_rate','Sales commission reactivation rate'],
     ['comm_retention_rate','Sales commission retention rate'],
   ]],
@@ -1065,7 +1065,7 @@ function detectRole(shiftName) {
 const ROLE_LABEL = {
   office_admin:'Office Admin', real_time_analyst:'Real Time Analyst', campaign_manager:'Campaign Manager',
   quality_analyst:'Quality Analyst', zendesk_specialist:'Zendesk Specialist', trainer:'Trainer',
-  '2ic':'2IC', baes:'BAEs', smes:'SMEs', team_leader:'Team Leader', agent:'Agent',
+  '2ic':'2IC', baes:'BAEs', smes:'SMEs', team_leader:'Team Leader', agent:'BAE',
 };
 // Maps each role to its Support-Billable (sbr_) and Non-Billable (nbr_) target
 // rule keys. `always` forces a verdict regardless of targets. Agents and any
@@ -1624,7 +1624,7 @@ function buildAggregates(rows, gran = 'week') {
       agentWeekRows[camp][team][uid][week] ??= [];
       agentWeekRows[camp][team][uid][week].push(r);
       if (!agentMeta[uid]) {
-        agentMeta[uid] = { name: r.fullname || `Agent ${uid}`, team, camp };
+        agentMeta[uid] = { name: r.fullname || `BAE ${uid}`, team, camp };
       }
     }
   }
@@ -2400,7 +2400,7 @@ function render() {
   // Footer
   const now = new Date();
   $('footer').innerHTML = `
-    <span>Boomerang BPO · Operations Dashboard v24 · Targets: new month carries forward previous values</span>
+    <span>Boomerang BPO · Operations Dashboard v25 · UI: "Agent" relabelled to "BAE"</span>
     <span>Source: ${STATE.dataSource === 'live' ? 'Zoho User_metrics_3 (live)' : 'Embedded W19–W22 snapshot'} · Rendered ${now.toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})}</span>
   `;
   // Granularity toggle active state
@@ -2601,7 +2601,7 @@ function exportBonusXlsx() {
   if (!BONUS_STATE.awards.length) return;
   const C = (v, t, s) => ({ v, t, s });
   const num = (v, s) => (v == null || isNaN(v)) ? null : C(v, 'n', s);
-  const headers = ['Agent', 'Absent days', 'Productivity', 'CSAT', 'QA', 'S&A', 'Prod', 'CSAT', 'QA', 'KPI Bonus', 'Final'];
+  const headers = ['BAE', 'Absent days', 'Productivity', 'CSAT', 'QA', 'S&A', 'Prod', 'CSAT', 'QA', 'KPI Bonus', 'Final'];
   const rows = [headers.map(h => C(h, 's', 1))];
   const groups = bonusTeamGroups();
   let grand = 0;
@@ -2610,7 +2610,7 @@ function exportBonusXlsx() {
     const qual = rs.filter(r => r.qualified).length;
     const leader = rs.find(r => r.tm_name)?.tm_name;
     const trow = new Array(11).fill(null);
-    trow[0] = C(`${team}${leader ? ' · ' + leader : ''} — ${rs.length} agent${rs.length === 1 ? '' : 's'}, ${qual} qualified`, 's', 1);
+    trow[0] = C(`${team}${leader ? ' · ' + leader : ''} — ${rs.length} BAE${rs.length === 1 ? '' : 's'}, ${qual} qualified`, 's', 1);
     trow[9] = C('subtotal', 's', 1);
     trow[10] = num(sub, 3);
     rows.push(trow);
@@ -2677,7 +2677,7 @@ async function triggerSyncAll() {
   }
 }
 
-const _lvlLabel = { agent: 'Agents', tm: 'Team Leaders', campaign_lead: 'Campaign Mgr' };
+const _lvlLabel = { agent: 'BAEs', tm: 'Team Leaders', campaign_lead: 'Campaign Mgr' };
 
 function renderBonusSummary() {
   const s = BONUS_STATE.summary || [];
@@ -2709,7 +2709,7 @@ function renderBonusSummary() {
     heroCard(bandHi(qRate, 60, 40), 'Qualified Rate', qRate != null ? Math.round(qRate)+'%' : '—',
       svgRing(qRate || 0, { light: qRate != null, val: qRate != null ? Math.round(qRate)+'%' : '—', sub: 'qualified' }),
       { dir:'', txt: `${qualified}/${awarded} awards` }),
-    heroCard('dark', 'Agents Awarded', awarded.toLocaleString(), null, { dir:'', txt: 'with metrics this month' }),
+    heroCard('dark', 'BAEs Awarded', awarded.toLocaleString(), null, { dir:'', txt: 'with metrics this month' }),
   ].join('');
 
   // Payout share donut, coloured by each campaign's qualified rate (green = most
@@ -2750,7 +2750,7 @@ function renderBonusSummary() {
         <table class="agent-tbl">
           <thead><tr>
             <th>Campaign</th>
-            <th class="numeric">Agents (qual/awarded)</th>
+            <th class="numeric">BAEs (qual/awarded)</th>
             <th class="numeric">Team Leaders</th>
             <th class="numeric">Campaign Mgr</th>
             <th class="numeric">Total</th><th></th>
@@ -2822,7 +2822,7 @@ function renderBonus() {
     const leader = rs.find(r => r.tm_name)?.tm_name;
     return `<tr class="team-row">
       <td colspan="9"><b>${team}</b>${leader ? ` <span class="dim">· ${leader}</span>` : ''}
-        <span class="dim" style="margin-left:8px">${rs.length} agent${rs.length===1?'':'s'} · ${qual} qualified</span></td>
+        <span class="dim" style="margin-left:8px">${rs.length} BAE${rs.length===1?'':'s'} · ${qual} qualified</span></td>
       <td class="numeric dim">subtotal</td>
       <td class="numeric"><b>${fmtZAR(sub)}</b></td>
     </tr>` + rs.map(agentRow).join('');
@@ -2837,7 +2837,7 @@ function renderBonus() {
           ? `<button id="bonusBackBtn" class="btn-ghost">← All campaigns</button>
              <div style="font-weight:600">${BONUS_STATE.drill.name} <span class="dim">· ${BONUS_STATE.month || ''}</span></div>`
           : `<select id="bonusPeriodSelect" class="modal-month" style="font-size:13px;padding:7px 10px">${periodOpts || '<option>No periods yet</option>'}</select>`}
-        <div class="agent-tbl-sub">${BONUS_STATE.awards.length} agent${BONUS_STATE.awards.length===1?'':'s'} · total payout ${fmtZAR(total)}</div>
+        <div class="agent-tbl-sub">${BONUS_STATE.awards.length} BAE${BONUS_STATE.awards.length===1?'':'s'} · total payout ${fmtZAR(total)}</div>
       </div>
       <div style="display:flex;gap:8px;align-items:center">
         ${BONUS_STATE.awards.length ? `<button id="bonusExportBtn" class="btn-ghost" title="Download this campaign + period as an Excel workbook">⤓ Export to Excel</button>` : ''}
@@ -2855,7 +2855,7 @@ function renderBonus() {
         `<div class="agent-tbl-wrap" style="border-radius:0 0 12px 12px;border-top:none">
           <table class="agent-tbl">
             <thead><tr>
-              <th>Agent</th>
+              <th>BAE</th>
               <th class="numeric">Absent days</th>
               <th class="numeric">Productivity</th>
               <th class="numeric">CSAT</th>
@@ -3225,9 +3225,9 @@ function renderRules() {
     <div class="users-panel" style="margin-bottom:14px;margin-top:0">
       <div class="users-panel-h">KPI bonus rules</div>
       <div class="agent-tbl-sub" style="text-transform:none;letter-spacing:0;font-family:inherit;font-size:12px;line-height:1.6">
-        Set a Rand payout per component to enable it; blank or 0 disables it. Agents score on their own monthly
+        Set a Rand payout per component to enable it; blank or 0 disables it. BAEs score on their own monthly
         metrics. <b>Team Leaders</b> score on their team's aggregates and <b>Campaign Managers</b> on the campaign's
-        (productivity, CSAT and QA averaged per agent; callouts totalled — set thresholds accordingly).
+        (productivity, CSAT and QA averaged per BAE; callouts totalled — set thresholds accordingly).
         After saving, run a sync from the Bonus tab to recalculate.
       </div>
       ${RULES_STATE.savedMsg ? `<div class="chip ok" style="margin-top:8px">${RULES_STATE.savedMsg}</div>` : ''}
@@ -3359,7 +3359,7 @@ async function deactivateUser(id, name) {
   if (r.ok) loadUsers(); else alert('Deactivate failed.');
 }
 
-const _roleLabel = { admin: 'Admin', exco: 'EXCO', campaign_lead: 'Campaign Mgr', tm: 'Team Leader', agent: 'Agent' };
+const _roleLabel = { admin: 'Admin', exco: 'EXCO', campaign_lead: 'Campaign Mgr', tm: 'Team Leader', agent: 'BAE' };
 
 function renderUsers() {
   const u = AUTH.user;
@@ -4348,7 +4348,7 @@ function renderCampaignDetail(root) {
     for (const uid in byUid) {
       const am = byUid[uid]?.[wk];
       if (!am) continue;
-      const meta = STATE.agentMeta[uid] || { name: 'Agent ' + uid };
+      const meta = STATE.agentMeta[uid] || { name: 'BAE ' + uid };
       agentRanks.push({ uid, name: meta.name, team: t, score: agentScore(am, cfg, tgts), m: am });
     }
   }
@@ -4412,12 +4412,12 @@ function renderCampaignDetail(root) {
     ${agentRanks.length ? `
       <div class="sum-card">
         <div class="agent-tbl-head" style="padding:0 0 10px">
-          <h3 style="margin:0">Agent leaderboard</h3>
+          <h3 style="margin:0">BAE leaderboard</h3>
           <span class="agent-tbl-sub" style="margin-left:auto">Top ${Math.min(10, agentRanks.length)} of ${agentRanks.length} · composite attainment vs target</span>
         </div>
         <table class="trend-tbl">
           <thead><tr>
-            <th class="numeric">#</th><th>Agent</th>${showTeamCol ? '<th>Team</th>' : ''}
+            <th class="numeric">#</th><th>BAE</th>${showTeamCol ? '<th>Team</th>' : ''}
             <th class="numeric" title="Mean attainment vs target across this campaign's KPIs">Score</th>
             ${leadLbls.map(l => `<th class="numeric">${l}</th>`).join('')}
             <th class="numeric">Billable</th>
@@ -4527,7 +4527,7 @@ function renderAgentList(root) {
   for (const [uid, byWeek] of Object.entries(agentRoll)) {
     const m = byWeek[wk];
     if (!m) continue;
-    const meta = STATE.agentMeta[uid] || { name: 'Agent ' + uid };
+    const meta = STATE.agentMeta[uid] || { name: 'BAE ' + uid };
     rows.push({ uid, name: meta.name, ...m });
   }
 
@@ -4544,7 +4544,7 @@ function renderAgentList(root) {
 
   // Choose columns from cfg (skip 'none' types like Tickets/Calls if duplicated)
   const cols = [
-    { key: 'name', label: 'Agent', kpi: null, num: false },
+    { key: 'name', label: 'BAE', kpi: null, num: false },
     { key: 'billable', label: 'Billable', kpi: 'billable', num: true, tgt: tgts.billable, dir: 'higher' },
   ];
   for (const [k, lbl, dir] of cfg) {
@@ -4568,7 +4568,7 @@ function renderAgentList(root) {
     <div class="agent-tbl-wrap">
       <div class="agent-tbl-head">
         <div class="agent-tbl-title">${t} — agent breakdown</div>
-        <div class="agent-tbl-sub">${rows.length} agent${rows.length===1?'':'s'} · ${pLbl(wk)}</div>
+        <div class="agent-tbl-sub">${rows.length} BAE${rows.length===1?'':'s'} · ${pLbl(wk)}</div>
       </div>
       <table class="agent-tbl">
         <thead><tr>
@@ -4578,7 +4578,7 @@ function renderAgentList(root) {
   `;
 
   if (rows.length === 0) {
-    html += `<tr><td colspan="${cols.length}" style="text-align:center;color:var(--text3);padding:32px">No agent activity for this team in ${pLbl(wk)}.</td></tr>`;
+    html += `<tr><td colspan="${cols.length}" style="text-align:center;color:var(--text3);padding:32px">No BAE activity for this team in ${pLbl(wk)}.</td></tr>`;
   } else {
     for (const r of rows) {
       html += `<tr>`;
