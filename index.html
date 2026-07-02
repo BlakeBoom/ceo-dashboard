@@ -876,18 +876,48 @@ function periodToYearMonth(label, gran) {
 
 // The effective target version (YYYY-MM key) for a period: latest version on or
 // before the period's month; falls back to the earliest/latest available.
-function chosenVersionMonth(periodLabel) {
+// Target version (a 'YYYY-MM' key into TARGET_VERSIONS) effective for a given
+// calendar month: the latest version on or before it, falling back to the
+// earliest available.
+function chosenVersionForYearMonth(ym) {
   const months = Object.keys(TARGET_VERSIONS).sort();
   if (!months.length) return null;
-  const ym = periodToYearMonth(periodLabel, STATE.granularity);
   if (!ym) return months[months.length - 1];
   let chosen = null;
   for (const mo of months) if (mo <= ym) chosen = mo;
   return chosen || months[0];
 }
+function rulesForYearMonth(ym) {
+  const mo = chosenVersionForYearMonth(ym);
+  return mo ? TARGET_VERSIONS[mo] : {};
+}
+function chosenVersionMonth(periodLabel) {
+  return chosenVersionForYearMonth(periodToYearMonth(periodLabel, STATE.granularity));
+}
 function rulesForPeriod(periodLabel) {
   const mo = chosenVersionMonth(periodLabel);
   return mo ? TARGET_VERSIONS[mo] : {};
+}
+// Calendar-month slices of the active custom range: [{ ym:'YYYY-MM', days:N }],
+// where days is how many days of the range fall in that month. Used to sum
+// required hours / FTE per month when a range spans a target-version change.
+function _rangeMonthSlices() {
+  const rb = STATE.rangeBounds; if (!rb) return [];
+  const start = parseDate(rb.from), end = parseDate(rb.to);
+  if (!start || !end) return [];
+  const out = [];
+  let y = start.getUTCFullYear(), mo = start.getUTCMonth();
+  while (true) {
+    const monStart = new Date(Date.UTC(y, mo, 1));
+    const monEnd = new Date(Date.UTC(y, mo + 1, 0));
+    const segStart = monStart < start ? start : monStart;
+    const segEnd = monEnd > end ? end : monEnd;
+    const days = Math.round((segEnd - segStart) / 86400000) + 1;
+    if (days > 0) out.push({ ym: `${y}-${String(mo + 1).padStart(2, '0')}`, days });
+    if (y === end.getUTCFullYear() && mo === end.getUTCMonth()) break;
+    mo++; if (mo > 11) { mo = 0; y++; }
+  }
+  return out;
 }
 
 // [start,end] UTC dates spanned by a period label at a given granularity.
@@ -938,10 +968,38 @@ function periodElapsedFraction(label, gran) {
 function reqHrsForPeriod(ar) {
   if (!ar) return 0;
   const perDay = ar.req_hrs_month / (WEEKS_PER_MONTH * 7);
-  if (STATE.rangeBounds) return perDay * rangeDayCount();  // range = sum of its days
   if (STATE.granularity === 'month') return ar.req_hrs_month;
   if (STATE.granularity === 'day')   return perDay;
   return ar.req_hrs_week;  // week
+}
+
+// Full required billable hours for ONE campaign over a period. For a normal
+// day/week/month it's the target effective that month × the period length. For a
+// custom day range that spans months with DIFFERENT monthly targets, we sum each
+// calendar-month slice at the target effective for THAT month — so a range that
+// crosses e.g. June→July honours both months' requested hours / FTE, not just
+// the first month's.
+function reqHrsForCampPeriod(campKey, periodLabel) {
+  if (!STATE.rangeBounds) {
+    const ar = rulesForPeriod(periodLabel)?.[campKey];
+    return ar ? reqHrsForPeriod(ar) : 0;
+  }
+  return _rangeMonthSlices().reduce((sum, s) => {
+    const ar = rulesForYearMonth(s.ym)?.[campKey];
+    return sum + (ar ? (ar.req_hrs_month / (WEEKS_PER_MONTH * 7)) * s.days : 0);
+  }, 0);
+}
+// Day-weighted average target FTE for a campaign over the period, so delivered
+// FTE stays consistent when the FTE target changes mid-range. (SLA hrs/FTE is
+// ~constant across versions, so reqHrs ÷ this ≈ hours one FTE should work.)
+function reqFteForCampPeriod(campKey, periodLabel) {
+  if (!STATE.rangeBounds) return rulesForPeriod(periodLabel)?.[campKey]?.req_fte ?? null;
+  let wSum = 0, dSum = 0;
+  for (const s of _rangeMonthSlices()) {
+    const fte = rulesForYearMonth(s.ym)?.[campKey]?.req_fte;
+    if (fte != null) { wSum += fte * s.days; dSum += s.days; }
+  }
+  return dSum > 0 ? wSum / dSum : null;
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -2496,7 +2554,7 @@ function render() {
   // Footer
   const now = new Date();
   $('footer').innerHTML = `
-    <span>Boomerang BPO · Operations Dashboard v28 · Collapsible period picker + custom day range</span>
+    <span>Boomerang BPO · Operations Dashboard v29 · Range required-hours honour per-month targets</span>
     <span>Source: ${STATE.dataSource === 'live' ? 'Zoho User_metrics_3 (live)' : 'Embedded W19–W22 snapshot'} · Rendered ${now.toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})}</span>
   `;
   // Granularity toggle active state
@@ -3842,7 +3900,6 @@ function renderSummary() {
   let absentSum = 0, presentSum = 0;
   let prevAbsentSum = 0, prevPresentSum = 0;
   let reqHrsTotal = 0;
-  const curRules = rulesForPeriod(wk);          // target version effective for this period
   const frac = periodElapsedFraction(wk, STATE.granularity);  // <1 for in-progress period
   const isPartial = frac < 1;
   const pctElapsed = Math.round(frac * 100);
@@ -3861,8 +3918,7 @@ function renderSummary() {
     const sAbs = STATE.shrinkageCampaignWeek?.[c]?.[wk];
     absentSum += sAbs?.absence_days || 0;
     presentSum += sAbs?.absence_denom_days || 0;
-    const ar = curRules[c];
-    if (ar) reqHrsTotal += reqHrsForPeriod(ar);
+    reqHrsTotal += reqHrsForCampPeriod(c, wk);   // range-aware: sums each month at its own target
     const o = overallRag(m, TARGETS[c]||{}, KPI_CONFIG[c]||[], frac);
     overalls[c] = o;
     if (o === 'green') green++;
@@ -3902,9 +3958,8 @@ function renderSummary() {
   let prevSlippage = null;
   if (prevWk) {
     let prevReqHrs = 0;
-    const prevRules = rulesForPeriod(prevWk);   // version effective for the prior period
     for (const c of camps) {
-      if (STATE.campaignWeek[c][prevWk] && prevRules[c]) prevReqHrs += reqHrsForPeriod(prevRules[c]);
+      if (STATE.campaignWeek[c][prevWk]) prevReqHrs += reqHrsForCampPeriod(c, prevWk);
     }
     prevReqHrs += additionalHrsTotal(prevWk);
     prevSlippage = prevReqHrs > 0 ? ((prevReqHrs - prevBillable) / prevReqHrs) * 100 : null;
@@ -3961,8 +4016,7 @@ function renderSummary() {
   // dashed target line.
   const billSeries = STATE.weeks.map(w => camps.reduce((a, c) => a + (STATE.campaignWeek[c]?.[w]?.billable || 0), 0));
   const reqSeries = STATE.weeks.map(w => {
-    const rv = rulesForPeriod(w) || {};
-    const base = camps.reduce((a, c) => a + (STATE.campaignWeek[c]?.[w] && rv[c] ? reqHrsForPeriod(rv[c]) : 0), 0);
+    const base = camps.reduce((a, c) => a + (STATE.campaignWeek[c]?.[w] ? reqHrsForCampPeriod(c, w) : 0), 0);
     return base + additionalHrsTotal(w);   // dashed required line includes approved extra
   });
   const weekLabels = STATE.weeks.map(w => pLbl(w));
@@ -4278,9 +4332,8 @@ function efficiencyStats(sh, billableHrs, reqHrs) {
 
 // Pro-rated required hours for a campaign in the selected period (for slippage).
 function reqHrsForCampaign(c, wk) {
-  const ar = rulesForPeriod(wk)?.[c];
-  if (!ar) return null;
-  const full = reqHrsForPeriod(ar);
+  const full = reqHrsForCampPeriod(c, wk);   // range-aware full required hours
+  if (!(full > 0)) return null;
   const frac = periodElapsedFraction(wk, STATE.granularity);
   return full * (frac < 1 ? frac : 1);
 }
@@ -4293,11 +4346,11 @@ function reqHrsForCampaign(c, wk) {
 // a team inside the campaign (pass the team's billable). Returns null when the
 // campaign has no FTE target configured.
 function deliveredFte(campKey, wk, billableHrs) {
-  const ar = rulesForPeriod(wk)?.[campKey];
-  if (!ar || !(ar.req_fte > 0)) return null;
+  const reqFte = reqFteForCampPeriod(campKey, wk);   // day-weighted avg across the range
+  if (!(reqFte > 0)) return null;
   const reqHrs = reqHrsForCampaign(campKey, wk);
   if (!(reqHrs > 0)) return null;
-  return billableHrs / (reqHrs / ar.req_fte);
+  return billableHrs / (reqHrs / reqFte);
 }
 
 // Group each KPI into a daily-pulse category for the campaign-detail panels.
@@ -4450,7 +4503,7 @@ function renderCampaignDetail(root) {
       svgRing(fulfil != null ? Math.min(100, fulfil) : 0, { light: onColour(fulfilStatus), val: fulfil != null ? Math.round(fulfil) + '%' : '—', sub: 'of req' }),
       creq != null ? `${Math.round(creq).toLocaleString()} hrs required` : 'no target set'),
     hero('info', 'Capacity', `${m.fte} HC`, null,
-      fte != null ? `${fte.toFixed(1)} delivered FTE${rulesForPeriod(wk)?.[c]?.req_fte ? ` · ${rulesForPeriod(wk)[c].req_fte} target` : ''}` : 'distinct people active'),
+      fte != null ? `${fte.toFixed(1)} delivered FTE${reqFteForCampPeriod(c, wk) ? ` · ${(+reqFteForCampPeriod(c, wk).toFixed(1))} target` : ''}` : 'distinct people active'),
     sh && sh.shrinkage_total_pct != null
       ? hero(shrStatus, 'Shrinkage', sh.shrinkage_total_pct.toFixed(1) + '%',
           svgRing(Math.min(100, sh.shrinkage_total_pct), { light: onColour(shrStatus), val: sh.shrinkage_total_pct.toFixed(0) + '%', sub: 'shrink' }),
@@ -4475,10 +4528,7 @@ function renderCampaignDetail(root) {
 
   // Billable vs required trend across all loaded periods.
   const billSeries = STATE.weeks.map(w => STATE.campaignWeek[c]?.[w]?.billable || 0);
-  const reqSeries = STATE.weeks.map(w => {
-    const ar = rulesForPeriod(w)?.[c];
-    return ar ? reqHrsForPeriod(ar) : 0;
-  });
+  const reqSeries = STATE.weeks.map(w => reqHrsForCampPeriod(c, w));
   const weekLabels = STATE.weeks.map(w => pLbl(w));
   const fmtK = (n) => Math.abs(n) >= 1000 ? (n/1000).toFixed(n>=10000?0:1)+'k' : Math.round(n);
 
