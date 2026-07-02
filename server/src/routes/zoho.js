@@ -24,6 +24,41 @@ const VIEW_KEYS = {
 function normName(s) {
   return String(s ?? '').toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim();
 }
+// "john michael smith" → "john smith" (first + last), mirroring the dashboard's
+// firstLastKey so name matching lines up with the client.
+function firstLast(s) {
+  const n = normName(s);
+  if (!n) return null;
+  const p = n.split(' ');
+  return p.length >= 2 ? `${p[0]} ${p[p.length - 1]}` : null;
+}
+function metricName(r) {
+  return r.fullname ?? r.Full_Name ?? r.full_name ?? null;
+}
+function profileName(r) {
+  return r['Employee Name'] ?? r.employee_name ?? null;
+}
+
+// The set of employee name-keys (full + first/last) the caller is allowed to see,
+// derived from their SCOPED User_metrics_3 rows. null → sees everything (no
+// filtering). This is how we row-limit the attendance / profile feeds to exactly
+// the caller's agents, so every role runs the same formulas on fewer rows rather
+// than on a different (org-wide) dataset.
+async function allowedNameKeys(user) {
+  if (seesAllScope(user)) return null;
+  const metrics = scopeMetricsRows(user, await fetchView(VIEW.userMetrics));
+  const keys = new Set();
+  for (const r of metrics) {
+    const full = normName(metricName(r)); if (full) keys.add(full);
+    const fl = firstLast(metricName(r));  if (fl) keys.add(fl);
+  }
+  return keys;
+}
+function nameAllowed(rawName, keys) {
+  const full = normName(rawName); if (full && keys.has(full)) return true;
+  const fl = firstLast(rawName);  if (fl && keys.has(fl)) return true;
+  return false;
+}
 
 // Restrict User_metrics_3 rows to what the caller may see.
 //   admin         → everything
@@ -59,8 +94,29 @@ router.get('/view/:key', requireRole('tm'), async (req, res) => {
     let rows = since
       ? await fetchViewByDate(viewId, since, '9999-12-31')
       : await fetchView(viewId);
-    // Scope the metrics view (drives the whole dashboard) to the caller.
-    if (req.params.key === 'User_metrics_3') rows = scopeMetricsRows(req.user, rows);
+    // Scope EVERY feed to the caller so roles only ever limit WHICH rows are
+    // returned — never the formulas or the figures computed from them.
+    if (req.params.key === 'User_metrics_3') {
+      rows = scopeMetricsRows(req.user, rows);
+    } else if (!seesAllScope(req.user)) {
+      // Attendance & EmployeeProfile have no campaign/team column, so we narrow
+      // them to the caller's agents by name. admin/exco skip this entirely.
+      const keys = await allowedNameKeys(req.user);
+      if (req.params.key === 'EmployeeProfile') {
+        rows = rows.filter(r => nameAllowed(profileName(r), keys));
+      } else if (req.params.key === 'AttendanceUserReport') {
+        // Attendance keys people by Zoho People ID; map allowed names → IDs via
+        // EmployeeProfile, then keep only those rows.
+        const profiles = await fetchView(VIEW.employee);
+        const allowedIds = new Set();
+        for (const p of profiles) {
+          if (!nameAllowed(profileName(p), keys)) continue;
+          const id = String(p['ID'] ?? p.id ?? p.employee_id ?? '');
+          if (id) allowedIds.add(id);
+        }
+        rows = rows.filter(r => allowedIds.has(String(r['Employee'] ?? r.employee ?? '')));
+      }
+    }
     // Match the shape the existing extractRows() in index.html expects.
     res.json({ data: rows });
   } catch (err) {

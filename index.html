@@ -2554,7 +2554,7 @@ function render() {
   // Footer
   const now = new Date();
   $('footer').innerHTML = `
-    <span>Boomerang BPO · Operations Dashboard v29 · Range required-hours honour per-month targets</span>
+    <span>Boomerang BPO · Operations Dashboard v30 · Reliable shrinkage feed + consistent per-role scoping</span>
     <span>Source: ${STATE.dataSource === 'live' ? 'Zoho User_metrics_3 (live)' : 'Embedded W19–W22 snapshot'} · Rendered ${now.toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})}</span>
   `;
   // Granularity toggle active state
@@ -4093,8 +4093,19 @@ function renderSummary() {
       + ${Math.round(addHrsPeriod).toLocaleString()}h approved additional this ${periodNoun()}.
     </div>` : '';
 
+  // Make a degraded/attendance-outage state OBVIOUS rather than silently showing
+  // different numbers: without the attendance feed, Shrinkage & Absence are
+  // hidden and Billable falls back to the (smaller) User_metrics_3 figure.
+  const attendanceNote = STATE.attendanceMissing ? `
+    <div class="err-banner show" style="background:rgba(239,68,68,.10);border-color:rgba(239,68,68,.45);color:var(--red-text);margin-bottom:12px">
+      ⚠ Attendance data unavailable — Shrinkage & Absence are hidden and Billable/Slippage may be understated (falling back to User_metrics_3). Retrying automatically.
+    </div>` : (STATE.attendanceStale ? `
+    <div class="err-banner show" style="background:rgba(245,158,11,.08);border-color:rgba(245,158,11,.4);color:var(--amber-text);margin-bottom:12px">
+      ⚠ Attendance feed didn't refresh this cycle — showing last-known shrinkage data.
+    </div>` : '');
+
   $('summaryView').innerHTML = `
-    ${unmatchedNote}${nonBillableNote}${additionalNote}
+    ${attendanceNote}${unmatchedNote}${nonBillableNote}${additionalNote}
     <div class="hero-row">${heroCards}</div>
     <div class="sum-grid2">
       <div class="chart-card">
@@ -4986,8 +4997,19 @@ function applyData(rows, attendanceRows, empProfileRows) {
 
   // Cache raw attendance + profile rows so shrinkage can be re-bucketed when
   // the granularity changes, then build it for the current granularity.
-  STATE.rawAttRows = (attendanceRows && attendanceRows.length) ? attendanceRows : null;
-  STATE.rawEmpRows = (empProfileRows && empProfileRows.length) ? empProfileRows : null;
+  // IMPORTANT: only overwrite when this fetch actually returned rows. A failed
+  // or empty refresh must NOT wipe the last-good data — otherwise a transient
+  // blip silently drops Shrinkage/Absence and flips Billable to the (smaller)
+  // User_metrics_3 source, making one session look materially different from
+  // another for the same day. Keep the previous rows and flag the failure.
+  const attOk = !!(attendanceRows && attendanceRows.length);
+  const empOk = !!(empProfileRows && empProfileRows.length);
+  if (attOk) STATE.rawAttRows = attendanceRows;
+  if (empOk) STATE.rawEmpRows = empProfileRows;
+  // True when we have no usable shrinkage feed at all (never loaded / all failed).
+  STATE.attendanceMissing = !STATE.rawAttRows || !STATE.rawEmpRows;
+  // True when this cycle failed to refresh but we're still showing cached rows.
+  STATE.attendanceStale = (!attOk || !empOk) && !STATE.attendanceMissing;
   rebuildShrinkage();
   applyShiftBillable();
 
@@ -5011,10 +5033,23 @@ function showErr(msg) {
 
 // Fetch all three sources in parallel; shrinkage sources can fail without
 // breaking the primary dashboard.
+// Retry a fetch a couple of times with backoff before giving up — the shrinkage
+// feeds (Attendance / EmployeeProfile) are large and occasionally 502/timeout,
+// and a single miss shouldn't degrade the whole session's numbers.
+async function fetchWithRetry(fn, label, tries = 3) {
+  for (let i = 0; i < tries; i++) {
+    try { return await fn(); }
+    catch (e) {
+      if (i === tries - 1) { console.warn(`${label} fetch failed (gave up after ${tries}):`, e.message); return null; }
+      await new Promise(r => setTimeout(r, 600 * (i + 1)));
+    }
+  }
+  return null;
+}
 async function fetchAll() {
   const primaryPromise = fetchLiveData();
-  const attendancePromise = fetchAttendance().catch(e => { console.warn('Attendance fetch failed:', e.message); return null; });
-  const empProfilePromise = fetchEmployeeProfile().catch(e => { console.warn('Employee Profile fetch failed:', e.message); return null; });
+  const attendancePromise = fetchWithRetry(fetchAttendance, 'Attendance');
+  const empProfilePromise = fetchWithRetry(fetchEmployeeProfile, 'Employee Profile');
 
   const primary = await primaryPromise;  // primary failure throws & lets caller fall back
   const [attendance, empProfile] = await Promise.all([attendancePromise, empProfilePromise]);
