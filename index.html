@@ -107,7 +107,19 @@ input:focus-visible,select:focus-visible{outline:none;border-color:var(--accent)
 .creds-tbl{margin-top:8px;width:100%}
 .creds-tbl td,.creds-tbl th{padding:6px 10px;text-align:left}
 .team-row td{background:var(--accent-soft);font-size:12px;padding:8px 12px;border-top:2px solid var(--accent-dim)}
-.weeks{display:flex;gap:3px;flex-wrap:wrap}
+.weeks{display:flex;gap:3px}
+.period-picker{position:relative}
+.period-trigger{display:flex;align-items:center;gap:8px;font-size:12px;font-weight:500;padding:7px 13px;border-radius:8px;cursor:pointer;border:1px solid var(--border-light);background:var(--bg-2);color:var(--text);font-family:inherit;white-space:nowrap}
+.period-trigger:hover{border-color:var(--border-strong)}
+.period-trigger .chev{font-size:10px;color:var(--text3)}
+.period-trigger .rng{color:var(--accent)}
+.period-pop{position:absolute;top:calc(100% + 6px);left:0;z-index:200;background:var(--card);border:1px solid var(--border-light);border-radius:12px;box-shadow:var(--shadow);padding:12px;display:none;min-width:320px;max-width:min(560px,90vw)}
+.period-pop.open{display:block}
+.period-grid{display:flex;flex-wrap:wrap;gap:3px;max-height:230px;overflow-y:auto}
+.period-range{display:flex;align-items:center;gap:8px;margin-top:10px;padding-top:10px;border-top:1px solid var(--border-light);flex-wrap:wrap}
+.period-range label{font-size:11px;color:var(--text3);display:flex;align-items:center;gap:5px}
+.period-range input[type=date]{font-size:12px;padding:5px 8px;border:1px solid var(--border-light);border-radius:6px;background:var(--bg-2);color:var(--text);font-family:inherit}
+.period-range-btn{font-size:11px;padding:5px 11px}
 .wk-btn{font-size:11px;font-weight:500;padding:5px 11px;border-radius:6px;cursor:pointer;border:1px solid var(--border-light);background:transparent;color:var(--text3);transition:all .15s;font-family:var(--mono)}
 .ttip{position:fixed;transform:translate(-50%,-100%);background:var(--bg-2);border:1px solid var(--border-strong);color:var(--text);font-size:11px;font-family:var(--mono);padding:5px 9px;border-radius:7px;box-shadow:var(--shadow);white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .12s;z-index:2000}
 .ttip.show{opacity:1}
@@ -820,9 +832,37 @@ function additionalHrsTotal(periodLabel) {
 
 function ymLabel(mo) { const [y, m] = mo.split('-'); return `${_MONTH_NAMES[+m - 1]} ${y}`; }
 
+// ── Custom day-range period ────────────────────────────────────────────────
+// A range is ONE synthetic bucket spanning [from..to] inclusive, labelled
+// "R:YYYY-MM-DD..YYYY-MM-DD". When STATE.rangeBounds is set the bucketers route
+// every in-range day into this single bucket, so all KPIs re-aggregate across
+// the span with correct averages (it re-runs the normal aggregation on the raw
+// daily rows rather than re-combining pre-averaged day buckets).
+function rangeLabel() {
+  const rb = STATE.rangeBounds;
+  return rb ? `R:${rb.from}..${rb.to}` : null;
+}
+function parseRangeLabel(label) {
+  const m = typeof label === 'string' && label.match(/^R:(\d{4}-\d{2}-\d{2})\.\.(\d{4}-\d{2}-\d{2})$/);
+  return m ? { from: m[1], to: m[2] } : null;
+}
+function dateInRange(d) {
+  const rb = STATE.rangeBounds;
+  if (!rb || !d) return false;
+  const s = d.toISOString().slice(0, 10);
+  return s >= rb.from && s <= rb.to;
+}
+function rangeDayCount(rb = STATE.rangeBounds) {
+  if (!rb) return 0;
+  const a = parseDate(rb.from), b = parseDate(rb.to);
+  return a && b ? Math.round((b - a) / 86400000) + 1 : 0;
+}
+
 // The YYYY-MM a given period falls in (granularity-aware).
 function periodToYearMonth(label, gran) {
   if (label == null) return null;
+  const rg = parseRangeLabel(label);
+  if (rg) { const d = parseDate(rg.from); return d ? `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}` : null; }
   if (gran === 'day') {
     const d = parseDate(label);
     return d ? `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}` : null;
@@ -853,6 +893,8 @@ function rulesForPeriod(periodLabel) {
 // [start,end] UTC dates spanned by a period label at a given granularity.
 function periodDateRange(label, gran) {
   if (label == null) return null;
+  const rg = parseRangeLabel(label);
+  if (rg) { const s = parseDate(rg.from), e = parseDate(rg.to); return s && e ? { start: s, end: e } : null; }
   if (gran === 'day') { const d = parseDate(label); return d ? { start: d, end: d } : null; }
   if (gran === 'month') {
     const m = String(label).match(/^([A-Za-z]{3})\s+(\d{4})$/);
@@ -895,8 +937,10 @@ function periodElapsedFraction(label, gran) {
 // monthly, so week/day are pro-rated. Used by slippage.
 function reqHrsForPeriod(ar) {
   if (!ar) return 0;
+  const perDay = ar.req_hrs_month / (WEEKS_PER_MONTH * 7);
+  if (STATE.rangeBounds) return perDay * rangeDayCount();  // range = sum of its days
   if (STATE.granularity === 'month') return ar.req_hrs_month;
-  if (STATE.granularity === 'day')   return ar.req_hrs_month / (WEEKS_PER_MONTH * 7);
+  if (STATE.granularity === 'day')   return perDay;
   return ar.req_hrs_week;  // week
 }
 
@@ -1365,6 +1409,7 @@ let STATE = {
   shrinkageTeamWeek: null,    // {[camp||team]:{[week]:{...}}}
   shrinkageAvailable: false,
   granularity: 'week',   // 'day' | 'week' | 'month' — re-aggregation grain
+  rangeBounds: null,     // {from,to} YYYY-MM-DD → custom day range (one combined bucket)
   weeks: [],             // period labels for the current granularity
   selectedWeek: null,    // selected period label
   selectedCampaign: null,
@@ -1486,6 +1531,7 @@ function rowDate(r) {
 
 // Derive the bucket key for a row at the given granularity.
 function periodKeyFor(r, gran) {
+  if (STATE.rangeBounds) { const d = rowDate(r); return d && dateInRange(d) ? rangeLabel() : null; }
   if (gran === 'week') return r.Weeks || null;
   const d = rowDate(r);
   if (gran === 'month') {
@@ -1502,6 +1548,7 @@ function periodKeyFor(r, gran) {
 // periodKeyFor() so shrinkage buckets line up with the metric buckets at every
 // granularity (week → "W23, 2026", month → "Jun 2026", day → "YYYY-MM-DD").
 function periodKeyForDate(dateStr, gran) {
+  if (STATE.rangeBounds) { const d = parseDate(dateStr); return d && dateInRange(d) ? rangeLabel() : null; }
   if (gran === 'week') return dateToWeekLabel(dateStr);
   const d = parseDate(dateStr);
   if (!d) return dateToWeekLabel(dateStr);
@@ -1542,6 +1589,12 @@ function periodSortVal(label, gran) {
 // Compact, human-friendly label for the period nav / captions.
 function fmtPeriodLabel(label, gran) {
   if (label == null) return '';
+  const rg = parseRangeLabel(label);
+  if (rg) {
+    const a = parseDate(rg.from), b = parseDate(rg.to);
+    const f = (d) => `${d.getUTCDate()} ${_MONTH_NAMES[d.getUTCMonth()]}`;
+    return a && b ? `${f(a)} – ${f(b)}` : label;
+  }
   if (gran === 'day') {
     const d = parseDate(label);
     if (d) return `${d.getUTCDate()} ${_MONTH_NAMES[d.getUTCMonth()]}`;
@@ -2304,10 +2357,23 @@ function applyShiftBillable() {
   }
 }
 function setGranularity(g) {
-  if (g === STATE.granularity) return;
+  if (g === STATE.granularity && !STATE.rangeBounds) return;
+  STATE.rangeBounds = null;     // switching to a standard grain exits range mode
   STATE.granularity = g;
   STATE.selectedWeek = null;   // force re-pick within the new period set
   rebuildAggregates();
+  render();
+}
+// Activate a custom day range: one combined bucket spanning [from..to]. Re-runs
+// the normal aggregation with in-range days routed into a single bucket.
+function setDayRange(from, to) {
+  if (!from || !to) return;
+  if (from > to) { const t = from; from = to; to = t; }  // tolerate reversed input
+  STATE.rangeBounds = { from, to };
+  STATE.granularity = 'day';    // a range is day-based
+  STATE.selectedWeek = null;
+  rebuildAggregates();          // builds the single combined bucket
+  STATE.selectedWeek = rangeLabel();
   render();
 }
 
@@ -2423,19 +2489,22 @@ function resetTargetsEditor() {
   render();
 }
 
+let _periodPopOpen = false;      // period picker popover open/closed
+let _periodOutsideBound = false; // guard: outside-click listener bound once
 function render() {
   $('loadingView').style.display = 'none';
   // Footer
   const now = new Date();
   $('footer').innerHTML = `
-    <span>Boomerang BPO · Operations Dashboard v27 · Billable hours exclude paid breaks</span>
+    <span>Boomerang BPO · Operations Dashboard v28 · Collapsible period picker + custom day range</span>
     <span>Source: ${STATE.dataSource === 'live' ? 'Zoho User_metrics_3 (live)' : 'Embedded W19–W22 snapshot'} · Rendered ${now.toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})}</span>
   `;
   // Granularity toggle active state
   document.querySelectorAll('#granNav .gran-btn').forEach(b =>
     b.classList.toggle('act', b.dataset.gran === STATE.granularity));
 
-  // Period nav (day / week / month buckets for the current granularity)
+  // Period nav — a compact collapsible picker (the chip grid lives in a popover
+  // so a long day list no longer fills the screen, and it closes on selection).
   const wn = $('weekNav');
   const fday = (d) => `${String(d.getUTCDate()).padStart(2,'0')} ${_MONTH_NAMES[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
   const periodTitle = (w) => {
@@ -2443,10 +2512,59 @@ function render() {
     if (!r) return pLbl(w);
     return r.start.getTime() === r.end.getTime() ? fday(r.start) : `${fday(r.start)} – ${fday(r.end)}`;
   };
-  wn.innerHTML = STATE.weeks.map(w =>
+  const rangeActive = !!STATE.rangeBounds;
+  const chips = STATE.weeks.map(w =>
     `<button class="wk-btn${w === STATE.selectedWeek ? ' act' : ''}" data-wk="${w}" data-tip="${periodTitle(w)}">${pLbl(w)}</button>`
-  ).join('');
-  wn.querySelectorAll('.wk-btn').forEach(b => b.onclick = () => setWeek(b.dataset.wk));
+  ).join('') || '<span class="dim" style="padding:6px 4px;font-size:12px">No periods</span>';
+  const triggerLbl = STATE.selectedWeek ? pLbl(STATE.selectedWeek) : 'Select period';
+  const rangePanel = STATE.granularity === 'day' ? `
+      <div class="period-range">
+        <label>From <input type="date" id="rangeFrom" value="${STATE.rangeBounds?.from || ''}"></label>
+        <label>To <input type="date" id="rangeTo" value="${STATE.rangeBounds?.to || ''}"></label>
+        <button class="btn-ghost period-range-btn" id="rangeApply">Apply range</button>
+        ${rangeActive ? '<button class="btn-ghost period-range-btn" id="rangeClear">Clear</button>' : ''}
+      </div>` : '';
+  wn.innerHTML = `
+    <div class="period-picker">
+      <button class="period-trigger" id="periodTrigger" title="${periodTitle(STATE.selectedWeek)}">
+        <span class="${rangeActive ? 'rng' : ''}">${triggerLbl}</span><span class="chev">▾</span>
+      </button>
+      <div class="period-pop${_periodPopOpen ? ' open' : ''}" id="periodPop">
+        <div class="period-grid">${chips}</div>
+        ${rangePanel}
+      </div>
+    </div>`;
+  $('periodTrigger').onclick = (e) => {
+    e.stopPropagation();
+    _periodPopOpen = !_periodPopOpen;
+    $('periodPop').classList.toggle('open', _periodPopOpen);
+  };
+  wn.querySelectorAll('.wk-btn').forEach(b => b.onclick = () => { _periodPopOpen = false; setWeek(b.dataset.wk); });
+  const applyBtn = $('rangeApply');
+  if (applyBtn) applyBtn.onclick = () => {
+    const f = $('rangeFrom').value, t = $('rangeTo').value;
+    if (!f || !t) { alert('Pick both a From and a To date.'); return; }
+    _periodPopOpen = false;
+    setDayRange(f, t);
+  };
+  const clearBtn = $('rangeClear');
+  if (clearBtn) clearBtn.onclick = () => {
+    _periodPopOpen = false;
+    STATE.rangeBounds = null; STATE.selectedWeek = null;
+    rebuildAggregates(); render();
+  };
+  // Close the popover on an outside click (bound once).
+  if (!_periodOutsideBound) {
+    _periodOutsideBound = true;
+    document.addEventListener('click', (e) => {
+      if (!_periodPopOpen) return;
+      if (!e.target.closest('.period-picker')) {
+        _periodPopOpen = false;
+        const p = document.getElementById('periodPop');
+        if (p) p.classList.remove('open');
+      }
+    });
+  }
 
   if (STATE.view === 'summary') renderSummary();
   else if (STATE.view === 'campaigns') renderCampaigns();
