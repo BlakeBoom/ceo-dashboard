@@ -2175,10 +2175,13 @@ function overlayAttendanceHeadcount() {
   }
 }
 // ── Billable from Attendance, attributed by Shift ───────────────────────────
-// Billable = (Payable Hours (Min) − Unpaid Break (Min))/60 per attendance row,
-// bucketed by the campaign named in the Shift column (so an agent who works
-// both UK and US shifts is split correctly). Overrides the workgroup-based
-// billable from User_metrics_3 wherever attendance covers a campaign/period.
+// Billable = (Payable Hours (Min) − Unpaid Break (Min) − Paid Break (Min))/60
+// per attendance row. Paid breaks are subtracted too because clients aren't
+// invoiced for break time, paid or unpaid — including them over-reports billable
+// vs the invoices. Bucketed by the campaign named in the Shift column (so an
+// agent who works both UK and US shifts is split correctly). Overrides the
+// workgroup-based billable from User_metrics_3 wherever attendance covers a
+// campaign/period.
 function buildBillableByShift(attRows, empProfileRows, agentMeta, gran) {
   const nameMatch = buildNameMatcher(empProfileRows);
   const empToUid = new Map();
@@ -2199,7 +2202,8 @@ function buildBillableByShift(attRows, empProfileRows, agentMeta, gran) {
   for (const row of attRows) {
     const payable = +row['Payable Hours (Mins)'] || parseHMS(row['Payable Hours']) || 0;
     const unpaid  = +row['Unpaid Break (Mins)']  || parseHMS(row['Unpaid Break']) || 0;
-    const hrs = Math.max(0, payable - unpaid) / 60;
+    const paid    = +row['Paid Break (Mins)']    || parseHMS(row['Paid Break']) || 0;
+    const hrs = Math.max(0, payable - unpaid - paid) / 60;
     if (hrs <= 0) continue;
     const date = parseDate(row['Date'] ?? row.date);
     const week = periodKeyForDate(row['Date'] ?? row.date, gran);
@@ -2424,7 +2428,7 @@ function render() {
   // Footer
   const now = new Date();
   $('footer').innerHTML = `
-    <span>Boomerang BPO · Operations Dashboard v26 · Absence KPI matches Zoho Absent% (catch-all = absent)</span>
+    <span>Boomerang BPO · Operations Dashboard v27 · Billable hours exclude paid breaks</span>
     <span>Source: ${STATE.dataSource === 'live' ? 'Zoho User_metrics_3 (live)' : 'Embedded W19–W22 snapshot'} · Rendered ${now.toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})}</span>
   `;
   // Granularity toggle active state
