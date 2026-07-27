@@ -3453,7 +3453,7 @@ const USERS_STATE = {
   loaded: false, loading: false, users: [], error: null,
   busy: false, preview: null, justCreated: [],
   deptViewId: localStorage.getItem('provisionDeptViewId') || '',
-  campaigns: [], teams: [], editingId: null,
+  campaigns: [], teams: [], editingId: null, search: '',
 };
 
 async function loadUsers() {
@@ -3475,14 +3475,24 @@ async function loadUsers() {
 
 async function saveUserEdit(id, rowEl) {
   const get = (f) => rowEl.querySelector(`[data-uf="${f}"]`)?.value;
+  const orig = USERS_STATE.users.find(u => u.id === id) || {};
   const body = {
     role: get('role'),
     campaign_id: get('campaign_id') ? parseInt(get('campaign_id'), 10) : null,
     team_id: get('team_id') ? parseInt(get('team_id'), 10) : null,
   };
+  const name = (get('full_name') || '').trim();
+  const email = (get('email') || '').trim();
+  if (name && name !== orig.full_name) body.full_name = name;
+  if (email !== (orig.email || '') && (email || orig.email)) body.email = email || null;
+  if (!name) { alert('Name is required.'); return; }
   const r = await apiFetch(`/api/users/${id}`, { method: 'PATCH', body: JSON.stringify(body) });
   if (r.ok) { USERS_STATE.editingId = null; loadUsers(); }
-  else { alert('Save failed: ' + (await r.text()).slice(0, 160)); }
+  else {
+    const text = await r.text();
+    let data; try { data = JSON.parse(text); } catch { data = {}; }
+    alert('Save failed: ' + (data.error === 'email_exists' ? 'that email already exists' : (data.error || text.slice(0, 160))));
+  }
 }
 
 async function createUser() {
@@ -3570,8 +3580,14 @@ function renderUsers() {
   if (!u || u.role !== 'admin') { $('usersView').innerHTML = '<div class="flag-empty" style="padding:32px">Admins only.</div>'; return; }
   if (!USERS_STATE.loaded) { USERS_STATE.loaded = true; loadUsers(); }
 
-  const us = USERS_STATE.users;
-  const counts = us.reduce((a, x) => (a[x.role] = (a[x.role] || 0) + 1, a), {});
+  const allUsers = USERS_STATE.users;
+  const q = (USERS_STATE.search || '').trim().toLowerCase();
+  const us = q ? allUsers.filter(x => {
+    const roleLbl = (_roleLabel[x.role] || x.role || '').toLowerCase();
+    return [x.full_name, x.email, x.campaign_name, x.team_name, x.job_title, roleLbl, x.role]
+      .some(v => v && String(v).toLowerCase().includes(q));
+  }) : allUsers;
+  const counts = allUsers.reduce((a, x) => (a[x.role] = (a[x.role] || 0) + 1, a), {});
   const summaryLine = ['admin','campaign_lead','tm','agent']
     .filter(r => counts[r]).map(r => `${counts[r]} ${_roleLabel[r]}${counts[r]>1?'s':''}`).join(' · ');
 
@@ -3648,8 +3664,8 @@ function renderUsers() {
   const rows = us.map(x => {
     if (x.id === USERS_STATE.editingId) {
       return `<tr data-id="${x.id}">
-        <td class="name">${x.full_name}</td>
-        <td class="mono dim">${x.email || '—'}</td>
+        <td class="name"><input data-uf="full_name" class="modal-month" value="${esc(x.full_name)}" style="font-size:12px;padding:4px 6px;width:150px"></td>
+        <td class="mono dim"><input data-uf="email" class="modal-month" value="${esc(x.email||'')}" placeholder="—" style="font-size:11px;padding:4px 6px;width:180px"></td>
         <td>${sel('role', roleOpts, x.role)}</td>
         <td data-camp-cell>${sel('campaign_id', campOpts, x.campaign_id)}</td>
         <td data-team-cell>${sel('team_id', teamOptsFor(x.campaign_id), x.team_id)}</td>
@@ -3685,9 +3701,10 @@ function renderUsers() {
     <div class="agent-tbl-head" style="background:var(--card);border:1px solid var(--border-light);border-radius:12px 12px 0 0;border-bottom:none">
       <div style="flex:1">
         <div style="font-weight:600">User accounts</div>
-        <div class="agent-tbl-sub">${us.length} account${us.length===1?'':'s'}${summaryLine?` · ${summaryLine}`:''}</div>
+        <div class="agent-tbl-sub">${q ? `${us.length} of ${allUsers.length} match` : `${allUsers.length} account${allUsers.length===1?'':'s'}${summaryLine?` · ${summaryLine}`:''}`}</div>
       </div>
       <div style="display:flex;align-items:center;gap:8px">
+        <input id="usersSearch" class="modal-month" placeholder="🔍 Search name, email, campaign, team, role…" value="${esc(USERS_STATE.search||'')}" style="font-size:12px;padding:7px 10px;width:280px">
         <button id="usersNewBtn" class="btn-ghost">+ New user</button>
         <input id="usersDeptView" class="modal-month" placeholder="Department view ID" title="Zoho Analytics view ID for the Department lookup table" value="${USERS_STATE.deptViewId||''}" style="font-size:12px;padding:7px 10px;width:170px">
         <button id="usersPreviewBtn" class="btn-primary" ${USERS_STATE.busy?'disabled':''}>↻ Provision from EmployeeProfile</button>
@@ -3722,11 +3739,20 @@ function renderUsers() {
       `<div class="agent-tbl-wrap" style="border-radius:0 0 12px 12px;border-top:none">
         <table class="agent-tbl">
           <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Campaign</th><th>Team</th><th>Job title</th><th class="numeric">Last login</th><th>Status</th><th></th></tr></thead>
-          <tbody>${rows || '<tr><td colspan="9" class="flag-empty" style="padding:24px">No users yet — click <b>Provision from EmployeeProfile</b>.</td></tr>'}</tbody>
+          <tbody>${rows || (q ? `<tr><td colspan="9" class="flag-empty" style="padding:24px">No users match “${esc(q)}”.</td></tr>` : '<tr><td colspan="9" class="flag-empty" style="padding:24px">No users yet — click <b>Provision from EmployeeProfile</b>.</td></tr>')}</tbody>
         </table>
       </div>`}
   `;
 
+  const searchEl = $('usersSearch');
+  if (searchEl) {
+    searchEl.addEventListener('input', (e) => {
+      USERS_STATE.search = e.target.value;
+      renderUsers();
+      const s = $('usersSearch');
+      if (s) { s.focus(); try { s.setSelectionRange(s.value.length, s.value.length); } catch {} }
+    });
+  }
   $('usersNewBtn')?.addEventListener('click', () => { USERS_STATE.showCreate = !USERS_STATE.showCreate; renderUsers(); });
   $('nu_save')?.addEventListener('click', createUser);
   $('nu_cancel')?.addEventListener('click', () => { USERS_STATE.showCreate = false; renderUsers(); });
