@@ -71,6 +71,8 @@ const createSchema = z.object({
 // Any of these change what the user can see, so bump token_version to refresh
 // their session immediately.
 const updateSchema = z.object({
+  full_name: z.string().min(1).max(200).optional(),
+  email: z.string().email().max(254).optional(),
   role: z.enum(['agent', 'tm', 'campaign_lead', 'exco', 'admin']).optional(),
   campaign_id: z.number().int().positive().nullable().optional(),
   team_id: z.number().int().positive().nullable().optional(),
@@ -100,6 +102,7 @@ router.patch('/:id', requireRole('admin'), async (req, res) => {
     );
     res.json({ user: rows[0] });
   } catch (err) {
+    if (err.code === '23505') return res.status(409).json({ error: 'email_exists' });
     if (err.code === '23503') return res.status(400).json({ error: 'invalid_campaign_or_team' });
     throw err;
   }
