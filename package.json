@@ -9,7 +9,8 @@
     "start": "node server/src/index.js",
     "dev": "node --watch server/src/index.js",
     "migrate": "node server/src/migrate.js",
-    "seed": "node server/src/seed.js"
+    "seed": "node server/src/seed.js",
+    "test": "node --test"
   },
   "engines": {
     "node": ">=20.0.0"

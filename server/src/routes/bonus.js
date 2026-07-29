@@ -2,6 +2,10 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { query } from '../db.js';
 import { scopeClause, requireRole, seesAllScope } from '../rbac.js';
+// Shared name normaliser (see /shared/names.js) — same logic the dashboard and
+// the other server routes use for name matching.
+import '../../../shared/names.js';
+const { normalizeName } = globalThis.BoomerangNames;
 
 const router = Router();
 
@@ -207,7 +211,7 @@ router.get('/awards', async (req, res) => {
   // matches we return empty + a flag rather than leaking the whole campaign.
   let teamMatch = true;
   if (req.user.role === 'tm' && req.user.team_id == null) {
-    const norm = (s) => String(s ?? '').toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim();
+    const norm = normalizeName;
     const me = norm(req.user.team_name) || norm(req.user.full_name);
     const mine = rows.filter(r => r.tm_name && norm(r.tm_name) === norm(req.user.full_name)
                                || me && norm(r.team_name) === me);

@@ -16,6 +16,11 @@ import crypto from 'node:crypto';
 import { query, withTx } from './db.js';
 import { fetchView, VIEW } from './zoho.js';
 import { hashPassword } from './auth.js';
+// Shared name helpers (see /shared/names.js). The duplicate-merge below matches
+// on normalised name then first+last, so it reuses the same normaliser as the
+// dashboard/sync rather than its own copy.
+import '../../shared/names.js';
+const { normalizeName: mergeNorm, firstLastKey: mergeFirstLast } = globalThis.BoomerangNames;
 
 // Companion tables that EmployeeProfile lookup ids resolve against.
 const JOB_TITLE_VIEW_ID = '2292884000019602033'; // Job description table
@@ -553,15 +558,6 @@ function topTally(arr, n) {
 // move metrics/awards + zoho_user_id + team onto the login row, deactivate the
 // bare row. Matching is normalised-name, then first+last, within a campaign.
 
-function mergeNorm(s) {
-  return String(s ?? '').toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim();
-}
-function mergeFirstLast(s) {
-  const n = mergeNorm(s);
-  const parts = n.split(' ');
-  return parts.length >= 2 ? `${parts[0]} ${parts[parts.length - 1]}` : null;
-}
-
 export async function mergeSyncDuplicates() {
   const { rows: bare } = await query(
     `SELECT id, full_name, campaign_id, team_id, zoho_user_id
@@ -584,8 +580,12 @@ export async function mergeSyncDuplicates() {
   const merges = [];
   const usedTargets = new Set();
   for (const s of bare) {
-    const p = byKey.get(`${s.campaign_id}:${mergeNorm(s.full_name)}`)
-           || byKey.get(`${s.campaign_id}:${mergeFirstLast(s.full_name)}`);
+    // mergeNorm/mergeFirstLast can be null (empty/blank name); guard before
+    // building the lookup key so we never form a "cid:null" key that could
+    // collide with a real login whose name literally normalises to "null".
+    const nk = mergeNorm(s.full_name), fk = mergeFirstLast(s.full_name);
+    const p = (nk && byKey.get(`${s.campaign_id}:${nk}`))
+           || (fk && byKey.get(`${s.campaign_id}:${fk}`));
     if (p && p.id !== s.id && !usedTargets.has(p.id)) {
       usedTargets.add(p.id);
       merges.push({ fromId: s.id, toId: p.id, zuid: s.zoho_user_id, teamId: s.team_id });

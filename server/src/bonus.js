@@ -1,18 +1,20 @@
 // Bonus computation engine. Pure functions: given raw Zoho rows + rule_json,
 // produce a metrics object per agent and a computed award.
 
+// Name-matching helpers are shared with the dashboard and the other server
+// routes — one source of truth in /shared/names.js (a no-import/export file so
+// the same source loads in the browser and here). buildTeamCanonMap is
+// re-exported because sync.js imports it from this module.
+import '../../shared/names.js';
+const { normalizeName: normName, firstLastKey, stripKnownNameSuffix } = globalThis.BoomerangNames;
+export const buildTeamCanonMap = globalThis.BoomerangNames.buildTeamCanonMap;
+
 const DEFAULT_UNPLANNED_STATUSES = [
   'Sick Leave', 'Sick Leave Shifts',
   'Absent', 'No Show',
   'Unpaid Leave', 'Unpaid Leave Shifts',
   'AWOL', 'System Downtime',
 ];
-
-// Normalise a name for matching across views (User_metrics_3 vs EmployeeProfile).
-function normName(s) {
-  if (!s) return null;
-  return String(s).toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim();
-}
 
 // Aggregate User_metrics_3 daily rows → per-agent monthly metrics.
 // rule.productivity_column tells us which column to SUM for productivity
@@ -73,69 +75,6 @@ export function aggregateCallouts(attRows, { unplannedStatuses = DEFAULT_UNPLANN
     counts.set(empId, (counts.get(empId) || 0) + 1);
   }
   return counts;
-}
-
-// First + last name only, e.g. "john michael smith" → "john smith".
-// Handles middle names being added/dropped between the two views.
-function firstLastKey(s) {
-  const n = normName(s);
-  if (!n) return null;
-  const parts = n.split(' ');
-  return parts.length >= 2 ? `${parts[0]} ${parts[parts.length - 1]}` : null;
-}
-
-// Drop a trailing "(...)" suffix, e.g. "John Smith (MedExpress)" → "John Smith".
-function stripKnownNameSuffix(s) {
-  if (!s) return null;
-  return String(s).replace(/\s*\([^)]+\)\s*$/, '').trim();
-}
-
-// Collapse inconsistent team-leader spellings to a single canonical name so one
-// team isn't split across "Elzette" and "Elzette Saaiman". Mirror of
-// buildTeamCanonMap in index.html: group by first name; when a first name maps
-// to exactly one full identity, every variant (incl. the bare first name) folds
-// into the longest spelling; when a first name is shared by different people,
-// only exact first+last duplicates merge so distinct leaders are never fused.
-// Returns a Map(name -> canonicalName) for names that should be remapped.
-export function buildTeamCanonMap(names) {
-  const map = new Map();
-  const info = [];
-  // Names arrive as "<Leader>'s team"; strip the possessive + trailing "team"
-  // word so the apostrophe-s ("elzettes") doesn't corrupt the first-name token.
-  const canonKey = (n) => normName(String(n).replace(/['’]s\b/gi, '').replace(/\bteam\b/gi, ''));
-  for (const n of names) {
-    if (!n) continue;
-    const k = canonKey(n) || '';
-    const toks = k ? k.split(' ') : [];
-    if (!toks.length) continue;
-    const fl = toks.length >= 2 ? `${toks[0]} ${toks[toks.length - 1]}` : null;
-    info.push({ n, k, toks, first: toks[0], fl });
-  }
-  const byFirst = new Map();
-  for (const it of info) {
-    if (!byFirst.has(it.first)) byFirst.set(it.first, []);
-    byFirst.get(it.first).push(it);
-  }
-  const longest = gs => gs.slice().sort((a, b) => b.k.length - a.k.length)[0].n;
-  for (const group of byFirst.values()) {
-    const fullFls = new Set(group.filter(g => g.toks.length >= 2).map(g => g.fl));
-    if (fullFls.size === 1) {
-      const canonical = longest(group);
-      for (const g of group) map.set(g.n, canonical);
-    } else {
-      const byFl = new Map();
-      for (const g of group) {
-        if (g.toks.length < 2) continue;   // ambiguous bare first name → leave as-is
-        if (!byFl.has(g.fl)) byFl.set(g.fl, []);
-        byFl.get(g.fl).push(g);
-      }
-      for (const gs of byFl.values()) {
-        const canonical = longest(gs);
-        for (const g of gs) map.set(g.n, canonical);
-      }
-    }
-  }
-  return map;
 }
 
 // Build employee_id → user_id map by matching names across User_metrics_3

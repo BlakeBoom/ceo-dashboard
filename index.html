@@ -527,7 +527,15 @@ svg.ring .rs{font-size:8px;letter-spacing:.5px;text-transform:uppercase}
   <div class="footer" id="footer"></div>
 </div>
 
+<!-- Shared name helpers, loaded as a CLASSIC script BEFORE the inline app
+     script so BoomerangNames is in scope below. Must not be type="module"
+     (module scripts defer and would run after this classic script). -->
+<script src="/shared/names.js"></script>
 <script>
+// Shared name-matching helpers live in /shared/names.js (one source of truth
+// for the server too). Pull them into scope so the call sites below are
+// unchanged.
+const { normalizeName, firstLastKey, stripKnownNameSuffix, buildTeamCanonMap } = globalThis.BoomerangNames;
 // ════════════════════════════════════════════════════════════════════════
 // CONFIGURATION
 // ════════════════════════════════════════════════════════════════════════
@@ -1260,21 +1268,9 @@ function roleIsBillable(role, campKey, ym) {
 //   2. First + Last only (handles middle name additions/removals)
 //   3. Prefix match (handles User_metrics_3's apparent 30-char truncation)
 // Empirical match rate against sample data: ~99%
+// normalizeName / firstLastKey / stripKnownNameSuffix come from
+// /shared/names.js (destructured at the top of this script).
 // ════════════════════════════════════════════════════════════════════════
-function normalizeName(s) {
-  if (!s) return null;
-  return String(s).toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim();
-}
-function firstLastKey(s) {
-  const n = normalizeName(s);
-  if (!n) return null;
-  const parts = n.split(' ');
-  return parts.length >= 2 ? `${parts[0]} ${parts[parts.length-1]}` : null;
-}
-function stripKnownNameSuffix(s) {
-  if (!s) return null;
-  return String(s).replace(/\s*\([^)]+\)\s*$/, '').trim();
-}
 function buildNameMatcher(empProfileRows) {
   // Returns: (fullname) => zoho_employee_id or null
   const byFull = new Map();
@@ -1383,55 +1379,10 @@ function resolveTeamNode(personName, leaderName) {
   return UNASSIGNED_TEAM;
 }
 
-// The metrics feed spells the same team leader inconsistently — a first-name-only
-// form ("Elzette") alongside the full name ("Elzette Saaiman") — which splits one
-// team into duplicate nodes. Collapse a set of team names to a canonical form:
-// group by first name; when a first name maps to exactly one full identity, every
-// variant (including the bare first name) folds into the longest spelling. When a
-// first name is genuinely shared by different people, only exact first+last
-// duplicates are merged so we never fuse two distinct leaders.
-function buildTeamCanonMap(names) {
-  const map = new Map();
-  const info = [];
-  // Team names arrive as "<Leader>'s team" (e.g. "Elzette's team" vs
-  // "Elzette Saaiman's team"). Strip the possessive and the trailing "team"
-  // word before keying so the apostrophe-s ("elzettes") doesn't corrupt the
-  // first-name token and split one leader into two teams.
-  const canonKey = (n) => normalizeName(String(n).replace(/['’]s\b/gi, '').replace(/\bteam\b/gi, ''));
-  for (const n of names) {
-    if (!n || n === UNASSIGNED_TEAM) continue;
-    const k = canonKey(n) || '';
-    const toks = k ? k.split(' ') : [];
-    if (!toks.length) continue;
-    const fl = toks.length >= 2 ? `${toks[0]} ${toks[toks.length - 1]}` : null;
-    info.push({ n, k, toks, first: toks[0], fl });
-  }
-  const byFirst = new Map();
-  for (const it of info) {
-    if (!byFirst.has(it.first)) byFirst.set(it.first, []);
-    byFirst.get(it.first).push(it);
-  }
-  const longest = gs => gs.slice().sort((a, b) => b.k.length - a.k.length)[0].n;
-  for (const group of byFirst.values()) {
-    const fullFls = new Set(group.filter(g => g.toks.length >= 2).map(g => g.fl));
-    if (fullFls.size === 1) {
-      const canonical = longest(group);
-      for (const g of group) map.set(g.n, canonical);
-    } else {
-      const byFl = new Map();
-      for (const g of group) {
-        if (g.toks.length < 2) continue;   // ambiguous bare first name → leave as-is
-        if (!byFl.has(g.fl)) byFl.set(g.fl, []);
-        byFl.get(g.fl).push(g);
-      }
-      for (const gs of byFl.values()) {
-        const canonical = longest(gs);
-        for (const g of gs) map.set(g.n, canonical);
-      }
-    }
-  }
-  return map;
-}
+// buildTeamCanonMap (collapse inconsistent team-leader spellings to one
+// canonical name) now lives in /shared/names.js — see the top-of-script
+// destructure. Callers pass { skip: UNASSIGNED_TEAM } so the synthetic
+// "unassigned" node is left out of the merge.
 
 // "h:mm" or "h:mm:ss" → minutes (number)
 function parseHMS(s) {  if (s == null || s === '') return 0;
@@ -1724,7 +1675,7 @@ function buildAggregates(rows, gran = 'week') {
     (rawTeamsByCamp[camp] ??= new Set()).add(resolveTeamNode(r.fullname, r.team_name));
   }
   const teamCanonByCamp = {};
-  for (const camp in rawTeamsByCamp) teamCanonByCamp[camp] = buildTeamCanonMap([...rawTeamsByCamp[camp]]);
+  for (const camp in rawTeamsByCamp) teamCanonByCamp[camp] = buildTeamCanonMap([...rawTeamsByCamp[camp]], { skip: UNASSIGNED_TEAM });
   const canonTeam = (camp, t) => teamCanonByCamp[camp]?.get(t) || t;
 
   for (const r of rows) {
@@ -2733,7 +2684,7 @@ function fmtPctBonus(p) { return p == null ? '—' : (p * 100).toFixed(0) + '%';
 // shows once — same canonicalisation as the Campaigns view.
 function bonusTeamGroups() {
   const names = [...new Set(BONUS_STATE.awards.map(r => r.team_name).filter(Boolean))];
-  const canon = buildTeamCanonMap(names);
+  const canon = buildTeamCanonMap(names, { skip: UNASSIGNED_TEAM });
   const groups = new Map();
   for (const r of BONUS_STATE.awards) {
     const key = (r.team_name && canon.get(r.team_name)) || r.team_name || 'Unassigned';
