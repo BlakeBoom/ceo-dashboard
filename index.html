@@ -535,7 +535,7 @@ svg.ring .rs{font-size:8px;letter-spacing:.5px;text-transform:uppercase}
 // Shared name-matching helpers live in /shared/names.js (one source of truth
 // for the server too). Pull them into scope so the call sites below are
 // unchanged.
-const { normalizeName, firstLastKey, stripKnownNameSuffix, buildTeamCanonMap } = globalThis.BoomerangNames;
+const { normalizeName, firstLastKey, stripKnownNameSuffix, buildTeamCanonMap, titleToRole, looksLikeLookupId } = globalThis.BoomerangNames;
 // ════════════════════════════════════════════════════════════════════════
 // CONFIGURATION
 // ════════════════════════════════════════════════════════════════════════
@@ -1321,20 +1321,49 @@ function buildNameMatcher(empProfileRows) {
   };
 }
 
-// EmployeeProfile job title → role in our hierarchy (mirrors provision.js).
-function titleToRole(title) {
-  const t = String(title ?? '').toLowerCase();
-  if (t.includes('campaign manager')) return 'campaign_lead';
-  if (t.includes('team leader') || t.includes('team lead') || t.includes('shift leader')) return 'tm';
-  return 'agent';
+// titleToRole (Job Title → role) is the shared canonical mapper from
+// /shared/names.js — destructured at the top of this script, same logic the
+// server's provision.jobTitleToRole uses.
+
+const _ROLE_RANK = { agent: 0, tm: 1, campaign_lead: 2 };
+// Assemble the { roleOf, isTL, tlCount } index shape from a list of
+// { name, role } pairs, keyed by full normalised name + first+last key. "Leader
+// role wins ties" (a name seen as both agent and tm resolves to tm).
+function _buildRoleIndex(pairs, source) {
+  const roleByKey = new Map();
+  let tlCount = 0;
+  const put = (key, role) => {
+    if (!key) return;
+    const cur = roleByKey.get(key);
+    // Unknown roles (admin/exco) rank below agent so they never displace a tm.
+    if (cur == null || (_ROLE_RANK[role] ?? -1) > (_ROLE_RANK[cur] ?? -1)) roleByKey.set(key, role);
+  };
+  for (const { name, role } of pairs) {
+    if (!name || !role) continue;
+    put(normalizeName(name), role);
+    put(firstLastKey(name), role);
+    if (role === 'tm') tlCount++;
+  }
+  const roleOf = (name) => roleByKey.get(normalizeName(name)) ?? roleByKey.get(firstLastKey(name)) ?? null;
+  return { roleOf, isTL: n => roleOf(n) === 'tm', tlCount, source };
 }
 
-// Build a name → role index from EmployeeProfile so the team drill-down can tell
-// Team Leaders (real team nodes) from Campaign Managers (a management level, not
-// a team). Keyed by both the full normalised name and a first+last key for
-// fuzzy matching against the metrics view's names. Returns null when no job
-// title column is present, so callers fall back to the raw team_name grouping.
-const _ROLE_RANK = { agent: 0, tm: 1, campaign_lead: 2 };
+// Preferred source: the authoritative roles from Postgres (/api/users), which
+// provision.js already resolved from Job Title lookup ids server-side. Re-doing
+// that resolution in the browser (buildTeamRoleIndex below) duplicated the work
+// and got it wrong (raw view holds unresolved ids). Returns null when there's
+// nothing to build from, so callers fall back.
+function buildRoleIndexFromUsers(users) {
+  if (!Array.isArray(users) || !users.length) return null;
+  return _buildRoleIndex(users.map(u => ({ name: u.full_name, role: u.role })), 'users');
+}
+
+// Fallback: derive roles from the raw EmployeeProfile view when /api/users is
+// unavailable. Returns null (honest — callers fall back to raw team_name
+// grouping) rather than a tlCount-0 index that LOOKS like data, both when no
+// job-title column exists AND when that column holds unresolved lookup ids
+// (which provision resolves server-side but the browser sees raw) — otherwise
+// titleToRole would call an id a title and classify everyone as an agent.
 function buildTeamRoleIndex(empRows) {
   if (!empRows || !empRows.length) return null;
   const normKey = k => String(k).toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -1343,26 +1372,24 @@ function buildTeamRoleIndex(empRows) {
   let titleKey = null;
   for (const k of Object.keys(sample)) if (titleCands.has(normKey(k))) { titleKey = k; break; }
   if (!titleKey) return null;
-  const roleByKey = new Map();
-  let tlCount = 0;
-  const put = (key, role) => {
-    if (!key) return;
-    const cur = roleByKey.get(key);
-    if (cur == null || _ROLE_RANK[role] > _ROLE_RANK[cur]) roleByKey.set(key, role); // leader role wins ties
-  };
+  // Refuse to classify if the title column is unresolved lookup ids.
+  let idHits = 0, seen = 0;
+  for (const r of empRows) {
+    const v = r[titleKey];
+    if (v == null || v === '') continue;
+    seen++;
+    if (looksLikeLookupId(v)) idHits++;
+  }
+  if (seen === 0 || idHits > seen / 2) return null;
+  const pairs = [];
   for (const r of empRows) {
     const rawName = r['Employee Name'] || r.employee_name;
     if (!rawName) continue;
-    const role = titleToRole(r[titleKey]);
-    const clean = stripKnownNameSuffix(rawName);
-    put(normalizeName(clean), role);
-    put(firstLastKey(clean), role);
-    if (role === 'tm') tlCount++;
+    pairs.push({ name: stripKnownNameSuffix(rawName), role: titleToRole(r[titleKey]) });
   }
-  const roleOf = (name) => roleByKey.get(normalizeName(name)) ?? roleByKey.get(firstLastKey(name)) ?? null;
-  return { roleOf, isTL: n => roleOf(n) === 'tm', tlCount };
+  return _buildRoleIndex(pairs, 'employee_profile');
 }
-let TEAM_ROLE_INDEX = null;  // set from EmployeeProfile in applyData
+let TEAM_ROLE_INDEX = null;  // set in applyData (from /api/users, or the EmployeeProfile fallback)
 
 // Which team node a metrics row belongs to. Only Team Leaders are team nodes:
 //   • a Team Leader's own row  → their own team (their name)
@@ -4101,8 +4128,17 @@ function renderSummary() {
       ⚠ Attendance feed didn't refresh this cycle — showing last-known shrinkage data.
     </div>` : '');
 
+  // Role index degraded: team drill-downs can't tell Team Leaders apart and fall
+  // back to raw grouping. Surface it (not just console.warn) so an inert index
+  // can't run undetected. Suppressed for plain agents (who legitimately only see
+  // themselves) and on the no-data screen (the offline banner already explains).
+  const roleIndexNote = (STATE.roleIndexDegraded && (STATE.rawAgentWeek?.length) && AUTH.user?.role !== 'agent') ? `
+    <div class="err-banner show" style="background:rgba(245,158,11,.08);border-color:rgba(245,158,11,.4);color:var(--amber-text);margin-bottom:12px">
+      ⚠ ${STATE.roleIndexReason}
+    </div>` : '';
+
   $('summaryView').innerHTML = `
-    ${attendanceNote}${unmatchedNote}${nonBillableNote}${additionalNote}
+    ${attendanceNote}${roleIndexNote}${unmatchedNote}${nonBillableNote}${additionalNote}
     <div class="hero-row">${heroCards}</div>
     <div class="sum-grid2">
       <div class="chart-card">
@@ -4980,12 +5016,25 @@ function renderTrends() {
 // ════════════════════════════════════════════════════════════════════════
 // INITIALIZATION
 // ════════════════════════════════════════════════════════════════════════
-function applyData(rows, attendanceRows, empProfileRows) {
+function applyData(rows, attendanceRows, empProfileRows, roleUsers) {
   STATE.rawAgentWeek = rows;
   _DATE_COL = detectDateCol(rows);
-  // Role index (from EmployeeProfile) drives the team-leader-only drill-down.
-  // Built before aggregation so buildAggregates can group rows by Team Leader.
-  TEAM_ROLE_INDEX = buildTeamRoleIndex(empProfileRows);
+  // Role index drives the team-leader-only drill-down. Prefer the authoritative
+  // resolved roles from Postgres (/api/users); fall back to deriving from the
+  // raw EmployeeProfile view only when that's unavailable. Built before
+  // aggregation so buildAggregates can group rows by Team Leader.
+  TEAM_ROLE_INDEX = buildRoleIndexFromUsers(roleUsers) || buildTeamRoleIndex(empProfileRows);
+  // Phase 2: a silently inert role index (null / no TLs) is what let team
+  // buckets mis-file undetected. Flag it so the UI can surface it, the same way
+  // attendance outages are surfaced.
+  const idxOk = !!(TEAM_ROLE_INDEX && TEAM_ROLE_INDEX.tlCount > 0);
+  STATE.roleIndexSource = TEAM_ROLE_INDEX ? TEAM_ROLE_INDEX.source : 'none';
+  STATE.roleIndexTlCount = TEAM_ROLE_INDEX ? TEAM_ROLE_INDEX.tlCount : 0;
+  STATE.roleIndexDegraded = !idxOk;
+  STATE.roleIndexReason = idxOk ? null
+    : !TEAM_ROLE_INDEX
+      ? 'Team leaders can’t be identified (roles unavailable, or Job Titles came back as unresolved lookup ids). Team drill-downs fall back to raw grouping.'
+      : 'No team leaders found in the current data — team drill-downs fall back to raw grouping.';
   const agg = buildAggregates(rows, STATE.granularity);
   STATE.campaignWeek = agg.campaignWeek;
   STATE.teamWeek = agg.teamWeek;
@@ -5055,6 +5104,19 @@ async function fetchAll() {
   return { primary, attendance, empProfile };
 }
 
+// Authoritative resolved roles from Postgres, for the team-leader role index.
+// Scope-filtered server-side (rbac): admin/exco get everyone, a campaign_lead
+// their whole campaign, a tm their own team (incl. themselves). Returns null on
+// any failure so applyData falls back to the EmployeeProfile derivation.
+async function fetchUsers() {
+  try {
+    const r = await apiFetch('/api/users');
+    if (!r.ok) return null;
+    const j = await r.json();
+    return Array.isArray(j.users) ? j.users : null;
+  } catch { return null; }
+}
+
 async function init() {
   // Wire tab nav
   document.querySelectorAll('.tab').forEach(t => t.onclick = () => setView(t.dataset.view));
@@ -5082,8 +5144,8 @@ async function init() {
     bar.classList.add('loading');
     setBadge('static', 'Connecting…');
     try {
-      const { primary, attendance, empProfile } = await fetchAll();
-      applyData(primary, attendance, empProfile);
+      const [{ primary, attendance, empProfile }, roleUsers] = await Promise.all([fetchAll(), fetchUsers()]);
+      applyData(primary, attendance, empProfile, roleUsers);
       STATE.dataSource = 'live';
       setBadge('live', STATE.shrinkageAvailable ? 'Live · shrinkage on' : 'Live');
       bar.classList.remove('loading');
@@ -5095,8 +5157,8 @@ async function init() {
       setInterval(async () => {
         bar.classList.add('loading');
         try {
-          const next = await fetchAll();
-          applyData(next.primary, next.attendance, next.empProfile);
+          const [next, roleUsers] = await Promise.all([fetchAll(), fetchUsers()]);
+          applyData(next.primary, next.attendance, next.empProfile, roleUsers);
           STATE.dataSource = 'live';
           setBadge('live', STATE.shrinkageAvailable ? 'Live · shrinkage on' : 'Live');
           render();
