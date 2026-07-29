@@ -218,6 +218,7 @@ input:focus-visible,select:focus-visible{outline:none;border-color:var(--accent)
 .camp-overall.amber{background:var(--amber-text);box-shadow:0 0 8px var(--amber-text)}
 .camp-overall.red{background:var(--red-text);box-shadow:0 0 8px var(--red-text)}
 .camp-overall.grey{background:var(--text4)}
+.camp-overall.none{background:var(--text4)}  /* unassessed campaign — neutral, never green */
 .camp-meta{display:flex;align-items:center;gap:8px;font-size:10px;font-family:var(--mono);text-transform:uppercase;letter-spacing:0.6px;color:var(--text3)}
 .camp-meta-chip{background:var(--bg-2);padding:3px 8px;border-radius:5px;border:1px solid var(--border-light);color:var(--text2)}
 
@@ -607,6 +608,15 @@ const KPI_CONFIG = {
   'BEER52':         [['qa','QA','higher'],['sph','SPH','higher'],['calls','Calls','none'],['sales','Sales','none'],['billable','Billable','higher'],['absence','Absence','lower']],
   '1LIFE':          [['qa','QA','higher'],['sales','Sales','higher'],['tickets','Tickets','none'],['billable','Billable','higher'],['absence','Absence','lower']],
 };
+
+// Fail loudly when a campaign we display has no KPI_CONFIG/TARGETS: it is
+// scored 'none' (grey, held out of the health tally) rather than silently
+// counted green. Warn at load so whoever adds the campaign supplies real
+// commercial targets instead of it getting a free pass.
+const UNCONFIGURED_CAMPS = Object.keys(CAMP_DISPLAY).filter(c => !KPI_CONFIG[c] || !TARGETS[c]);
+if (UNCONFIGURED_CAMPS.length) {
+  console.warn(`[dashboard] ${UNCONFIGURED_CAMPS.length} campaign(s) missing KPI_CONFIG/TARGETS — shown grey/unassessed, excluded from Campaign Health: ${UNCONFIGURED_CAMPS.join(', ')}`);
+}
 
 const LOWER_BETTER = new Set(['aht','absence','abandon_rate','error_rate','res_time','acw','avg_resp_time','calls_abn']);
 // KPIs that accumulate over the period (totals), so their targets must be
@@ -1803,7 +1813,7 @@ function rag(val, tgt, direction) {
 }
 
 function overallRag(metrics, targets, config, frac = 1) {
-  let r = false, a = false;
+  let r = false, a = false, assessed = 0;
   for (const [k,,dir] of config) {
     if (dir === 'none') continue;
     const v = metrics[k];
@@ -1811,9 +1821,14 @@ function overallRag(metrics, targets, config, frac = 1) {
     if (v == null || t == null) continue;
     if (frac !== 1 && CUMULATIVE_KPIS.has(k)) t = t * frac;  // run-rate target for partial period
     const x = rag(v, t, dir);
+    assessed++;                             // a KPI we could actually score
     if (x === 'red') r = true;
     else if (x === 'amber') a = true;
   }
+  // Nothing was scorable (campaign missing from KPI_CONFIG/TARGETS, or every
+  // value was null) — return 'none' so callers can hold it out of the tally
+  // instead of the loop falling through to a bogus 'green'.
+  if (assessed === 0) return 'none';
   return r ? 'red' : a ? 'amber' : 'green';
 }
 
@@ -3922,7 +3937,8 @@ function renderSummary() {
 
   let totalFTE = 0, totalBillable = 0, totalCalls = 0, totalTickets = 0;
   let prevFTE = 0, prevBillable = 0;
-  let green = 0, amber = 0, red = 0;
+  let green = 0, amber = 0, red = 0, unconfigured = 0;
+  const unconfiguredCamps = [];
   let absentSum = 0, presentSum = 0;
   let prevAbsentSum = 0, prevPresentSum = 0;
   let reqHrsTotal = 0;
@@ -3950,6 +3966,7 @@ function renderSummary() {
     if (o === 'green') green++;
     else if (o === 'amber') amber++;
     else if (o === 'red') red++;
+    else { unconfigured++; unconfiguredCamps.push(CAMP_DISPLAY[c]||c); }  // 'none' — no scorable KPIs, keep out of the health tally
     if (prevWk && STATE.campaignWeek[c][prevWk]) {
       const mp = STATE.campaignWeek[c][prevWk];
       prevFTE += mp.fte;
@@ -4035,7 +4052,9 @@ function renderSummary() {
   // Flags: find most impactful issues / movers
   const flags = buildFlags(wk, prevWk, camps);
 
-  const total = camps.length || 1;
+  // Denominator is only the campaigns we could actually assess — an
+  // unconfigured campaign must not dilute (or inflate) the on-track %.
+  const total = (camps.length - unconfigured) || 1;
   const gPct = (green/total) * 100;
 
   // Series for the area chart: total billable per week, with required as a
@@ -4077,7 +4096,8 @@ function renderSummary() {
     hero(fulfilStatus, 'Billable Hours', Math.round(totalBillable).toLocaleString(),
       svgRing(fulfilment != null ? Math.min(100, fulfilment) : 0, { light: onColour(fulfilStatus), val: fulfilment != null ? Math.round(fulfilment)+'%' : '—', sub: 'of req' }), billDeltaTxt),
     hero(healthStatus, 'Campaign Health', `${green}/${total}`,
-      svgRing(gPct, { light: onColour(healthStatus), val: Math.round(gPct)+'%', sub: 'on track' }), null),
+      svgRing(gPct, { light: onColour(healthStatus), val: Math.round(gPct)+'%', sub: 'on track' }),
+      unconfigured > 0 ? { dir:'', txt: `${unconfigured} not assessed: ${unconfiguredCamps.join(', ')}` } : null),
     (STATE.shrinkageAvailable && shrinkageTotal != null)
       ? hero(shrStatus, 'Shrinkage', shrinkageTotal.toFixed(1)+'%',
           svgRing(Math.min(100, shrinkageTotal), { light: onColour(shrStatus), val: shrinkageTotal.toFixed(0)+'%', sub: 'shrink' }), shrDeltaTxt)
@@ -4448,7 +4468,9 @@ function campaignCardHtml(c, wk) {
     const r = rag(m[k], tgts[k], dir);
     if (r === 'red') red++; else if (r === 'amber') amber++;
   }
-  const riskBadge = red > 0
+  const riskBadge = overall === 'none'
+    ? `<span class="camp-risk" title="No KPI targets configured for this campaign">not assessed</span>`
+    : red > 0
     ? `<span class="camp-risk red" title="${red} KPI(s) red">${red} red</span>`
     : amber > 0
       ? `<span class="camp-risk amber" title="${amber} KPI(s) amber">${amber} amber</span>`
