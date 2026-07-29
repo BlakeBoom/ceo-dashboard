@@ -24,7 +24,15 @@ router.get('/', async (req, res) => {
        LEFT JOIN campaigns c ON c.id = u.campaign_id
        LEFT JOIN teams t     ON t.id = u.team_id
       WHERE ${sql}
-      ORDER BY u.role DESC, c.name NULLS LAST, u.full_name`,
+      ORDER BY CASE u.role
+                 WHEN 'admin'         THEN 0
+                 WHEN 'exco'          THEN 1
+                 WHEN 'campaign_lead' THEN 2
+                 WHEN 'tm'            THEN 3
+                 WHEN 'agent'         THEN 4
+                 ELSE 5
+               END,
+               c.name NULLS LAST, u.full_name`,
     params
   );
   res.json({ users: rows });
