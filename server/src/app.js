@@ -1,6 +1,6 @@
 // Express app construction. Exported as `app` for both:
 //   - Local dev (`npm run dev` → server/src/index.js calls app.listen)
-//   - Vercel serverless (api/[...path].js re-exports this app as the handler)
+//   - Vercel serverless (api/index.js re-exports this app; vercel.json rewrites /api/* to it)
 //
 // Do NOT call app.listen() here.
 
@@ -20,7 +20,6 @@ import bonusRoutes from './routes/bonus.js';
 import syncRoutes from './routes/sync.js';
 import zohoRoutes from './routes/zoho.js';
 import targetRoutes from './routes/targets.js';
-import debugRoutes from './routes/debug.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
@@ -28,9 +27,30 @@ const REPO_ROOT = path.resolve(__dirname, '..', '..');
 const app = express();
 app.set('trust proxy', 1);
 
-// CSP allows the existing inline scripts/styles in index.html. Tighten in Phase 3.
+// CSP: permit the inline <script>/<style> and inline style="" attributes the
+// dashboard relies on ('unsafe-inline'), plus /shared/names.js ('self') and
+// Google Fonts (the only external resources — CSS from fonts.googleapis.com,
+// font files from fonts.gstatic.com). Everything else is locked down: all data
+// calls are same-origin /api/* so connect-src stays 'self' (the old
+// script.google.com proxy is no longer called from the browser).
+// useDefaults:false so we don't inherit helmet's upgrade-insecure-requests,
+// which would break same-origin sub-resource loads under http://localhost.
 app.use(helmet({
-  contentSecurityPolicy: false,
+  contentSecurityPolicy: {
+    useDefaults: false,
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "'unsafe-inline'"],
+      styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
+      fontSrc: ["'self'", 'https://fonts.gstatic.com'],
+      imgSrc: ["'self'", 'data:'],
+      connectSrc: ["'self'"],
+      objectSrc: ["'none'"],
+      frameAncestors: ["'none'"],
+      baseUri: ["'self'"],
+      formAction: ["'self'"],
+    },
+  },
   crossOriginEmbedderPolicy: false,
 }));
 
@@ -68,7 +88,6 @@ app.use('/api/bonus', bonusRoutes);
 app.use('/api/targets', targetRoutes);
 app.use('/api/sync', syncRoutes);
 app.use('/api/zoho', zohoRoutes);
-app.use('/api/debug', debugRoutes);
 
 // Local-dev only: serve the static dashboard from repo root.
 // On Vercel, static files are served directly by the CDN (vercel.json routes

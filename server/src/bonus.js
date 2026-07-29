@@ -149,8 +149,11 @@ export function applyRule(metrics, ruleJson) {
     if (met) metCount += 1;
   }
 
-  // Default: final bonus equals kpi bonus. A future rule could require
-  // a minimum component-count to qualify.
+  // NOTE: gating is currently INERT. No rule in the system sets
+  // kpi_min_components, so it defaults to 0, `metCount >= 0` is always true,
+  // `qualified` is always true, and final_bonus always equals kpi_bonus.
+  // Nothing is gated today. This is deliberate — turning it on changes people's
+  // pay — but the mechanism stays here for when a rule sets a real minimum.
   const minComponents = ruleJson.kpi_min_components ?? 0;
   const qualified = metCount >= minComponents;
   const final_bonus = qualified ? kpiBonus : 0;

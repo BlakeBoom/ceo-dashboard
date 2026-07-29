@@ -10,9 +10,14 @@
 --     { "key": "csat",         "label": "CSAT",         "type": "pct_ge",       "threshold": 0.85, "amount": 0 },
 --     { "key": "qa",           "label": "QA",           "type": "pct_ge",       "threshold": 0.80, "amount": 0 }
 --   ],
---   "kpi_sum_threshold": 2,           -- min components hit to qualify for final bonus
---   "final_bonus_formula": "sum"       -- "sum" | "fixed" | future variants
+--   "unplanned_statuses": ["Sick Leave", "No Show"],  -- optional; overrides the default callout status set
+--   "kpi_min_components": 0            -- optional; components that must be met to qualify (default 0 = gating inert)
 -- }
+-- component.key : sa | productivity | csat | qa   (productivity may add "metric_column")
+-- component.type: callouts_le | value_ge | value_le | pct_ge | pct_le
+-- These are the ONLY keys applyRule() (server/src/bonus.js) reads. The earlier
+-- "kpi_sum_threshold" / "final_bonus_formula" were never read by the engine and
+-- have been removed from this doc.
 CREATE TABLE IF NOT EXISTS bonus_rules (
   id              SERIAL PRIMARY KEY,
   campaign_id     INT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
