@@ -5119,8 +5119,11 @@ async function init() {
     setBadge('static', 'Offline');
   }
 
-  // Fallback
-  applyData(FALLBACK_RAW);
+  // Fallback: no live data. Pass all three (empty) arguments so applyData
+  // populates STATE with empty rollups and render() paints the explicit "no
+  // data" empty state — the error banner + Offline badge (set above) explain
+  // why. (The one-arg call left attendance/profile undefined.)
+  applyData(FALLBACK_RAW, [], []);
   STATE.dataSource = 'static';
   render();
 }
