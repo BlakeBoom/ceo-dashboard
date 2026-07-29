@@ -6,20 +6,36 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { query } from '../db.js';
-import { requireRole } from '../rbac.js';
+import { requireRole, seesAllScope } from '../rbac.js';
 
 const router = Router();
+
+// Keys a non-exec caller (tm / campaign_lead) is allowed to read back from
+// campaign_rules. These three are the only rule_keys the dashboard consumes for
+// slippage: loadTargets() → buildTargetVersions() → reqHrsForCampPeriod() reads
+// target_fte, sla_min_hrs_fte and req_hrs_month and nothing else. Every other
+// row in campaign_rules is a per-client commercial term (productive_bae_rate,
+// tl_rate, qa_rate, cm_rate, headcount_discount, comm_* …) that must never leave
+// the server for a non-exec, so GET /rules filters to exactly this set for them.
+const RULES_SLIPPAGE_KEYS = ['target_fte', 'sla_min_hrs_fte', 'req_hrs_month'];
 
 // All target versions, newest first. Joined with campaign slug/name so the
 // front-end can map them to its campaign keys and render the editor.
 router.get('/', requireRole('tm'), async (req, res) => {
+  // admin/exco see every campaign; everyone else is pinned to their own
+  // campaign_id. A non-exec whose campaign_id is NULL matches nothing
+  // (campaign_id = NULL is never true), so an unscoped user gets [] — never all
+  // rows. Parameterised, never interpolated.
+  const scoped = !seesAllScope(req.user);
   const { rows } = await query(
     `SELECT t.id, t.campaign_id, c.slug, c.name,
             to_char(t.effective_from, 'YYYY-MM-DD') AS effective_from,
             t.req_fte, t.req_hrs_month
        FROM campaign_targets t
        JOIN campaigns c ON c.id = t.campaign_id
-      ORDER BY c.name, t.effective_from DESC`
+      ${scoped ? 'WHERE t.campaign_id = $1' : ''}
+      ORDER BY c.name, t.effective_from DESC`,
+    scoped ? [req.user.campaign_id ?? null] : []
   );
   res.json({ targets: rows });
 });
@@ -69,13 +85,20 @@ router.delete('/:id', requireRole('admin'), async (req, res) => {
 
 // All rule rows for all campaigns (tm+ read; drives slippage + the Targets page).
 router.get('/rules', requireRole('tm'), async (req, res) => {
+  // Same campaign scoping as targets, PLUS a hard column allow-list: a non-exec
+  // caller gets only RULES_SLIPPAGE_KEYS, so the rate/commission rows never
+  // leave the server. admin/exco get the full matrix (drives the Targets page).
+  // A NULL campaign_id matches no rows (never all rows). Parameterised only.
+  const scoped = !seesAllScope(req.user);
   const { rows } = await query(
     `SELECT r.campaign_id, c.slug, c.name,
             to_char(r.effective_from, 'YYYY-MM-DD') AS effective_from,
             r.rule_key, r.value
        FROM campaign_rules r
        JOIN campaigns c ON c.id = r.campaign_id
-      ORDER BY c.name, r.effective_from DESC`
+      ${scoped ? 'WHERE r.campaign_id = $1 AND r.rule_key = ANY($2::text[])' : ''}
+      ORDER BY c.name, r.effective_from DESC`,
+    scoped ? [req.user.campaign_id ?? null, RULES_SLIPPAGE_KEYS] : []
   );
   res.json({ rules: rows });
 });
@@ -131,13 +154,18 @@ router.delete('/rules/version', requireRole('admin'), async (req, res) => {
 
 // All additional-hours rows (tm+ read; folded into Required + shown on Summary).
 router.get('/additional', requireRole('tm'), async (req, res) => {
+  // admin/exco see all; everyone else only their own campaign. A NULL
+  // campaign_id matches no rows (never all rows). Parameterised only.
+  const scoped = !seesAllScope(req.user);
   const { rows } = await query(
     `SELECT a.id, a.campaign_id, c.slug, c.name,
             to_char(a.work_date, 'YYYY-MM-DD') AS work_date,
             a.hours, a.note
        FROM campaign_additional_hours a
        JOIN campaigns c ON c.id = a.campaign_id
-      ORDER BY a.work_date DESC, c.name`
+      ${scoped ? 'WHERE a.campaign_id = $1' : ''}
+      ORDER BY a.work_date DESC, c.name`,
+    scoped ? [req.user.campaign_id ?? null] : []
   );
   res.json({ additional: rows });
 });
