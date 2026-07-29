@@ -89,5 +89,28 @@
     return map;
   }
 
-  root.BoomerangNames = { normalizeName, firstLastKey, stripKnownNameSuffix, buildTeamCanonMap };
+  // Canonical Job Title → role mapper, shared by the dashboard's role index and
+  // provision.js. Order matters: most senior first. 'team lead' (no -er) is
+  // matched explicitly so the shorter spelling isn't classified as an agent —
+  // that omission was the drift between the two copies.
+  function titleToRole(title) {
+    const t = String(title ?? '').toLowerCase();
+    if (t.includes('campaign manager')) return 'campaign_lead';
+    if (t.includes('team leader') || t.includes('team lead') || t.includes('shift leader')) return 'tm';
+    return 'agent';
+  }
+
+  // A value looks like an unresolved Zoho lookup id (a long all-digit string)
+  // rather than human text — e.g. a Job Title coming back as "610962000011338364".
+  // provision.js resolves these server-side; the browser may still see the raw
+  // id, so the client role-index fallback uses this to refuse to classify rather
+  // than mislabel everyone as an agent.
+  function looksLikeLookupId(v) {
+    return /^\d{10,}$/.test(String(v ?? '').trim());
+  }
+
+  root.BoomerangNames = {
+    normalizeName, firstLastKey, stripKnownNameSuffix, buildTeamCanonMap,
+    titleToRole, looksLikeLookupId,
+  };
 })(globalThis);

@@ -20,7 +20,15 @@ import { hashPassword } from './auth.js';
 // on normalised name then first+last, so it reuses the same normaliser as the
 // dashboard/sync rather than its own copy.
 import '../../shared/names.js';
-const { normalizeName: mergeNorm, firstLastKey: mergeFirstLast } = globalThis.BoomerangNames;
+const {
+  normalizeName: mergeNorm, firstLastKey: mergeFirstLast,
+  titleToRole, looksLikeLookupId,
+} = globalThis.BoomerangNames;
+// jobTitleToRole and looksLikeLookupId are the shared implementations (see
+// /shared/names.js) so the server and the dashboard classify identically —
+// previously this file's copy was missing the bare 'team lead' variant.
+export { looksLikeLookupId };
+export const jobTitleToRole = titleToRole;
 
 // Companion tables that EmployeeProfile lookup ids resolve against.
 const JOB_TITLE_VIEW_ID = '2292884000019602033'; // Job description table
@@ -87,13 +95,7 @@ export function campaignSlug(name) {
   return String(name).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
 }
 
-// Map a Job Title to a role in our hierarchy. Order matters: most senior first.
-export function jobTitleToRole(title) {
-  const t = String(title ?? '').toLowerCase();
-  if (t.includes('campaign manager')) return 'campaign_lead';
-  if (t.includes('team leader') || t.includes('shift leader')) return 'tm';
-  return 'agent';
-}
+// jobTitleToRole is re-exported from the shared module at the top of this file.
 
 // ── Column detection ────────────────────────────────────────────────────────
 // The EmployeeProfile view's column labels vary between exports ("Fullname" vs
@@ -129,11 +131,7 @@ export function detectProfileColumns(rows) {
   return out;
 }
 
-// A value looks like an unresolved Zoho lookup id (long all-digit string) rather
-// than human text — e.g. Job Title returning "610962000011338364".
-export function looksLikeLookupId(v) {
-  return /^\d{10,}$/.test(String(v ?? '').trim());
-}
+// looksLikeLookupId is re-exported from the shared module at the top of this file.
 
 // "05-Jul-2022 12:20:28", "2022-07-05", "05/07/2022" — timestamps, not titles.
 export function isDateLike(v) {
