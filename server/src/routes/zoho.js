@@ -11,6 +11,10 @@ import { requireRole } from '../rbac.js';
 import { fetchView, fetchViewByDate, VIEW } from '../zoho.js';
 import { canonicalCampaign } from '../provision.js';
 import { seesAllScope } from '../rbac.js';
+// Shared with the dashboard so name matching lines up exactly (see
+// /shared/names.js). firstLast is this file's local name for firstLastKey.
+import '../../../shared/names.js';
+const { normalizeName: normName, firstLastKey: firstLast } = globalThis.BoomerangNames;
 
 const router = Router();
 
@@ -21,17 +25,6 @@ const VIEW_KEYS = {
   'EmployeeProfile':      VIEW.employee,
 };
 
-function normName(s) {
-  return String(s ?? '').toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim();
-}
-// "john michael smith" → "john smith" (first + last), mirroring the dashboard's
-// firstLastKey so name matching lines up with the client.
-function firstLast(s) {
-  const n = normName(s);
-  if (!n) return null;
-  const p = n.split(' ');
-  return p.length >= 2 ? `${p[0]} ${p[p.length - 1]}` : null;
-}
 function metricName(r) {
   return r.fullname ?? r.Full_Name ?? r.full_name ?? null;
 }
