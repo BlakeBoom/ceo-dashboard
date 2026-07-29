@@ -163,8 +163,12 @@ router.get('/awards', async (req, res) => {
       params.push(req.user.team_id);
       scopeSql = `u.team_id = $${params.length}`;
     } else {
-      params.push(req.user.campaign_id, req.user.id);
-      scopeSql = `(u.campaign_id = $${params.length - 1} AND (t.tm_user_id = $${params.length} OR TRUE))`;
+      // No assigned team: the SQL narrows to the campaign only. The real
+      // team-scoping is the fail-closed JS post-filter below (see "Team leaders
+      // without an assigned team") — team names live in Zoho, not in a joinable
+      // column, so they can't be expressed here.
+      params.push(req.user.campaign_id);
+      scopeSql = `u.campaign_id = $${params.length}`;
     }
   } else if (req.user.role === 'agent') {
     params.push(req.user.id);
