@@ -1,6 +1,6 @@
 // Express app construction. Exported as `app` for both:
 //   - Local dev (`npm run dev` → server/src/index.js calls app.listen)
-//   - Vercel serverless (api/[...path].js re-exports this app as the handler)
+//   - Vercel serverless (api/index.js re-exports this app; vercel.json rewrites /api/* to it)
 //
 // Do NOT call app.listen() here.
 
