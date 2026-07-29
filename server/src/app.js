@@ -27,9 +27,30 @@ const REPO_ROOT = path.resolve(__dirname, '..', '..');
 const app = express();
 app.set('trust proxy', 1);
 
-// CSP allows the existing inline scripts/styles in index.html. Tighten in Phase 3.
+// CSP: permit the inline <script>/<style> and inline style="" attributes the
+// dashboard relies on ('unsafe-inline'), plus /shared/names.js ('self') and
+// Google Fonts (the only external resources — CSS from fonts.googleapis.com,
+// font files from fonts.gstatic.com). Everything else is locked down: all data
+// calls are same-origin /api/* so connect-src stays 'self' (the old
+// script.google.com proxy is no longer called from the browser).
+// useDefaults:false so we don't inherit helmet's upgrade-insecure-requests,
+// which would break same-origin sub-resource loads under http://localhost.
 app.use(helmet({
-  contentSecurityPolicy: false,
+  contentSecurityPolicy: {
+    useDefaults: false,
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "'unsafe-inline'"],
+      styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
+      fontSrc: ["'self'", 'https://fonts.gstatic.com'],
+      imgSrc: ["'self'", 'data:'],
+      connectSrc: ["'self'"],
+      objectSrc: ["'none'"],
+      frameAncestors: ["'none'"],
+      baseUri: ["'self'"],
+      formAction: ["'self'"],
+    },
+  },
   crossOriginEmbedderPolicy: false,
 }));
 
