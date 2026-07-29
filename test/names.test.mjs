@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 // <script>), so import it for its side effect and read the global — the same
 // contract the browser and the server modules use.
 import '../shared/names.js';
-const { normalizeName, firstLastKey, stripKnownNameSuffix, buildTeamCanonMap } = globalThis.BoomerangNames;
+const { normalizeName, firstLastKey, stripKnownNameSuffix, buildTeamCanonMap, titleToRole, looksLikeLookupId } = globalThis.BoomerangNames;
 
 // provision.js eagerly imports db.js, which reads env vars at module-eval and
 // constructs a pg Pool. Set dummy env BEFORE the dynamic import so eval doesn't
@@ -117,4 +117,50 @@ test('campaignSlug: lowercased, non-alphanumerics → single hyphens, trimmed', 
   assert.equal(campaignSlug('The Good Life Sorted'), 'the-good-life-sorted');
   assert.equal(campaignSlug('Just Park US'), 'just-park-us');
   assert.equal(campaignSlug('  Foo!!  Bar  '), 'foo-bar');
+});
+
+// ── titleToRole (shared, canonical mapper) ──────────────────────────────────
+test('titleToRole: every team-leader title variant resolves to tm', () => {
+  // The variants the two former copies between them matched, incl. the bare
+  // "Team Lead" that provision.js used to miss (→ agent).
+  for (const t of ['Team Leader', 'Team Lead', 'Shift Leader', 'Senior Team Leader',
+                   'TEAM LEADER', 'Team Leader (Beer52)']) {
+    assert.equal(titleToRole(t), 'tm', `expected tm for "${t}"`);
+  }
+  assert.equal(titleToRole('Campaign Manager'), 'campaign_lead');
+  assert.equal(titleToRole('Customer Service Agent'), 'agent');
+});
+
+test('titleToRole: the provision.jobTitleToRole export is the same shared mapper', () => {
+  assert.equal(jobTitleToRole('Team Lead'), 'tm');           // was agent before consolidation
+  assert.equal(jobTitleToRole('Team Leader'), 'tm');
+  assert.equal(jobTitleToRole('Campaign Manager'), 'campaign_lead');
+});
+
+test('titleToRole: a lookup-id title is gated by looksLikeLookupId, not silently classified', () => {
+  const id = '610962000011338364';
+  // titleToRole itself has no way to know an id isn't a title — it would return
+  // 'agent'. The protection is that callers MUST gate on looksLikeLookupId first
+  // (buildTeamRoleIndex does, and bails to null). Assert the gate fires.
+  assert.equal(looksLikeLookupId(id), true);
+  assert.equal(looksLikeLookupId('Team Leader'), false);
+  assert.equal(titleToRole(id), 'agent');  // documents WHY the gate is required
+});
+
+// ── buildTeamCanonMap: the TL-collapse the role-index fix relies on ──────────
+test('buildTeamCanonMap: folds "Rugshana\'s team" + "Rugshana Hendricks" to one node', () => {
+  // Once TLs are recognised, resolveTeamNode emits the TL's own name for their
+  // row while agents keep the "<Leader>'s team" label; canon must fold both.
+  const canon = buildTeamCanonMap(["Rugshana's team", "Rugshana Hendricks"]);
+  assert.equal(canon.get("Rugshana's team"), 'Rugshana Hendricks');       // longest spelling wins
+  assert.equal(canon.get('Rugshana Hendricks'), 'Rugshana Hendricks');
+  // Exactly one canonical target → one node.
+  assert.equal(new Set(canon.values()).size, 1);
+});
+
+test('buildTeamCanonMap: two different leaders sharing a first name are NOT merged', () => {
+  const canon = buildTeamCanonMap(["Rugshana Hendricks", "Rugshana Adams"]);
+  assert.equal(canon.get('Rugshana Hendricks'), 'Rugshana Hendricks');
+  assert.equal(canon.get('Rugshana Adams'), 'Rugshana Adams');
+  assert.notEqual(canon.get('Rugshana Hendricks'), canon.get('Rugshana Adams'));
 });
