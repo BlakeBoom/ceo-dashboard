@@ -535,7 +535,8 @@ svg.ring .rs{font-size:8px;letter-spacing:.5px;text-transform:uppercase}
 // Shared name-matching helpers live in /shared/names.js (one source of truth
 // for the server too). Pull them into scope so the call sites below are
 // unchanged.
-const { normalizeName, firstLastKey, stripKnownNameSuffix, buildTeamCanonMap, titleToRole, looksLikeLookupId } = globalThis.BoomerangNames;
+const { normalizeName, firstLastKey, stripKnownNameSuffix, buildTeamCanonMap, titleToRole, looksLikeLookupId,
+        _buildRoleIndex, buildRoleIndexFromUsers, resolveTeamNode, unassignedShare } = globalThis.BoomerangNames;
 // ════════════════════════════════════════════════════════════════════════
 // CONFIGURATION
 // ════════════════════════════════════════════════════════════════════════
@@ -1277,7 +1278,11 @@ function buildNameMatcher(empProfileRows) {
   const byFirstLast = new Map();
   const byPrefix = [];  // array of {prefix, eid} for prefix matching
 
-  for (const r of empProfileRows) {
+  // BUG 5: match only against Active employees. Leavers/non-starters otherwise
+  // shadow active namesakes (and "leader role wins ties" makes that worse).
+  const rows = (empProfileRows || []).filter(isActiveEmpRow);
+  console.info(`[namematch] EmployeeProfile: ${(empProfileRows || []).length} rows, ${rows.length} active (${(empProfileRows || []).length - rows.length} excluded)`);
+  for (const r of rows) {
     const rawName = r['Employee Name'] || r.employee_name;
     if (!rawName) continue;
     const cleanName = stripKnownNameSuffix(rawName);
@@ -1325,86 +1330,61 @@ function buildNameMatcher(empProfileRows) {
 // /shared/names.js — destructured at the top of this script, same logic the
 // server's provision.jobTitleToRole uses.
 
-const _ROLE_RANK = { agent: 0, tm: 1, campaign_lead: 2 };
-// Assemble the { roleOf, isTL, tlCount } index shape from a list of
-// { name, role } pairs, keyed by full normalised name + first+last key. "Leader
-// role wins ties" (a name seen as both agent and tm resolves to tm).
-function _buildRoleIndex(pairs, source) {
-  const roleByKey = new Map();
-  let tlCount = 0;
-  const put = (key, role) => {
-    if (!key) return;
-    const cur = roleByKey.get(key);
-    // Unknown roles (admin/exco) rank below agent so they never displace a tm.
-    if (cur == null || (_ROLE_RANK[role] ?? -1) > (_ROLE_RANK[cur] ?? -1)) roleByKey.set(key, role);
-  };
-  for (const { name, role } of pairs) {
-    if (!name || !role) continue;
-    put(normalizeName(name), role);
-    put(firstLastKey(name), role);
-    if (role === 'tm') tlCount++;
-  }
-  const roleOf = (name) => roleByKey.get(normalizeName(name)) ?? roleByKey.get(firstLastKey(name)) ?? null;
-  return { roleOf, isTL: n => roleOf(n) === 'tm', tlCount, source };
+// _buildRoleIndex / buildRoleIndexFromUsers / resolveTeamNode now live in
+// /shared/names.js (destructured above) so they're unit-testable — that they
+// weren't is why the role-index regressions shipped with a green suite.
+
+// True iff an EmployeeProfile row is for an Active employee (case-insensitive,
+// trimmed). STATE.rawEmpRows carries ~1,600 leavers/non-starters that would
+// otherwise pollute the name/role indexes (a terminated employee can shadow an
+// active namesake) — provision.js filters these server-side; the browser must too.
+function isActiveEmpRow(r) {
+  const s = String(r['Employee Status'] ?? r.employee_status ?? '').trim().toLowerCase();
+  return s === 'active';
 }
 
-// Preferred source: the authoritative roles from Postgres (/api/users), which
-// provision.js already resolved from Job Title lookup ids server-side. Re-doing
-// that resolution in the browser (buildTeamRoleIndex below) duplicated the work
-// and got it wrong (raw view holds unresolved ids). Returns null when there's
-// nothing to build from, so callers fall back.
-function buildRoleIndexFromUsers(users) {
-  if (!Array.isArray(users) || !users.length) return null;
-  return _buildRoleIndex(users.map(u => ({ name: u.full_name, role: u.role })), 'users');
-}
-
-// Fallback: derive roles from the raw EmployeeProfile view when /api/users is
-// unavailable. Returns null (honest — callers fall back to raw team_name
-// grouping) rather than a tlCount-0 index that LOOKS like data, both when no
-// job-title column exists AND when that column holds unresolved lookup ids
-// (which provision resolves server-side but the browser sees raw) — otherwise
-// titleToRole would call an id a title and classify everyone as an agent.
+// Fallback role source: derive from the raw EmployeeProfile view when
+// /api/users/roles is unavailable. Returns null (honest — callers fall back to
+// raw team_name grouping) rather than a tlCount-0 index that LOOKS like data,
+// both when no job-title column exists AND when that column holds unresolved
+// lookup ids (provision resolves these server-side; the browser sees raw) —
+// otherwise titleToRole would call an id a title and classify everyone an agent.
 function buildTeamRoleIndex(empRows) {
   if (!empRows || !empRows.length) return null;
+  const active = empRows.filter(isActiveEmpRow);   // BUG 5: leavers pollute the index
+  console.info(`[roleindex] EmployeeProfile: ${empRows.length} rows, ${active.length} active (${empRows.length - active.length} excluded)`);
+  if (!active.length) return null;
   const normKey = k => String(k).toLowerCase().replace(/[^a-z0-9]/g, '');
   const titleCands = new Set(['jobtitle', 'designation', 'title', 'position']);
-  const sample = empRows.find(r => r) || {};
+  const sample = active.find(r => r) || {};
   let titleKey = null;
   for (const k of Object.keys(sample)) if (titleCands.has(normKey(k))) { titleKey = k; break; }
   if (!titleKey) return null;
   // Refuse to classify if the title column is unresolved lookup ids.
   let idHits = 0, seen = 0;
-  for (const r of empRows) {
+  for (const r of active) {
     const v = r[titleKey];
     if (v == null || v === '') continue;
     seen++;
     if (looksLikeLookupId(v)) idHits++;
   }
   if (seen === 0 || idHits > seen / 2) return null;
+  // Names are passed raw; _buildRoleIndex applies stripKnownNameSuffix itself
+  // (single source — BUG 1), so no strip is needed here.
   const pairs = [];
-  for (const r of empRows) {
+  for (const r of active) {
     const rawName = r['Employee Name'] || r.employee_name;
     if (!rawName) continue;
-    pairs.push({ name: stripKnownNameSuffix(rawName), role: titleToRole(r[titleKey]) });
+    pairs.push({ name: rawName, role: titleToRole(r[titleKey]) });
   }
   return _buildRoleIndex(pairs, 'employee_profile');
 }
-let TEAM_ROLE_INDEX = null;  // set in applyData (from /api/users, or the EmployeeProfile fallback)
-
-// Which team node a metrics row belongs to. Only Team Leaders are team nodes:
-//   • a Team Leader's own row  → their own team (their name)
-//   • an agent under a TL      → that TL's team
-//   • anyone under a Campaign Manager (or an unknown leader) → "— Unassigned"
-// Falls back to the raw leader name when we have no role info (EmployeeProfile
-// missing), preserving the previous behaviour.
+let TEAM_ROLE_INDEX = null;  // set in applyData (from /api/users/roles, or the EmployeeProfile fallback)
 const UNASSIGNED_TEAM = '— Unassigned';
-function resolveTeamNode(personName, leaderName) {
-  const idx = TEAM_ROLE_INDEX;
-  if (!idx || idx.tlCount === 0) return leaderName || UNASSIGNED_TEAM;
-  if (idx.roleOf(personName) === 'tm') return personName || UNASSIGNED_TEAM;
-  if (leaderName && idx.isTL(leaderName)) return leaderName;
-  return UNASSIGNED_TEAM;
-}
+// BUG 4: an index that dumps more than this share of rows into UNASSIGNED is
+// worse than none (e.g. a scope-filtered tm response, or broken matching) — it's
+// discarded in favour of raw team_name grouping and the degraded flag is raised.
+const ROLE_INDEX_MAX_UNASSIGNED = 0.60;
 
 // buildTeamCanonMap (collapse inconsistent team-leader spellings to one
 // canonical name) now lives in /shared/names.js — see the top-of-script
@@ -1699,7 +1679,7 @@ function buildAggregates(rows, gran = 'week') {
   for (const r of rows) {
     const camp = r.campaign_key || WG_MAP[r.workgroup];
     if (!camp) continue;
-    (rawTeamsByCamp[camp] ??= new Set()).add(resolveTeamNode(r.fullname, r.team_name));
+    (rawTeamsByCamp[camp] ??= new Set()).add(resolveTeamNode(r.fullname, r.team_name, TEAM_ROLE_INDEX, UNASSIGNED_TEAM));
   }
   const teamCanonByCamp = {};
   for (const camp in rawTeamsByCamp) teamCanonByCamp[camp] = buildTeamCanonMap([...rawTeamsByCamp[camp]], { skip: UNASSIGNED_TEAM });
@@ -1719,7 +1699,7 @@ function buildAggregates(rows, gran = 'week') {
     // billable shown for the selected period (not an all-time sum).
     ((wgDebug[camp] ??= {})[week] ??= {})[_wg] = (wgDebug[camp][week][_wg] || 0) + _bh;
     weeks.add(week);
-    const team = canonTeam(camp, resolveTeamNode(r.fullname, r.team_name));
+    const team = canonTeam(camp, resolveTeamNode(r.fullname, r.team_name, TEAM_ROLE_INDEX, UNASSIGNED_TEAM));
     const uid = r.user_id;
 
     campWeekRows[camp] ??= {};
@@ -5020,18 +5000,39 @@ function applyData(rows, attendanceRows, empProfileRows, roleUsers) {
   STATE.rawAgentWeek = rows;
   _DATE_COL = detectDateCol(rows);
   // Role index drives the team-leader-only drill-down. Prefer the authoritative
-  // resolved roles from Postgres (/api/users); fall back to deriving from the
-  // raw EmployeeProfile view only when that's unavailable. Built before
-  // aggregation so buildAggregates can group rows by Team Leader.
+  // resolved roles from Postgres (GET /api/users/roles — org-wide name+role, so
+  // it isn't scope-limited like GET /api/users was, BUG 3); fall back to
+  // deriving from the raw EmployeeProfile view only when that's unavailable.
+  // Built before aggregation so buildAggregates can group rows by Team Leader.
   TEAM_ROLE_INDEX = buildRoleIndexFromUsers(roleUsers) || buildTeamRoleIndex(empProfileRows);
-  // Phase 2: a silently inert role index (null / no TLs) is what let team
-  // buckets mis-file undetected. Flag it so the UI can surface it, the same way
-  // attendance outages are surfaced.
+  // BUG 4: guard on the OUTCOME, not just tlCount. A partially-usable index (54
+  // TLs, zero matches; or a one-TL scoped response) sails past a tlCount>0 check
+  // while dumping the whole org into UNASSIGNED. Measure the share that actually
+  // lands there and, above the threshold, discard the index in favour of raw
+  // team_name grouping — a change that moves everyone into one bucket must
+  // refuse to draw.
+  let lostShare = 0;
+  if (TEAM_ROLE_INDEX && TEAM_ROLE_INDEX.tlCount > 0) {
+    const nodes = [];
+    for (const r of rows) {
+      if (!(r.campaign_key || WG_MAP[r.workgroup])) continue;
+      nodes.push(resolveTeamNode(r.fullname, r.team_name, TEAM_ROLE_INDEX, UNASSIGNED_TEAM));
+    }
+    lostShare = unassignedShare(nodes, UNASSIGNED_TEAM);
+    if (lostShare > ROLE_INDEX_MAX_UNASSIGNED) {
+      console.warn(`[roleindex] discarding index: ${(lostShare * 100).toFixed(0)}% of rows fell to ${UNASSIGNED_TEAM} (> ${ROLE_INDEX_MAX_UNASSIGNED * 100}%). Falling back to raw team grouping.`);
+      TEAM_ROLE_INDEX = null;   // raw team_name grouping
+    }
+  }
+  // A silently inert / lossy role index is what let team buckets mis-file
+  // undetected. Flag it so the UI surfaces it, like attendance outages.
   const idxOk = !!(TEAM_ROLE_INDEX && TEAM_ROLE_INDEX.tlCount > 0);
   STATE.roleIndexSource = TEAM_ROLE_INDEX ? TEAM_ROLE_INDEX.source : 'none';
   STATE.roleIndexTlCount = TEAM_ROLE_INDEX ? TEAM_ROLE_INDEX.tlCount : 0;
   STATE.roleIndexDegraded = !idxOk;
   STATE.roleIndexReason = idxOk ? null
+    : lostShare > ROLE_INDEX_MAX_UNASSIGNED
+      ? `Team leaders resolved but ${Math.round(lostShare * 100)}% of rows fell to “${UNASSIGNED_TEAM}” (over the ${Math.round(ROLE_INDEX_MAX_UNASSIGNED * 100)}% limit) — falling back to raw team grouping.`
     : !TEAM_ROLE_INDEX
       ? 'Team leaders can’t be identified (roles unavailable, or Job Titles came back as unresolved lookup ids). Team drill-downs fall back to raw grouping.'
       : 'No team leaders found in the current data — team drill-downs fall back to raw grouping.';
@@ -5104,13 +5105,15 @@ async function fetchAll() {
   return { primary, attendance, empProfile };
 }
 
-// Authoritative resolved roles from Postgres, for the team-leader role index.
-// Scope-filtered server-side (rbac): admin/exco get everyone, a campaign_lead
-// their whole campaign, a tm their own team (incl. themselves). Returns null on
-// any failure so applyData falls back to the EmployeeProfile derivation.
+// Authoritative resolved roles from Postgres for the team-leader role index.
+// Uses the dedicated GET /api/users/roles (name + role only, active users,
+// org-wide, NO scope clause) — GET /api/users is scope-filtered, so a tm only
+// saw their own team and the index collapsed for exactly the people who use the
+// Teams tab (BUG 3). Returns null on any failure so applyData falls back to the
+// EmployeeProfile derivation.
 async function fetchUsers() {
   try {
-    const r = await apiFetch('/api/users');
+    const r = await apiFetch('/api/users/roles');
     if (!r.ok) return null;
     const j = await r.json();
     return Array.isArray(j.users) ? j.users : null;
