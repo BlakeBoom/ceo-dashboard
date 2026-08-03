@@ -7,7 +7,9 @@ import assert from 'node:assert/strict';
 // <script>), so import it for its side effect and read the global — the same
 // contract the browser and the server modules use.
 import '../shared/names.js';
-const { normalizeName, firstLastKey, stripKnownNameSuffix, buildTeamCanonMap, titleToRole, looksLikeLookupId } = globalThis.BoomerangNames;
+const { normalizeName, firstLastKey, stripKnownNameSuffix, buildTeamCanonMap, titleToRole, looksLikeLookupId,
+        buildRoleIndexFromUsers, resolveTeamNode, unassignedShare } = globalThis.BoomerangNames;
+const UNASSIGNED = '— Unassigned';
 
 // provision.js eagerly imports db.js, which reads env vars at module-eval and
 // constructs a pg Pool. Set dummy env BEFORE the dynamic import so eval doesn't
@@ -163,4 +165,58 @@ test('buildTeamCanonMap: two different leaders sharing a first name are NOT merg
   assert.equal(canon.get('Rugshana Hendricks'), 'Rugshana Hendricks');
   assert.equal(canon.get('Rugshana Adams'), 'Rugshana Adams');
   assert.notEqual(canon.get('Rugshana Hendricks'), canon.get('Rugshana Adams'));
+});
+
+// ── role index: the regressions that shipped with a green suite (BUGs 1–4) ───
+test('BUG 1: a name with a "( ... )" suffix is findable by its clean form', () => {
+  // users.full_name carries a Zoho parenthetical; lookups arrive clean from
+  // User_metrics_3. Keys must be built from the stripped name on both sides.
+  const idx = buildRoleIndexFromUsers([{ full_name: 'Rugshana Hendricks ( Rugshana )', role: 'tm' }]);
+  assert.equal(idx.roleOf('Rugshana Hendricks'), 'tm');   // fails before the fix (was null)
+  assert.equal(idx.isTL('Rugshana Hendricks'), true);
+});
+
+test('BUG 2: "Rugshana\'s team" resolves to the TL stored as "Rugshana Hendricks"', () => {
+  const idx = buildRoleIndexFromUsers([
+    { full_name: 'Rugshana Hendricks ( Rugshana )', role: 'tm' },
+    { full_name: 'Abdul Kader ( Abdul )', role: 'agent' },
+  ]);
+  assert.equal(idx.resolveLeaderLabel("Rugshana's team"), 'rugshana hendricks');
+  // TL's own row → their person name; an agent's row → the raw team label; canon
+  // folds the two into one node (covered by the buildTeamCanonMap tests above).
+  assert.equal(resolveTeamNode('Rugshana Hendricks', "Rugshana's team", idx, UNASSIGNED), 'Rugshana Hendricks');
+  assert.equal(resolveTeamNode('Abdul Kader', "Rugshana's team", idx, UNASSIGNED), "Rugshana's team");
+});
+
+test('BUG 2: a curly-apostrophe "Rugshana’s team" resolves identically', () => {
+  const idx = buildRoleIndexFromUsers([{ full_name: 'Rugshana Hendricks', role: 'tm' }]);
+  assert.equal(idx.resolveLeaderLabel('Rugshana’s team'), 'rugshana hendricks');
+  assert.equal(idx.resolveLeaderLabel("Rugshana's team"), 'rugshana hendricks');
+});
+
+test('BUG 2: two leaders sharing a first name are never fused by a team label', () => {
+  const idx = buildRoleIndexFromUsers([
+    { full_name: 'Rugshana Hendricks', role: 'tm' },
+    { full_name: 'Rugshana Adams', role: 'tm' },
+  ]);
+  // Ambiguous bare first name → refused, not guessed.
+  assert.equal(idx.resolveLeaderLabel("Rugshana's team"), null);
+  // Full labels still resolve to the right person.
+  assert.equal(idx.resolveLeaderLabel("Rugshana Adams's team"), 'rugshana adams');
+});
+
+test('BUG 4: a one-TL (scoped tm) index dumps the org to UNASSIGNED → guard trips', () => {
+  const scoped = buildRoleIndexFromUsers([{ full_name: 'Solo Leader', role: 'tm' }]);
+  assert.equal(scoped.tlCount, 1);   // passes the old tlCount>0 check…
+  const rows = [
+    ['Agent A', "Someone's team"], ['Agent B', "Another's team"],
+    ['Agent C', "Third's team"],   ['Agent D', "Fourth's team"],
+  ];
+  const nodes = rows.map(([p, l]) => resolveTeamNode(p, l, scoped, UNASSIGNED));
+  assert.ok(unassignedShare(nodes, UNASSIGNED) > 0.60);   // …but the OUTCOME guard catches it
+});
+
+test('resolveTeamNode: returns the raw leader label when the index is null', () => {
+  assert.equal(resolveTeamNode('Anyone', "Rugshana's team", null, UNASSIGNED), "Rugshana's team");
+  assert.equal(resolveTeamNode('Anyone', '', null, UNASSIGNED), UNASSIGNED);
 });
