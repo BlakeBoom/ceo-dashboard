@@ -38,6 +38,21 @@ router.get('/', async (req, res) => {
   res.json({ users: rows });
 });
 
+// Minimal org-structure feed for the dashboard's team-leader role index:
+// { full_name, role } for active users only, org-wide, with NO scope clause.
+// The Teams tab needs EVERY leader to build a cross-team index; GET / above is
+// scope-filtered (a tm sees only their own team), which collapsed the index for
+// the very people who use that tab. This deliberately exposes name+role
+// org-wide — org structure the Teams tab already implies — and nothing else
+// (no email, id, campaign, team, or job title), so it can't become a staff
+// directory. Registered before the /:id routes so the literal path wins.
+router.get('/roles', async (req, res) => {
+  const { rows } = await query(
+    `SELECT full_name, role FROM users WHERE active = TRUE`
+  );
+  res.json({ users: rows });
+});
+
 // Admin-only: provision login accounts from the Zoho EmployeeProfile view.
 // `?preview=1` parses + classifies without writing, so the admin can sanity-
 // check the mapping against live data first. On commit, returns the generated
