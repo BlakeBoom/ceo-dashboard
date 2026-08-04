@@ -102,9 +102,16 @@ router.get('/team-structure', requireRole('admin'), async (req, res) => {
     .sort((a, b) => b[1] - a[1]).slice(0, 25)
     .map(([node, members]) => ({ node, members }));
 
+  // Merge health: a person is "merged" once their metrics half (zoho_user_id)
+  // and HR half (zoho_employee_no) live on ONE row. If this is ~0, the merge has
+  // not run against the data yet (not deployed, no sync since deploy, or it
+  // matched nothing) — which is exactly why the data cohort has no roles.
+  const merged_people = users.filter(u => u.zoho_user_id != null && u.zoho_employee_no != null).length;
+
   res.json({
     all_active_users: users.length,
     with_metrics_data: dataUsers.length,            // the dashboard population
+    merged_people,                                  // metrics+HR unified onto one row
     coverage_over_all_users: cohortStats(users),    // diluted by dataless records
     coverage_over_data_users: cohortStats(dataUsers), // ← the number that matters
     top_nodes_data_users: top_nodes,
