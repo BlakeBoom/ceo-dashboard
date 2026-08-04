@@ -2295,6 +2295,7 @@ function buildBillableByShift(attRows, empProfileRows, agentMeta, gran) {
   }
   const byCampWeek = {};   // camp -> week -> hrs
   const byTeamWeek = {};   // "camp||team" -> week -> hrs
+  const byAgentWeek = {};  // "camp||uid" -> week -> hrs (so the BAE breakdown reconciles to its team)
   const unmatched = {};    // shift name -> hrs (no campaign match)
   const nonBillable = {};  // role -> hrs (excluded: non-billable role)
   const excluded = {};     // week -> "shift||reason" -> {shift,reason,role,camp,hrs}
@@ -2323,6 +2324,11 @@ function buildBillableByShift(attRows, empProfileRows, agentMeta, gran) {
       (byCampWeek[c] ??= {})[week] = (byCampWeek[c][week] || 0) + amt;
       const tk = c + '||' + team;
       (byTeamWeek[tk] ??= {})[week] = (byTeamWeek[tk][week] || 0) + amt;
+      // Same hours, also per employee, so each BAE's billable sums to its team.
+      if (uid != null) {
+        const ak = c + '||' + uid;
+        (byAgentWeek[ak] ??= {})[week] = (byAgentWeek[ak][week] || 0) + amt;
+      }
     };
     const markNonBillable = (c, lbl, reason, amt) => {
       nonBillable[lbl] = (nonBillable[lbl] || 0) + amt;
@@ -2371,7 +2377,7 @@ function buildBillableByShift(attRows, empProfileRows, agentMeta, gran) {
     }
     attribute(camp, bill);
   }
-  return { byCampWeek, byTeamWeek, unmatched, nonBillable, excluded };
+  return { byCampWeek, byTeamWeek, byAgentWeek, unmatched, nonBillable, excluded };
 }
 
 // Override billable in the already-built campaign/team rollups with the
@@ -2399,6 +2405,20 @@ function applyShiftBillable() {
       if (STATE.teamWeek[camp] && STATE.teamWeek[camp][team] && STATE.teamWeek[camp][team][wk])
         STATE.teamWeek[camp][team][wk].billable = b.byTeamWeek[tk][wk];
   }
+  // Push the same attendance billable down to each agent so the BAE breakdown
+  // reconciles to its team total (keyed camp||uid, so it lands wherever the
+  // agent sits regardless of team key). Agents whose attendance didn't name-match
+  // keep their User_metrics_3 value.
+  const agentByKey = b.byAgentWeek || {};
+  for (const camp in STATE.agentWeek)
+    for (const team in STATE.agentWeek[camp])
+      for (const uid in STATE.agentWeek[camp][team]) {
+        const aw = agentByKey[camp + '||' + uid];
+        if (!aw) continue;
+        for (const wk in STATE.agentWeek[camp][team][uid])
+          if (aw[wk] != null && STATE.agentWeek[camp][team][uid][wk])
+            STATE.agentWeek[camp][team][uid][wk].billable = aw[wk];
+      }
   if (Object.keys(b.unmatched).length) {
     console.warn('[shift] billable not attributed — unmatched shift names:',
       Object.fromEntries(Object.entries(b.unmatched).map(([k, v]) => [k, Math.round(v) + 'h'])));
