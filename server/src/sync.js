@@ -15,7 +15,7 @@
 import { query, withTx } from './db.js';
 import { fetchView, fetchViewByDate, VIEW, monthBounds } from './zoho.js';
 import { aggregateUserMetrics, aggregateCallouts, buildEmployeeUserMap, applyRule, buildTeamCanonMap } from './bonus.js';
-import { resolveManagerLinks } from './provision.js';
+import { resolveManagerLinks, mergeSyncDuplicates } from './provision.js';
 import { canonicalCampaign } from './provision.js';
 
 // A metrics row belongs to a campaign when its workgroup canonicalises to the
@@ -349,11 +349,18 @@ export async function syncAll(yearMonth = currentYearMonth()) {
     }
   }
 
-  // Refresh the reporting hierarchy (users.manager_id) once per full sync, from
-  // the EmployeeProfile rows already fetched above. This runs on the daily cron,
-  // so team structure stays current with no manual step. Best-effort — a
-  // not-yet-applied 0013 migration or a Zoho hiccup must never fail the metrics
-  // sync, and it doesn't change the returned per-campaign results.
+  // Unify each person's two rows (metrics stub ↔ HR/login) and refresh the
+  // reporting hierarchy — once per full sync, on the daily cron, so team
+  // structure stays current with no manual step. Order matters: merge first so
+  // the login row gains the metrics key, THEN resolve manager_id (keyed on the
+  // HR employee number the login row carries). Best-effort — a Zoho hiccup or a
+  // not-yet-applied 0013 migration must never fail the metrics sync, and neither
+  // changes the returned per-campaign results.
+  try {
+    console.info('[sync] merged duplicate rows:', await mergeSyncDuplicates());
+  } catch (err) {
+    console.warn('[sync] duplicate merge skipped:', err.message);
+  }
   try {
     console.info('[sync] manager links:', await resolveManagerLinks({ rows: empRows }));
   } catch (err) {
