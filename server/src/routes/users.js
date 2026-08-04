@@ -5,6 +5,7 @@ import { query } from '../db.js';
 import { hashPassword } from '../auth.js';
 import { requireRole, scopeClause } from '../rbac.js';
 import { provisionFromEmployeeProfile } from '../provision.js';
+import { computeTeamStructure } from '../teamStructure.js';
 
 const router = Router();
 
@@ -51,6 +52,31 @@ router.get('/roles', async (req, res) => {
     `SELECT full_name, role FROM users WHERE active = TRUE`
   );
   res.json({ users: rows });
+});
+
+// Admin-only, read-only diagnostic (team-hierarchy rollout Step 1). Returns the
+// team structure computed from users.role + users.manager_id — counts and the
+// top nodes by member count — so an admin can eyeball the tree in the browser
+// before anything renders from it. No per-user PII beyond node names, which are
+// org structure. Registered before the /:id routes so the literal path wins.
+router.get('/team-structure', requireRole('admin'), async (req, res) => {
+  const { rows: users } = await query(
+    `SELECT id, full_name, role, campaign_id, manager_id, zoho_user_id
+       FROM users WHERE active = TRUE`
+  );
+  const { nodes, stats } = computeTeamStructure(users);
+  const byNode = new Map();
+  for (const n of nodes) byNode.set(n.team_node, (byNode.get(n.team_node) || 0) + 1);
+  const top_nodes = [...byNode.entries()]
+    .sort((a, b) => b[1] - a[1]).slice(0, 25)
+    .map(([node, members]) => ({ node, members }));
+  res.json({
+    active_users: users.length,
+    with_manager_id: users.filter(u => u.manager_id != null).length,
+    agents_without_manager: users.filter(u => u.manager_id == null && u.role === 'agent').length,
+    stats,
+    top_nodes,
+  });
 });
 
 // Admin-only: provision login accounts from the Zoho EmployeeProfile view.
