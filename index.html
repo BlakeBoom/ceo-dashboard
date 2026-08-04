@@ -1386,6 +1386,17 @@ const UNASSIGNED_TEAM = '— Unassigned';
 // discarded in favour of raw team_name grouping and the degraded flag is raised.
 const ROLE_INDEX_MAX_UNASSIGNED = 0.60;
 
+// Team node for a metrics row (Step 2). Prefer the authoritative structure map
+// from /api/users/team-map, keyed by the metrics user_id — this is the exact
+// reporting hierarchy resolved server-side. Fall back to the old label/role-index
+// resolution when the map has no entry for this user (unmerged / not yet synced)
+// or the map didn't load, so behaviour degrades gracefully rather than breaking.
+function resolveTeamForRow(r) {
+  const m = STATE.teamMap && r.user_id != null ? STATE.teamMap.get(String(r.user_id)) : null;
+  if (m && m.team_node) return m.team_node;
+  return resolveTeamNode(r.fullname, r.team_name, TEAM_ROLE_INDEX, UNASSIGNED_TEAM);
+}
+
 // buildTeamCanonMap (collapse inconsistent team-leader spellings to one
 // canonical name) now lives in /shared/names.js — see the top-of-script
 // destructure. Callers pass { skip: UNASSIGNED_TEAM } so the synthetic
@@ -1425,6 +1436,7 @@ const FALLBACK_RAW = [];
 // ════════════════════════════════════════════════════════════════════════
 let STATE = {
   rawAgentWeek: null,     // raw agent-week records
+  teamMap: null,          // Map(zoho_user_id -> {team_node,node_type}) from /api/users/team-map (authoritative team grouping)
   campaignWeek: null,     // {[camp]:{[week]:metrics}}
   teamWeek: null,         // {[camp]:{[team]:{[week]:metrics}}}
   agentWeek: null,        // {[camp]:{[team]:{[user]:{[week]:metrics}}}}
@@ -1679,7 +1691,7 @@ function buildAggregates(rows, gran = 'week') {
   for (const r of rows) {
     const camp = r.campaign_key || WG_MAP[r.workgroup];
     if (!camp) continue;
-    (rawTeamsByCamp[camp] ??= new Set()).add(resolveTeamNode(r.fullname, r.team_name, TEAM_ROLE_INDEX, UNASSIGNED_TEAM));
+    (rawTeamsByCamp[camp] ??= new Set()).add(resolveTeamForRow(r));
   }
   const teamCanonByCamp = {};
   for (const camp in rawTeamsByCamp) teamCanonByCamp[camp] = buildTeamCanonMap([...rawTeamsByCamp[camp]], { skip: UNASSIGNED_TEAM });
@@ -1699,7 +1711,7 @@ function buildAggregates(rows, gran = 'week') {
     // billable shown for the selected period (not an all-time sum).
     ((wgDebug[camp] ??= {})[week] ??= {})[_wg] = (wgDebug[camp][week][_wg] || 0) + _bh;
     weeks.add(week);
-    const team = canonTeam(camp, resolveTeamNode(r.fullname, r.team_name, TEAM_ROLE_INDEX, UNASSIGNED_TEAM));
+    const team = canonTeam(camp, resolveTeamForRow(r));
     const uid = r.user_id;
 
     campWeekRows[camp] ??= {};
@@ -5016,7 +5028,7 @@ function applyData(rows, attendanceRows, empProfileRows, roleUsers) {
     const nodes = [];
     for (const r of rows) {
       if (!(r.campaign_key || WG_MAP[r.workgroup])) continue;
-      nodes.push(resolveTeamNode(r.fullname, r.team_name, TEAM_ROLE_INDEX, UNASSIGNED_TEAM));
+      nodes.push(resolveTeamForRow(r));
     }
     lostShare = unassignedShare(nodes, UNASSIGNED_TEAM);
     if (lostShare > ROLE_INDEX_MAX_UNASSIGNED) {
@@ -5120,6 +5132,21 @@ async function fetchUsers() {
   } catch { return null; }
 }
 
+// Authoritative team assignment per metrics user (Step 2), from
+// /api/users/team-map. Returns Map(zoho_user_id -> {team_node,node_type}), or
+// null on failure so team grouping falls back to the old label resolution.
+async function fetchTeamMap() {
+  try {
+    const r = await apiFetch('/api/users/team-map');
+    if (!r.ok) return null;
+    const j = await r.json();
+    if (!Array.isArray(j.nodes)) return null;
+    const m = new Map();
+    for (const n of j.nodes) m.set(String(n.zoho_user_id), { team_node: n.team_node, node_type: n.node_type });
+    return m;
+  } catch { return null; }
+}
+
 async function init() {
   // Wire tab nav
   document.querySelectorAll('.tab').forEach(t => t.onclick = () => setView(t.dataset.view));
@@ -5147,7 +5174,8 @@ async function init() {
     bar.classList.add('loading');
     setBadge('static', 'Connecting…');
     try {
-      const [{ primary, attendance, empProfile }, roleUsers] = await Promise.all([fetchAll(), fetchUsers()]);
+      const [{ primary, attendance, empProfile }, roleUsers, teamMap] = await Promise.all([fetchAll(), fetchUsers(), fetchTeamMap()]);
+      STATE.teamMap = teamMap;
       applyData(primary, attendance, empProfile, roleUsers);
       STATE.dataSource = 'live';
       setBadge('live', STATE.shrinkageAvailable ? 'Live · shrinkage on' : 'Live');
@@ -5160,7 +5188,8 @@ async function init() {
       setInterval(async () => {
         bar.classList.add('loading');
         try {
-          const [next, roleUsers] = await Promise.all([fetchAll(), fetchUsers()]);
+          const [next, roleUsers, teamMap] = await Promise.all([fetchAll(), fetchUsers(), fetchTeamMap()]);
+          STATE.teamMap = teamMap;
           applyData(next.primary, next.attendance, next.empProfile, roleUsers);
           STATE.dataSource = 'live';
           setBadge('live', STATE.shrinkageAvailable ? 'Live · shrinkage on' : 'Live');
