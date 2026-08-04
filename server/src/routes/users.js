@@ -61,21 +61,53 @@ router.get('/roles', async (req, res) => {
 // org structure. Registered before the /:id routes so the literal path wins.
 router.get('/team-structure', requireRole('admin'), async (req, res) => {
   const { rows: users } = await query(
-    `SELECT id, full_name, role, campaign_id, manager_id, zoho_user_id
+    `SELECT id, full_name, role, campaign_id, manager_id, zoho_user_id, zoho_employee_no
        FROM users WHERE active = TRUE`
   );
-  const { nodes, stats } = computeTeamStructure(users);
+  // Resolve every user against the FULL graph (a manager may be outside any
+  // subset), then report coverage over two cohorts.
+  const { nodes } = computeTeamStructure(users);
+  const nodeByUser = new Map(nodes.map(n => [n.user_id, n]));
+
+  const cohortStats = (subset) => {
+    const s = { users: 0, tl: 0, cm: 0, unassigned: 0, with_manager: 0 };
+    const nodeNames = new Set();
+    for (const u of subset) {
+      const n = nodeByUser.get(u.id); if (!n) continue;
+      s.users++; s[n.node_type]++;
+      if (u.manager_id != null) s.with_manager++;
+      if (n.node_type !== 'unassigned') nodeNames.add(n.team_node);
+    }
+    s.node_count = nodeNames.size;
+    s.manager_coverage_pct = s.users ? +(s.with_manager / s.users * 100).toFixed(1) : 0;
+    s.unassigned_pct = s.users ? +(s.unassigned / s.users * 100).toFixed(1) : 0;
+    return s;
+  };
+
+  // The dashboard only renders employees who carry metrics for the period. A
+  // user gets a zoho_user_id when the metrics sync sees them in User_metrics_3,
+  // so "has zoho_user_id" ≈ "appears on the dashboard" — the population that
+  // actually matters. The full users table also holds provisioned logins and
+  // stale records that never render and would dilute any coverage number.
+  // (Caveat: this is "ever synced", not "has data THIS period" — the exact
+  // per-period figure comes from the dashboard's own guard once Step 2 wires it.)
+  const dataUsers = users.filter(u => u.zoho_user_id != null);
+
   const byNode = new Map();
-  for (const n of nodes) byNode.set(n.team_node, (byNode.get(n.team_node) || 0) + 1);
+  for (const u of dataUsers) {
+    const n = nodeByUser.get(u.id); if (!n) continue;
+    byNode.set(n.team_node, (byNode.get(n.team_node) || 0) + 1);
+  }
   const top_nodes = [...byNode.entries()]
     .sort((a, b) => b[1] - a[1]).slice(0, 25)
     .map(([node, members]) => ({ node, members }));
+
   res.json({
-    active_users: users.length,
-    with_manager_id: users.filter(u => u.manager_id != null).length,
-    agents_without_manager: users.filter(u => u.manager_id == null && u.role === 'agent').length,
-    stats,
-    top_nodes,
+    all_active_users: users.length,
+    with_metrics_data: dataUsers.length,            // the dashboard population
+    coverage_over_all_users: cohortStats(users),    // diluted by dataless records
+    coverage_over_data_users: cohortStats(dataUsers), // ← the number that matters
+    top_nodes_data_users: top_nodes,
   });
 });
 
