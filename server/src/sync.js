@@ -15,6 +15,7 @@
 import { query, withTx } from './db.js';
 import { fetchView, fetchViewByDate, VIEW, monthBounds } from './zoho.js';
 import { aggregateUserMetrics, aggregateCallouts, buildEmployeeUserMap, applyRule, buildTeamCanonMap } from './bonus.js';
+import { resolveManagerLinks } from './provision.js';
 import { canonicalCampaign } from './provision.js';
 
 // A metrics row belongs to a campaign when its workgroup canonicalises to the
@@ -347,5 +348,17 @@ export async function syncAll(yearMonth = currentYearMonth()) {
       results.push({ campaign_id: r.campaign_id, error: err.message });
     }
   }
+
+  // Refresh the reporting hierarchy (users.manager_id) once per full sync, from
+  // the EmployeeProfile rows already fetched above. This runs on the daily cron,
+  // so team structure stays current with no manual step. Best-effort — a
+  // not-yet-applied 0013 migration or a Zoho hiccup must never fail the metrics
+  // sync, and it doesn't change the returned per-campaign results.
+  try {
+    console.info('[sync] manager links:', await resolveManagerLinks({ rows: empRows }));
+  } catch (err) {
+    console.warn('[sync] manager-link resolution skipped:', err.message);
+  }
+
   return results;
 }
