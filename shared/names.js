@@ -39,6 +39,14 @@
     return String(s).replace(/\s*\([^)]+\)\s*$/, '').trim();
   }
 
+  // Strip a team label down to its leader-name tokens: remove the possessive
+  // ("'s"/"’s", straight or curly) and the word "team", so "Rugshana's team"
+  // reduces to "Rugshana ". Pre-normalisation. One copy, used by both
+  // buildTeamCanonMap (dedup) and resolveLeaderLabel (team-label → leader).
+  function stripTeamLabel(s) {
+    return String(s ?? '').replace(/['’]s\b/gi, '').replace(/\bteam\b/gi, '');
+  }
+
   // Collapse inconsistent team-leader spellings to a single canonical name so one
   // team isn't split across "Elzette" and "Elzette Saaiman". Group by first name;
   // when a first name maps to exactly one full identity, every variant (incl. the
@@ -53,7 +61,7 @@
     const info = [];
     // Names arrive as "<Leader>'s team"; strip the possessive + trailing "team"
     // word so the apostrophe-s ("elzettes") doesn't corrupt the first-name token.
-    const canonKey = (n) => normalizeName(String(n).replace(/['’]s\b/gi, '').replace(/\bteam\b/gi, ''));
+    const canonKey = (n) => normalizeName(stripTeamLabel(n));
     for (const n of names) {
       if (!n || n === skip) continue;
       const k = canonKey(n) || '';
@@ -109,8 +117,106 @@
     return /^\d{10,}$/.test(String(v ?? '').trim());
   }
 
+  const _ROLE_RANK = { agent: 0, tm: 1, campaign_lead: 2 };
+
+  // Build the team role index — { roleOf, isTL, resolveLeaderLabel, tlCount,
+  // source } — from {name, role} pairs, keyed by full normalised name +
+  // first+last key. "Leader role wins ties" (a name seen as both agent and tm
+  // resolves to tm; unknown roles like admin/exco rank below agent so they never
+  // displace a tm).
+  //
+  // BUG 1 fix: stripKnownNameSuffix is applied HERE, on both the key side and
+  // the roleOf() lookup side, so a Zoho parenthetical ("Rugshana Hendricks
+  // ( Rugshana )") in users.full_name can't desync the stored keys from the
+  // clean names that arrive from User_metrics_3. Doing it inside the builder
+  // means no caller can forget it and no future builder can reintroduce the bug.
+  function _buildRoleIndex(pairs, source) {
+    const roleByKey = new Map();
+    const tlByFirst = new Map();   // first token → Set of distinct TL full-name keys
+    let tlCount = 0;
+    const put = (key, role) => {
+      if (!key) return;
+      const cur = roleByKey.get(key);
+      if (cur == null || (_ROLE_RANK[role] ?? -1) > (_ROLE_RANK[cur] ?? -1)) roleByKey.set(key, role);
+    };
+    for (const { name, role } of pairs) {
+      const clean = stripKnownNameSuffix(name);
+      if (!clean || !role) continue;
+      const full = normalizeName(clean);
+      put(full, role);
+      put(firstLastKey(clean), role);
+      if (role === 'tm') {
+        tlCount++;
+        const first = full ? full.split(' ')[0] : null;
+        if (first) {
+          if (!tlByFirst.has(first)) tlByFirst.set(first, new Set());
+          tlByFirst.get(first).add(full);
+        }
+      }
+    }
+    const roleOf = (name) => {
+      const clean = stripKnownNameSuffix(name);
+      return roleByKey.get(normalizeName(clean)) ?? roleByKey.get(firstLastKey(clean)) ?? null;
+    };
+    // BUG 2 fix: resolving a TEAM LABEL (e.g. "Rugshana's team") to a leader is a
+    // DISTINCT operation from roleOf (which takes a person name) — don't overload
+    // roleOf. Strip the possessive + "team", try full then first+last, then a
+    // first-name index built ONLY where a first name maps to exactly one TL
+    // (ambiguous first names are refused, never guessed — mirrors
+    // buildTeamCanonMap's fullFls.size===1 guard). Returns the resolved TL's
+    // normalised name key, or null.
+    const resolveLeaderLabel = (label) => {
+      if (!label) return null;
+      const bare = stripTeamLabel(label);
+      const full = normalizeName(bare);
+      if (full && roleByKey.get(full) === 'tm') return full;
+      const fl = firstLastKey(bare);
+      if (fl && roleByKey.get(fl) === 'tm') return fl;
+      const first = full ? full.split(' ')[0] : null;
+      if (first) {
+        const set = tlByFirst.get(first);
+        if (set && set.size === 1) return [...set][0];   // unique first name among TLs
+      }
+      return null;
+    };
+    return { roleOf, isTL: n => roleOf(n) === 'tm', resolveLeaderLabel, tlCount, source };
+  }
+
+  // Preferred source: the authoritative resolved roles from Postgres, provided
+  // by GET /api/users/roles ({ full_name, role } for active users, org-wide).
+  // Returns null when there's nothing to build from, so callers fall back.
+  function buildRoleIndexFromUsers(users) {
+    if (!Array.isArray(users) || !users.length) return null;
+    return _buildRoleIndex(users.map(u => ({ name: u.full_name, role: u.role })), 'users');
+  }
+
+  // Which team node a metrics row belongs to. Only Team Leaders are team nodes:
+  //   • a Team Leader's own row  → their own person name
+  //   • an agent under a TL      → that TL's team label (raw leaderName)
+  //   • everyone else            → `unassigned`
+  // With a null / empty index it falls back to the raw leader label, preserving
+  // the pre-index behaviour. Takes the index and sentinel as arguments (no
+  // globals) so it is unit-testable.
+  function resolveTeamNode(personName, leaderName, index, unassigned) {
+    if (!index || index.tlCount === 0) return leaderName || unassigned;
+    if (index.roleOf(personName) === 'tm') return personName || unassigned;
+    if (leaderName && index.resolveLeaderLabel(leaderName)) return leaderName;
+    return unassigned;
+  }
+
+  // BUG 4 helper: fraction of resolved team nodes that landed in `unassigned`.
+  // An index that dumps most of the org into one bucket is worse than no index;
+  // the caller compares this to a threshold and discards the index if exceeded.
+  function unassignedShare(nodes, unassigned) {
+    if (!nodes.length) return 0;
+    let lost = 0;
+    for (const n of nodes) if (n === unassigned) lost++;
+    return lost / nodes.length;
+  }
+
   root.BoomerangNames = {
-    normalizeName, firstLastKey, stripKnownNameSuffix, buildTeamCanonMap,
+    normalizeName, firstLastKey, stripKnownNameSuffix, stripTeamLabel, buildTeamCanonMap,
     titleToRole, looksLikeLookupId,
+    _buildRoleIndex, buildRoleIndexFromUsers, resolveTeamNode, unassignedShare,
   };
 })(globalThis);
