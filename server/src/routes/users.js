@@ -54,6 +54,24 @@ router.get('/roles', async (req, res) => {
   res.json({ users: rows });
 });
 
+// Per-user team assignment for the dashboard's Teams grouping (rollout Step 2).
+// Keyed by zoho_user_id (== User_metrics_3.user_id), so the browser groups its
+// live metrics rows by the authoritative reporting hierarchy instead of parsing
+// "<leader>'s team" labels. Authenticated (every signed-in user's dashboard
+// needs it); returns only zoho_user_id + node label + type — org structure, the
+// same sensitivity as /roles. Registered before the /:id routes.
+router.get('/team-map', async (req, res) => {
+  const { rows: users } = await query(
+    `SELECT id, full_name, role, campaign_id, manager_id, zoho_user_id
+       FROM users WHERE active = TRUE`
+  );
+  const { nodes } = computeTeamStructure(users);
+  const out = nodes
+    .filter(n => n.zoho_user_id != null)   // only rows that appear in metrics
+    .map(n => ({ zoho_user_id: n.zoho_user_id, team_node: n.team_node, node_type: n.node_type }));
+  res.json({ nodes: out });
+});
+
 // Admin-only, read-only diagnostic (team-hierarchy rollout Step 1). Returns the
 // team structure computed from users.role + users.manager_id — counts and the
 // top nodes by member count — so an admin can eyeball the tree in the browser

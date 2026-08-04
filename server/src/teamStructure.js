@@ -21,8 +21,11 @@ export function managerEmployeeNo(reportingToName) {
   return m ? m[1] : null;
 }
 
-function tlLabel(u) { return u.full_name; }
-function cmLabel(u) { return `${u.full_name} — direct & unassigned`; }
+// Node labels are shown in the Teams tab, so drop the Zoho "( Nickname )" suffix
+// from the display name. (Kept local so this module stays import-free/testable.)
+function cleanName(s) { return String(s ?? '').replace(/\s*\([^)]+\)\s*$/, '').trim(); }
+function tlLabel(u) { return cleanName(u.full_name); }
+function cmLabel(u) { return `${cleanName(u.full_name)} — direct & unassigned`; }
 
 // Resolve one user to { node, type }. `byId` maps user.id → user; `cmByCampaign`
 // maps campaign_id → the campaign's sole CM (or absent when 0 or >1 CMs).
