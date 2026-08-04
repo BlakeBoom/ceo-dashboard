@@ -1,6 +1,10 @@
 # Proposal: drive team structure from the reporting hierarchy
 
-**Status:** DRAFT — proposal only, nothing here is implemented.
+**Status:** Step 1 (data phase) implemented in this branch — migration `0013`,
+`teamNodeFor`/`computeTeamStructure` (+ tests), `manager_id` resolution in
+provisioning, and a diagnostic script. Steps 2–3 (serve + read, cleanup) remain
+proposal only, pending verification of Step 1's tree against live data.
+Decisions 1–4 below are confirmed by the business owner.
 **Author:** Claude Code · **Depends on:** the role-index fixes merged in PR #10.
 
 ## Why

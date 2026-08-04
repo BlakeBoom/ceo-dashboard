@@ -20,6 +20,7 @@ import { hashPassword } from './auth.js';
 // on normalised name then first+last, so it reuses the same normaliser as the
 // dashboard/sync rather than its own copy.
 import '../../shared/names.js';
+import { managerEmployeeNo } from './teamStructure.js';
 const {
   normalizeName: mergeNorm, firstLastKey: mergeFirstLast,
   titleToRole, looksLikeLookupId,
@@ -527,12 +528,61 @@ export async function provisionFromEmployeeProfile({ preview = false, domain = '
   // human never appears twice (metrics on one row, login on another).
   const { merged } = await mergeSyncDuplicates();
 
+  // Resolve the reporting hierarchy (users.manager_id) now that every account
+  // exists. Reuses the EmployeeProfile rows already fetched above. Best-effort:
+  // if the 0013 migration hasn't run yet, log and continue rather than failing
+  // the whole provisioning run.
+  let managerLinks = null;
+  try {
+    managerLinks = await resolveManagerLinks({ rows, cols });
+  } catch (err) {
+    console.warn('[provision] manager-link resolution skipped:', err.message);
+  }
+
   return {
     preview: false,
-    summary: { ...summary, created: created.length, updated, claimed: claimRows.length, merged, failed: failures.length },
+    summary: { ...summary, created: created.length, updated, claimed: claimRows.length, merged, failed: failures.length, manager_links: managerLinks },
     created,
     failures: failures.slice(0, 25),
   };
+}
+
+// Resolve users.manager_id from EmployeeProfile "Reporting To (Name)" — the
+// manager's HR number is a trailing token, matched to users.zoho_employee_no.
+// Active rows only (an inactive/unmatched manager leaves manager_id NULL, so the
+// report falls to the campaign CM / Unassigned bucket). Idempotent — safe to
+// re-run; only writes rows whose link actually changed. Pass { rows, cols } to
+// reuse an already-fetched EmployeeProfile, or omit to fetch fresh.
+export async function resolveManagerLinks({ rows = null, cols = null, viewId = null } = {}) {
+  if (!rows) {
+    const employeeViewId = viewId || process.env.ZOHO_EMPLOYEE_VIEW_ID || VIEW.employee;
+    rows = await fetchView(employeeViewId);
+  }
+  cols = cols || detectProfileColumns(rows);
+  if (!cols.empNo || !cols.manager) return { pairs: 0, linked: 0, reason: 'no emp-no / reporting-to column' };
+
+  const empNos = [], mgrNos = [];
+  for (const r of rows) {
+    if (cols.status != null) {
+      const st = String(r[cols.status] ?? '').trim().toLowerCase();
+      if (st && st !== 'active') continue;
+    }
+    const empNo = String(r[cols.empNo] ?? '').trim();
+    const mgrNo = managerEmployeeNo(r[cols.manager]);
+    if (empNo && mgrNo && empNo !== mgrNo) { empNos.push(empNo); mgrNos.push(mgrNo); }
+  }
+  if (!empNos.length) return { pairs: 0, linked: 0 };
+
+  const { rowCount } = await query(
+    `UPDATE users u
+        SET manager_id = mgr.id, updated_at = NOW()
+       FROM unnest($1::text[], $2::text[]) AS t(emp_no, mgr_no)
+       JOIN users mgr ON mgr.zoho_employee_no = t.mgr_no AND mgr.active = TRUE
+      WHERE u.zoho_employee_no = t.emp_no AND u.active = TRUE
+        AND u.manager_id IS DISTINCT FROM mgr.id`,
+    [empNos, mgrNos]
+  );
+  return { pairs: empNos.length, linked: rowCount, distinct_managers: new Set(mgrNos).size };
 }
 
 function tally(arr) {
