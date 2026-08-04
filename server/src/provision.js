@@ -22,9 +22,15 @@ import { hashPassword } from './auth.js';
 import '../../shared/names.js';
 import { managerEmployeeNo } from './teamStructure.js';
 const {
-  normalizeName: mergeNorm, firstLastKey: mergeFirstLast,
+  normalizeName, firstLastKey, stripKnownNameSuffix,
   titleToRole, looksLikeLookupId,
 } = globalThis.BoomerangNames;
+// Strip the Zoho "( Nickname )" suffix BEFORE normalising for the duplicate
+// merge, so an HR row ("Rugshana Hendricks ( Rugshana )") keys the same as its
+// metrics row ("Rugshana Hendricks"). Without this the two never match and every
+// person stays split across two rows (BUG 1, server side).
+const mergeNorm = (s) => normalizeName(stripKnownNameSuffix(s));
+const mergeFirstLast = (s) => firstLastKey(stripKnownNameSuffix(s));
 // jobTitleToRole and looksLikeLookupId are the shared implementations (see
 // /shared/names.js) so the server and the dashboard classify identically —
 // previously this file's copy was missing the bare 'team lead' variant.
