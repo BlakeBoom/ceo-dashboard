@@ -623,23 +623,52 @@ export async function mergeSyncDuplicates() {
        FROM users WHERE email IS NOT NULL AND active = TRUE`
   );
 
-  const byKey = new Map();
+  // Indexes, most-specific first:
+  //   1. campaign-scoped full name / first+last (the original, safe match);
+  //   2. GLOBAL full name / first+last, used only when that name maps to exactly
+  //      ONE login — so a person whose metrics-campaign differs from their HR
+  //      department still merges, without ever fusing two different people who
+  //      share a name (ambiguous names fall back to campaign scope);
+  //   3. prefix, for User_metrics_3's ~30-char name truncation — a bare name
+  //      that is a prefix of exactly one login's name.
+  const AMBIGUOUS = Symbol('ambiguous');
+  const campKey = new Map();      // "cid:key" -> login
+  const globalFull = new Map();   // fullKey -> login | AMBIGUOUS
+  const globalFL = new Map();     // flKey   -> login | AMBIGUOUS
+  const loginNorms = [];          // [{ norm, login }] for prefix matching
+  const addUnique = (map, key, login) => {
+    if (!key) return;
+    const cur = map.get(key);
+    if (cur == null) map.set(key, login);
+    else if (cur !== AMBIGUOUS && cur.id !== login.id) map.set(key, AMBIGUOUS);
+  };
   for (const p of logins) {
-    for (const k of [mergeNorm(p.full_name), mergeFirstLast(p.full_name)]) {
+    const full = mergeNorm(p.full_name), fl = mergeFirstLast(p.full_name);
+    for (const k of [full, fl]) {
       const key = k ? `${p.campaign_id}:${k}` : null;
-      if (key && !byKey.has(key)) byKey.set(key, p);
+      if (key && !campKey.has(key)) campKey.set(key, p);
     }
+    addUnique(globalFull, full, p);
+    addUnique(globalFL, fl, p);
+    if (full && full.length >= 20) loginNorms.push({ norm: full, login: p });
   }
+  const uniq = (map, key) => { const v = key ? map.get(key) : null; return (v && v !== AMBIGUOUS) ? v : null; };
 
   const merges = [];
   const usedTargets = new Set();
   for (const s of bare) {
-    // mergeNorm/mergeFirstLast can be null (empty/blank name); guard before
-    // building the lookup key so we never form a "cid:null" key that could
-    // collide with a real login whose name literally normalises to "null".
+    // mergeNorm/mergeFirstLast can be null (empty/blank name); the `&&` guards
+    // stop a null key from forming a bogus lookup.
     const nk = mergeNorm(s.full_name), fk = mergeFirstLast(s.full_name);
-    const p = (nk && byKey.get(`${s.campaign_id}:${nk}`))
-           || (fk && byKey.get(`${s.campaign_id}:${fk}`));
+    let p = (nk && campKey.get(`${s.campaign_id}:${nk}`))
+         || (fk && campKey.get(`${s.campaign_id}:${fk}`))
+         || (nk && uniq(globalFull, nk))
+         || (fk && uniq(globalFL, fk));
+    if (!p && nk && nk.length >= 20) {
+      // Truncated metrics name → the one login whose name starts with it.
+      const cands = loginNorms.filter(x => x.norm.startsWith(nk));
+      if (cands.length === 1) p = cands[0].login;
+    }
     if (p && p.id !== s.id && !usedTargets.has(p.id)) {
       usedTargets.add(p.id);
       merges.push({ fromId: s.id, toId: p.id, zuid: s.zoho_user_id, teamId: s.team_id });
