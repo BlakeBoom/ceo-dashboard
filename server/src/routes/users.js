@@ -6,6 +6,8 @@ import { hashPassword } from '../auth.js';
 import { requireRole, scopeClause } from '../rbac.js';
 import { provisionFromEmployeeProfile } from '../provision.js';
 import { computeTeamStructure } from '../teamStructure.js';
+import '../../../shared/names.js';
+const { normalizeName, stripKnownNameSuffix } = globalThis.BoomerangNames;
 
 const router = Router();
 
@@ -66,9 +68,27 @@ router.get('/team-map', async (req, res) => {
        FROM users WHERE active = TRUE`
   );
   const { nodes } = computeTeamStructure(users);
-  const out = nodes
-    .filter(n => n.zoho_user_id != null)   // only rows that appear in metrics
-    .map(n => ({ zoho_user_id: n.zoho_user_id, team_node: n.team_node, node_type: n.node_type }));
+  // Two join keys, because zoho_user_id only exists for people the bonus sync
+  // registered (bonus-ruled campaigns). name_key (clean, normalised full name)
+  // is set by provisioning for EVERY active employee, so non-bonus campaigns
+  // (e.g. Beer52) still match — but ONLY when the name is unique, so two people
+  // who share a name are never fused (they fall back to the old resolution).
+  const nameKeyById = new Map();
+  const nameCount = new Map();
+  for (const u of users) {
+    const k = normalizeName(stripKnownNameSuffix(u.full_name));
+    nameKeyById.set(u.id, k);
+    if (k) nameCount.set(k, (nameCount.get(k) || 0) + 1);
+  }
+  const out = nodes.map(n => {
+    const k = nameKeyById.get(n.user_id);
+    return {
+      zoho_user_id: n.zoho_user_id,
+      name_key: (k && nameCount.get(k) === 1) ? k : null,
+      team_node: n.team_node,
+      node_type: n.node_type,
+    };
+  });
   res.json({ nodes: out });
 });
 

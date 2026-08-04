@@ -1392,8 +1392,17 @@ const ROLE_INDEX_MAX_UNASSIGNED = 0.60;
 // resolution when the map has no entry for this user (unmerged / not yet synced)
 // or the map didn't load, so behaviour degrades gracefully rather than breaking.
 function resolveTeamForRow(r) {
-  const m = STATE.teamMap && r.user_id != null ? STATE.teamMap.get(String(r.user_id)) : null;
-  if (m && m.team_node) return m.team_node;
+  const tm = STATE.teamMap;
+  if (tm) {
+    // 1. exact metrics id (bonus-ruled campaigns);
+    // 2. unique clean name (covers non-bonus campaigns like Beer52, where people
+    //    have provisioned rows but no metrics id).
+    const byId = r.user_id != null ? tm.byId.get(String(r.user_id)) : null;
+    if (byId) return byId.team_node;
+    const nk = normalizeName(stripKnownNameSuffix(r.fullname));
+    const byName = nk ? tm.byName.get(nk) : null;
+    if (byName) return byName.team_node;
+  }
   return resolveTeamNode(r.fullname, r.team_name, TEAM_ROLE_INDEX, UNASSIGNED_TEAM);
 }
 
@@ -1436,7 +1445,7 @@ const FALLBACK_RAW = [];
 // ════════════════════════════════════════════════════════════════════════
 let STATE = {
   rawAgentWeek: null,     // raw agent-week records
-  teamMap: null,          // Map(zoho_user_id -> {team_node,node_type}) from /api/users/team-map (authoritative team grouping)
+  teamMap: null,          // { byId: Map(zoho_user_id->node), byName: Map(cleanName->node) } from /api/users/team-map
   campaignWeek: null,     // {[camp]:{[week]:metrics}}
   teamWeek: null,         // {[camp]:{[team]:{[week]:metrics}}}
   agentWeek: null,        // {[camp]:{[team]:{[user]:{[week]:metrics}}}}
@@ -5141,9 +5150,13 @@ async function fetchTeamMap() {
     if (!r.ok) return null;
     const j = await r.json();
     if (!Array.isArray(j.nodes)) return null;
-    const m = new Map();
-    for (const n of j.nodes) m.set(String(n.zoho_user_id), { team_node: n.team_node, node_type: n.node_type });
-    return m;
+    const byId = new Map(), byName = new Map();
+    for (const n of j.nodes) {
+      const node = { team_node: n.team_node, node_type: n.node_type };
+      if (n.zoho_user_id != null) byId.set(String(n.zoho_user_id), node);
+      if (n.name_key) byName.set(n.name_key, node);   // server pre-guarantees name uniqueness
+    }
+    return { byId, byName };
   } catch { return null; }
 }
 
