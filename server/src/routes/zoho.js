@@ -9,7 +9,7 @@
 import { Router } from 'express';
 import { requireRole } from '../rbac.js';
 import { fetchView, fetchViewByDate, VIEW } from '../zoho.js';
-import { canonicalCampaign } from '../provision.js';
+import { canonicalCampaign, buildDepartmentMap, resolveDeptCampaign, CAMPAIGN_VIEW_ID, DIVISIONS_VIEW_ID } from '../provision.js';
 import { seesAllScope } from '../rbac.js';
 // Shared with the dashboard so name matching lines up exactly (see
 // /shared/names.js). firstLast is this file's local name for firstLastKey.
@@ -75,6 +75,62 @@ function scopeMetricsRows(user, rows) {
   return out;
 }
 
+// EmployeeProfile.Department holds a Zoho lookup id, not a readable name. It
+// resolves against the Campaign companion table (with Divisions merged in as a
+// fallback) — the SAME two views + merge order provision.js uses. The browser
+// must never try to interpret the raw id (shared/names.js.looksLikeLookupId
+// exists so it can refuse them), so we resolve it here and attach the result.
+//
+// The companion views change rarely and Zoho rate-limits aggressively (see the
+// header of server/src/zoho.js on why the access token is cached in Neon), so we
+// keep a process-local map with a 1-hour TTL rather than fetching two extra views
+// on every EmployeeProfile request. Process-local (not a DB table) is fine: a
+// stale map for up to an hour only misattributes newly-created departments.
+const DEPT_MAP_TTL_MS = 60 * 60 * 1000;
+let _deptMap = null;         // Map<lookupId, campaignText>
+let _deptMapAt = 0;
+
+async function getDepartmentCampaignMap() {
+  if (_deptMap && Date.now() - _deptMapAt < DEPT_MAP_TTL_MS) return _deptMap;
+  // safeFetch-style (provision.js): a companion-view failure must not fail the
+  // whole request — log and fall back to the last-good map (or empty on cold miss).
+  const safeFetch = (id) => fetchView(id).catch(err => {
+    console.warn(`[zoho/dept] companion view ${id} fetch failed:`, err.message);
+    return null;
+  });
+  const [campaignRows, divisionRows] = await Promise.all([
+    safeFetch(CAMPAIGN_VIEW_ID),
+    safeFetch(DIVISIONS_VIEW_ID),
+  ]);
+  if (campaignRows == null && divisionRows == null) {
+    return _deptMap || new Map();   // total outage → keep serving the previous map
+  }
+  const merged = new Map(buildDepartmentMap(campaignRows || []).map);
+  for (const [id, name] of buildDepartmentMap(divisionRows || []).map) {
+    if (!merged.has(id)) merged.set(id, name);   // Divisions fill gaps only
+  }
+  _deptMap = merged;
+  _deptMapAt = Date.now();
+  return _deptMap;
+}
+
+// Attach _campaign_slug / _campaign_name to each EmployeeProfile row from its
+// Department lookup id, and log resolution quality once — unresolvable ids
+// silently shrink the churn denominator (inflating the rate), so it must be
+// visible, not silent.
+async function attachCampaignToProfiles(rows) {
+  const map = await getDepartmentCampaignMap();
+  const counts = { campaign: 0, internal: 0, blank: 0, unresolved: 0 };
+  for (const r of rows) {
+    const { slug, name, status } = resolveDeptCampaign(r['Department'], map);
+    counts[status]++;
+    r._campaign_slug = slug;
+    r._campaign_name = name;
+  }
+  console.info(`[zoho/EmployeeProfile] department resolution: ${rows.length} rows · ${counts.campaign} campaign · ${counts.internal} internal/admin · ${counts.blank} blank · ${counts.unresolved} unresolved-lookup-id (map=${map.size})`);
+  return rows;
+}
+
 router.get('/view/:key', requireRole('tm'), async (req, res) => {
   const viewId = VIEW_KEYS[req.params.key];
   if (!viewId) return res.status(400).json({ error: 'unknown_view', detail: req.params.key });
@@ -109,6 +165,11 @@ router.get('/view/:key', requireRole('tm'), async (req, res) => {
         }
         rows = rows.filter(r => allowedIds.has(String(r['Employee'] ?? r.employee ?? '')));
       }
+    }
+    // Resolve Department → campaign server-side (the browser can't read the raw
+    // lookup id) so churn can exclude internal/admin staff from its denominator.
+    if (req.params.key === 'EmployeeProfile') {
+      rows = await attachCampaignToProfiles(rows);
     }
     // Match the shape the existing extractRows() in index.html expects.
     res.json({ data: rows });

@@ -219,7 +219,7 @@
   // (not directions); rag() keeps it for historical parity even though the live
   // check reduces to `direction === 'lower'`. Do NOT change rag()'s body — it is a
   // regression-guarded contract.
-  const LOWER_BETTER = new Set(['aht','absence','abandon_rate','error_rate','res_time','acw','avg_resp_time','calls_abn']);
+  const LOWER_BETTER = new Set(['aht','absence','abandon_rate','error_rate','res_time','acw','avg_resp_time','calls_abn','churn']);
   // KPIs that accumulate over the period (totals), so their targets must be
   // pro-rated to the elapsed fraction of an in-progress month/week. Rate-based
   // KPIs (csat, qa, sph, absence, fulfil, realisation, …) are period-agnostic and
