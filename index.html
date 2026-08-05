@@ -5159,6 +5159,8 @@ function applyData(rows, attendanceRows, empProfileRows, roleUsers) {
   STATE.attendanceStale = (!attOk || !empOk) && !STATE.attendanceMissing;
   rebuildShrinkage();
   applyShiftBillable();
+  overlayAttendanceHeadcount();  // re-run: attendance-only period buckets (e.g. the current week-to-date) get their rostered headcount
+  mergeAttendanceWeeks();        // surface live-but-metrics-less periods (week/month-to-date) on first load, same as rebuildAggregates()
 
   // Default selected week = penultimate (latest week is often incomplete)
   if (!STATE.selectedWeek || !STATE.weeks.includes(STATE.selectedWeek)) {
