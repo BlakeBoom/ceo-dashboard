@@ -4224,7 +4224,7 @@ function renderSummary() {
     // (green ≤20, amber ≤30, red >30) on all three — annual scale, deliberately NOT
     // the absence single-digit bands. '—' (never 0.0%) when we couldn't compute it;
     // '—' + "insufficient history" when the 12-month window predates our data.
-    ...(() => {
+    ...(isExec(AUTH.user) ? (() => {
       const cr = STATE.churnRolling;
       const ok = cr && !cr.incomplete_window;
       const insufficient = cr && cr.incomplete_window;
@@ -4239,7 +4239,7 @@ function renderSummary() {
         hero(ok ? band(cr.churn_established_pct, 20, 30) : 'info', 'Established (3mo+)', pct(cr && cr.churn_established_pct),
           null, sub('component of 12mo churn · ≤20%')),
       ];
-    })(),
+    })() : []),
     hero(slipStatus, 'Slippage', slippage != null ? slippage.toFixed(1)+'%' : '—', null,
       slipDeltaTxt || { dir:'', txt: addHrsPeriod > 0
         ? `${Math.round(reqHrsExpected).toLocaleString()} hrs req (incl +${Math.round(addHrsPeriod).toLocaleString()})`
@@ -4337,6 +4337,7 @@ function renderSummary() {
         })()}
       </div>
     </div>
+    ${isExec(AUTH.user) ? `
     <div class="chart-card" style="margin-top:14px">
       <div class="chart-head">
         <div class="chart-title">Monthly churn</div>
@@ -4349,7 +4350,7 @@ function renderSummary() {
         const labels = rows.map(m => m.month.slice(2));  // 'YY-MM'
         return svgArea(series, { labels, fmt: (v) => v.toFixed(1) + '%' });
       })()}
-    </div>
+    </div>` : ''}
     <div class="sum-card">
       <h3>Watch list</h3>
       <div class="flag-list">
@@ -5294,6 +5295,13 @@ function recentMonths(n) {
 // trend uses the per-month churn_pct. Per-campaign is a documented follow-on.
 function buildChurn() {
   STATE.churnRows = []; STATE.churnByMonth = []; STATE.churnRolling = null;
+  // Churn needs the FULL EmployeeProfile history — leavers are its numerator — and
+  // is an org-wide leadership metric. Scoped users (campaign_lead / tm) receive a
+  // name-filtered EmployeeProfile that keeps only their CURRENT agents, which
+  // excludes every leaver, so churn would read a meaningless ~0%. Compute it only
+  // for admin/exco (who get the unscoped feed). Per-campaign churn, scoped by
+  // _campaign_slug so it keeps that campaign's leavers, is the documented follow-on.
+  if (!isExec(AUTH.user)) return;
   const emp = STATE.rawEmpRows;
   if (!emp || !emp.length) return;
   try {
