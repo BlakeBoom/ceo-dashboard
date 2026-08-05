@@ -1843,8 +1843,14 @@ async function fetchLiveData() {
 }
 
 async function fetchAttendance() {
-  // Limit to last 8 weeks to stay well under the 50MB Apps Script cap
-  const data = await fetchView('AttendanceUserReport', { since: dateNWeeksAgo(8) });
+  // Cap the raw attendance window at 26 weeks. The old 8-week limit cited a 50MB
+  // Google Apps Script cap, but that proxy is retired (see the note above) — the
+  // real constraint now is Vercel serverless response size + execution time, and
+  // server/src/sync.js documents that fetching full view history times out the
+  // lambda. 26 weeks gives absence/shrinkage six months of history while staying
+  // safely inside that budget. Going meaningfully beyond this should mean
+  // aggregating weekly absence server-side, not raising the raw-row window again.
+  const data = await fetchView('AttendanceUserReport', { since: dateNWeeksAgo(26) });
   return extractAttendanceRows(data);
 }
 
