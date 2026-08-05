@@ -2425,6 +2425,25 @@ function applyShiftBillable() {
       else bucket[wk] = { billable: agentByKey[ak][wk], _attendanceOnly: true }; // attendance-only → synthesise a row
     }
   }
+  // Reconcile the breakdown to the attendance-based team total: in any team-week
+  // that IS attendance-driven, a member with no attendance that week bills 0 — not
+  // their User_metrics_3 figure — so the BAE rows sum to the team total instead of
+  // overshooting it (e.g. a BAE whose shift feed ends mid-period but who still has
+  // a stale metrics billable). Only the billable column follows attendance; the
+  // metrics KPIs are left untouched. Team-weeks with no attendance never enter this
+  // loop, so they keep the User_metrics_3 billable as before.
+  for (const tk in b.byTeamWeek) {
+    const i = tk.indexOf('||'); const camp = tk.slice(0, i), team = tk.slice(i + 2);
+    const teamAgents = STATE.agentWeek[camp] && STATE.agentWeek[camp][team];
+    if (!teamAgents) continue;
+    for (const wk in b.byTeamWeek[tk]) {
+      for (const uid in teamAgents) {
+        const row = teamAgents[uid][wk];
+        if (!row || row.billable == null) continue;
+        if (agentByKey[camp + '||' + uid]?.[wk] == null) row.billable = 0;  // attendance-driven week, no shift for this BAE
+      }
+    }
+  }
   if (Object.keys(b.unmatched).length) {
     console.warn('[shift] billable not attributed — unmatched shift names:',
       Object.fromEntries(Object.entries(b.unmatched).map(([k, v]) => [k, Math.round(v) + 'h'])));
