@@ -2192,10 +2192,28 @@ function rebuildAggregates() {
   STATE.wgDebug = agg.wgDebug; STATE.wgSkipped = agg.wgSkipped; logWgDebug();
   rebuildShrinkage();
   applyShiftBillable();
+  overlayAttendanceHeadcount();  // re-run: attendance-only period buckets (e.g. the current week-to-date, created by applyShiftBillable) get their rostered headcount too
+  mergeAttendanceWeeks();
   if (!STATE.selectedWeek || !STATE.weeks.includes(STATE.selectedWeek)) {
     // Latest period is often partial → default to penultimate when available.
     STATE.selectedWeek = STATE.weeks[STATE.weeks.length - 2] || STATE.weeks[STATE.weeks.length - 1];
   }
+}
+
+// The period chips come from the metrics feed (User_metrics_3), but the shift
+// feed runs ahead of it — the current week-to-date usually has attendance before
+// its KPI rows land. Union the attendance periods in so a live-but-metrics-less
+// week (e.g. this week's billable) is still selectable; its KPI columns simply
+// stay blank until the metrics feed catches up. Skipped in range mode, which
+// aggregates into a single custom bucket of its own.
+function mergeAttendanceWeeks() {
+  if (STATE.rangeBounds) return;
+  const byCamp = STATE.shiftBillable && STATE.shiftBillable.byCampWeek;
+  if (!byCamp) return;
+  const set = new Set(STATE.weeks);
+  for (const camp in byCamp) for (const wk in byCamp[camp]) set.add(wk);
+  if (set.size === STATE.weeks.length) return;  // nothing new
+  STATE.weeks = [...set].sort((a, b) => periodSortVal(a, STATE.granularity) - periodSortVal(b, STATE.granularity));
 }
 
 // (Re)build shrinkage at the current granularity from the cached raw rows, so
@@ -2395,15 +2413,23 @@ function applyShiftBillable() {
   STATE.unmatchedShifts = b.unmatched;
   STATE.nonBillableHours = b.nonBillable || {};
   STATE.excludedShifts = b.excluded || {};
-  for (const camp in b.byCampWeek)
+  // Override the billable in each campaign/team period bucket with the
+  // attendance figure. The shift feed runs ahead of the metrics feed, so a period
+  // may have attendance before its KPI rows land (the current week-to-date): where
+  // the campaign/team already exists (has metrics in some period) but this period
+  // has no bucket yet, synthesise a billable-only one (_attendanceOnly) so the live
+  // week is viewable. We still never invent a campaign/team that has no metrics at
+  // all — those attendance hours have nowhere real to land.
+  for (const camp in b.byCampWeek) {
+    if (!STATE.campaignWeek[camp]) continue;
     for (const wk in b.byCampWeek[camp])
-      if (STATE.campaignWeek[camp] && STATE.campaignWeek[camp][wk])
-        STATE.campaignWeek[camp][wk].billable = b.byCampWeek[camp][wk];
+      (STATE.campaignWeek[camp][wk] ??= { _attendanceOnly: true }).billable = b.byCampWeek[camp][wk];
+  }
   for (const tk in b.byTeamWeek) {
     const i = tk.indexOf('||'); const camp = tk.slice(0, i), team = tk.slice(i + 2);
+    if (!(STATE.teamWeek[camp] && STATE.teamWeek[camp][team])) continue;
     for (const wk in b.byTeamWeek[tk])
-      if (STATE.teamWeek[camp] && STATE.teamWeek[camp][team] && STATE.teamWeek[camp][team][wk])
-        STATE.teamWeek[camp][team][wk].billable = b.byTeamWeek[tk][wk];
+      (STATE.teamWeek[camp][team][wk] ??= { _attendanceOnly: true }).billable = b.byTeamWeek[tk][wk];
   }
   // Push attendance billable down to each agent so the BAE breakdown reconciles
   // to its team total, AND add a row for anyone whose attendance lands on a team
@@ -3973,10 +3999,10 @@ function renderSummary() {
   const overalls = {};
   for (const c of camps) {
     const m = STATE.campaignWeek[c][wk];
-    totalFTE += m.fte;
-    totalBillable += m.billable;
-    totalCalls += m.calls;
-    totalTickets += m.tickets;
+    totalFTE += m.fte || 0;
+    totalBillable += m.billable || 0;
+    totalCalls += m.calls || 0;
+    totalTickets += m.tickets || 0;
     // Absence is sourced from AttendanceUserReport (shrinkage buckets), not the
     // alpha absenteeism column. Rate = absence days / working days, where working
     // days = rostered, non-excluded days (absence_denom_days) — the same
@@ -3993,8 +4019,8 @@ function renderSummary() {
     else { unconfigured++; unconfiguredCamps.push(CAMP_DISPLAY[c]||c); }  // 'none' — no scorable KPIs, keep out of the health tally
     if (prevWk && STATE.campaignWeek[c][prevWk]) {
       const mp = STATE.campaignWeek[c][prevWk];
-      prevFTE += mp.fte;
-      prevBillable += mp.billable;
+      prevFTE += mp.fte || 0;
+      prevBillable += mp.billable || 0;
       const sAbsP = STATE.shrinkageCampaignWeek?.[c]?.[prevWk];
       prevAbsentSum += sAbsP?.absence_days || 0;
       prevPresentSum += sAbsP?.absence_denom_days || 0;
