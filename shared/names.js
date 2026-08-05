@@ -214,9 +214,94 @@
     return lost / nodes.length;
   }
 
+  // ── KPI scoring (moved here from index.html so it is unit-testable) ─────────
+  // Direction tokens are 'higher' | 'lower' | 'none'. LOWER_BETTER holds KPI KEYS
+  // (not directions); rag() keeps it for historical parity even though the live
+  // check reduces to `direction === 'lower'`. Do NOT change rag()'s body — it is a
+  // regression-guarded contract.
+  const LOWER_BETTER = new Set(['aht','absence','abandon_rate','error_rate','res_time','acw','avg_resp_time','calls_abn']);
+  // KPIs that accumulate over the period (totals), so their targets must be
+  // pro-rated to the elapsed fraction of an in-progress month/week. Rate-based
+  // KPIs (csat, qa, sph, absence, fulfil, realisation, …) are period-agnostic and
+  // never scaled — adding a rate here would double-discount partial periods.
+  const CUMULATIVE_KPIS = new Set(['sales','billable','calls','tickets']);
+
+  function rag(val, tgt, direction) {
+    if (val == null || isNaN(val)) return 'grey';
+    if (tgt == null || direction === 'none') return 'grey';
+    if (LOWER_BETTER.has(direction) || direction === 'lower') {
+      if (val <= tgt) return 'green';
+      if (val <= tgt * 1.10) return 'amber';
+      return 'red';
+    }
+    if (val >= tgt) return 'green';
+    if (val >= tgt * 0.95) return 'amber';
+    return 'red';
+  }
+
+  function overallRag(metrics, targets, config, frac = 1) {
+    let r = false, a = false, assessed = 0;
+    for (const [k,,dir] of config) {
+      if (dir === 'none') continue;
+      const v = metrics[k];
+      let t = targets[k];
+      if (v == null || t == null) continue;
+      if (frac !== 1 && CUMULATIVE_KPIS.has(k)) t = t * frac;  // run-rate target for partial period
+      const x = rag(v, t, dir);
+      assessed++;                             // a KPI we could actually score
+      if (x === 'red') r = true;
+      else if (x === 'amber') a = true;
+    }
+    // Nothing was scorable (campaign missing from KPI_CONFIG/TARGETS, or every
+    // value was null) — return 'none' so callers can hold it out of the tally
+    // instead of the loop falling through to a bogus 'green'.
+    if (assessed === 0) return 'none';
+    return r ? 'red' : a ? 'amber' : 'green';
+  }
+
+  // Composite attainment score for an agent: mean of per-KPI (actual ÷ target,
+  // inverted for lower-is-better), capped at 150%, × 100. null when nothing
+  // scorable. Realisation is excluded when the period's paid hours are below the
+  // noise threshold (flagged as `_noRealScore` during aggregation): a tiny
+  // denominator makes the ratio meaningless. It is still displayed, just unscored.
+  function agentScore(m, cfg, tgts) {
+    let sum = 0, n = 0;
+    for (const [k,, dir] of cfg) {
+      if (dir === 'none') continue;
+      if (k === 'realisation' && m._noRealScore) continue;
+      const v = m[k], t = tgts[k];
+      if (v == null || t == null || t === 0) continue;
+      let ratio = dir === 'lower' ? t / v : v / t;
+      if (!isFinite(ratio) || ratio <= 0) continue;
+      sum += Math.min(ratio, 1.5);
+      n++;
+    }
+    return n ? (sum / n) * 100 : null;
+  }
+
+  // Fulfilment % = billable ÷ required × 100 (commercial delivery vs the contract).
+  // null when there is no required-hours target, so a campaign without a contract
+  // target never scores a bogus green. `reqHrs` must ALREADY be pro-rated for
+  // in-progress periods by the caller — fulfil is a rate and must not be scaled
+  // again (that is why 'fulfil' is deliberately absent from CUMULATIVE_KPIS).
+  function fulfilPct(billableHrs, reqHrs) {
+    if (!(reqHrs > 0) || billableHrs == null) return null;
+    return (billableHrs / reqHrs) * 100;
+  }
+
+  // Realisation % = billable ÷ paid (payable) hours × 100. Comes entirely from
+  // attendance, so it is immune to headcount/vacancy and to gross/net contract
+  // differences — it measures adherence and productive-time discipline. null when
+  // there are no paid hours to divide by.
+  function realisationPct(billableHrs, paidHrs) {
+    if (!(paidHrs > 0) || billableHrs == null) return null;
+    return (billableHrs / paidHrs) * 100;
+  }
+
   root.BoomerangNames = {
     normalizeName, firstLastKey, stripKnownNameSuffix, stripTeamLabel, buildTeamCanonMap,
     titleToRole, looksLikeLookupId,
     _buildRoleIndex, buildRoleIndexFromUsers, resolveTeamNode, unassignedShare,
+    LOWER_BETTER, CUMULATIVE_KPIS, rag, overallRag, agentScore, fulfilPct, realisationPct,
   };
 })(globalThis);
