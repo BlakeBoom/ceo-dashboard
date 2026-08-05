@@ -39,8 +39,11 @@ export const jobTitleToRole = titleToRole;
 
 // Companion tables that EmployeeProfile lookup ids resolve against.
 const JOB_TITLE_VIEW_ID = '2292884000019602033'; // Job description table
-const CAMPAIGN_VIEW_ID  = '2292884000019602061'; // Campaign table → Department ids
-const DIVISIONS_VIEW_ID = '2292884000019604699'; // Divisions table (merged as fallback)
+// Exported so the /api/zoho EmployeeProfile route can resolve Department lookup
+// ids to campaigns with the SAME id lists + merge order used here — never a
+// duplicated copy (see server/src/routes/zoho.js).
+export const CAMPAIGN_VIEW_ID  = '2292884000019602061'; // Campaign table → Department ids
+export const DIVISIONS_VIEW_ID = '2292884000019604699'; // Divisions table (merged as fallback)
 
 // ── Pure mapping helpers (unit-tested) ──────────────────────────────────────
 
@@ -84,6 +87,25 @@ export function canonicalCampaign(workgroup) {
   if (INTERNAL_DEPARTMENTS.has(key)) return null;    // internal support function
   if (CAMPAIGN_BY_KEY[key]) return CAMPAIGN_BY_KEY[key];
   return { name: raw, slug: campaignSlug(raw) }; // unknown workgroup → own campaign
+}
+
+// Resolve a Department lookup id to its client campaign via a prebuilt id→text
+// map (built with buildDepartmentMap). Pure — the map is passed in — so the churn
+// attribution route can be unit-tested without any network. `status` distinguishes
+// the four outcomes the route reports on (unresolvable ids silently shrink the
+// churn denominator, so they must be counted, not collapsed):
+//   'campaign'   → a client campaign (slug/name populated)
+//   'internal'   → resolved but an Admin/internal support function (slug/name null)
+//   'blank'      → the employee has no Department (slug/name null)
+//   'unresolved' → the lookup id is not in the companion-table map (slug/name null)
+export function resolveDeptCampaign(deptId, departmentMap) {
+  const id = String(deptId ?? '').trim();
+  if (!id) return { slug: null, name: null, status: 'blank' };
+  const text = departmentMap.get(id);
+  if (text == null) return { slug: null, name: null, status: 'unresolved' };
+  const camp = canonicalCampaign(text);
+  if (!camp) return { slug: null, name: null, status: 'internal' };
+  return { slug: camp.slug, name: camp.name, status: 'campaign' };
 }
 
 // Resolved Department names that are internal support functions, not client
