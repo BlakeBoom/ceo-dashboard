@@ -536,7 +536,8 @@ svg.ring .rs{font-size:8px;letter-spacing:.5px;text-transform:uppercase}
 // for the server too). Pull them into scope so the call sites below are
 // unchanged.
 const { normalizeName, firstLastKey, stripKnownNameSuffix, buildTeamCanonMap, titleToRole, looksLikeLookupId,
-        _buildRoleIndex, buildRoleIndexFromUsers, resolveTeamNode, unassignedShare } = globalThis.BoomerangNames;
+        _buildRoleIndex, buildRoleIndexFromUsers, resolveTeamNode, unassignedShare,
+        LOWER_BETTER, CUMULATIVE_KPIS, rag, overallRag, agentScore, fulfilPct, realisationPct } = globalThis.BoomerangNames;
 // ════════════════════════════════════════════════════════════════════════
 // CONFIGURATION
 // ════════════════════════════════════════════════════════════════════════
@@ -584,38 +585,43 @@ const CAMP_SECTION = {
 // ════════════════════════════════════════════════════════════════════════
 // TARGETS + KPI_CONFIG (from v1, unchanged)
 // ════════════════════════════════════════════════════════════════════════
+// Billable is intentionally NOT a target here: it is a raw hour-total (hundreds),
+// so RAG-scoring it against an FTE-shaped number was always green and meaningless.
+// It survives as the hero block + sparkline, unscored. Commercial delivery is now
+// scored as Fulfil (billable ÷ required, target 100) at campaign level, and team/
+// agent controllability as Realisation (billable ÷ paid, target 90).
 const TARGETS = {
-  'Gousto':         {csat:88,qa:90,cph:5.5,adherence:95,billable:17,absence:5},
-  'VETNIQUE':       {csat:90,qa:95,cph:6,res_time:48,acw:1.25,billable:10,absence:5},
-  'JUSTPARK_usa':   {csat:80,qa:85,fcr:90,sla:90,billable:8,absence:5},
-  'JUSTPARK_uk':    {csat:80,qa:90,cph:6,fcr:85,billable:18,absence:5},
-  'JUSTPARK_so':    {csat:75,qa:90,sla:90,billable:4,absence:5},
-  'BUTTERNUTBOX':   {csat:90,qa:90,cpd:50,billable:24,absence:5},
-  'Medexpress':     {csat:85,qa:90,compliance:100,productivity:90,billable:150,absence:5},
-  'PICKNPAY':       {csat:85,qa:80,talk_sla:90,calls_abn:5,billable:66,absence:5},
-  'ROYALCANIN':     {qa:95,cph:4,error_rate:2,billable:14,absence:5},
-  'HUNZAG':         {qa:95,cpd:20,res_time:24,billable:3,absence:5},
-  'GOODLIFESORTED': {qa:95,cph:4,aht:3,calls_abn:8,billable:5,absence:5},
-  'PINTER':         {csat:80,qa:90,res_time:24,avg_resp_time:4,billable:10,absence:5},
-  'BEER52':         {qa:90,sph:1.25,billable:6,absence:5},
-  '1LIFE':          {qa:90,sales:350,billable:30,absence:5},
+  'Gousto':         {csat:88,qa:90,cph:5.5,adherence:95,fulfil:100,realisation:90,absence:5},
+  'VETNIQUE':       {csat:90,qa:95,cph:6,res_time:48,acw:1.25,fulfil:100,realisation:90,absence:5},
+  'JUSTPARK_usa':   {csat:80,qa:85,fcr:90,sla:90,fulfil:100,realisation:90,absence:5},
+  'JUSTPARK_uk':    {csat:80,qa:90,cph:6,fcr:85,fulfil:100,realisation:90,absence:5},
+  'JUSTPARK_so':    {csat:75,qa:90,sla:90,fulfil:100,realisation:90,absence:5},
+  'BUTTERNUTBOX':   {csat:90,qa:90,cpd:50,fulfil:100,realisation:90,absence:5},
+  'Medexpress':     {csat:85,qa:90,compliance:100,productivity:90,fulfil:100,realisation:90,absence:5},
+  'PICKNPAY':       {csat:85,qa:80,talk_sla:90,calls_abn:5,fulfil:100,realisation:90,absence:5},
+  'ROYALCANIN':     {qa:95,cph:4,error_rate:2,fulfil:100,realisation:90,absence:5},
+  'HUNZAG':         {qa:95,cpd:20,res_time:24,fulfil:100,realisation:90,absence:5},
+  'GOODLIFESORTED': {qa:95,cph:4,aht:3,calls_abn:8,fulfil:100,realisation:90,absence:5},
+  'PINTER':         {csat:80,qa:90,res_time:24,avg_resp_time:4,fulfil:100,realisation:90,absence:5},
+  'BEER52':         {qa:90,sph:1.25,fulfil:100,realisation:90,absence:5},
+  '1LIFE':          {qa:90,sales:350,fulfil:100,realisation:90,absence:5},
 };
 
 const KPI_CONFIG = {
-  'Gousto':         [['csat','CSAT','higher'],['qa','QA','higher'],['cph','CPH','higher'],['adherence','Adherence','higher'],['billable','Billable','higher'],['absence','Absence','lower']],
-  'VETNIQUE':       [['csat','CSAT','higher'],['qa','QA','higher'],['cph','CPH','higher'],['res_time','Res. time','lower'],['billable','Billable','higher'],['absence','Absence','lower']],
-  'JUSTPARK_usa':   [['csat','CSAT','higher'],['qa','QA','higher'],['fcr','FCR','higher'],['sla','SLA','higher'],['billable','Billable','higher'],['absence','Absence','lower']],
-  'JUSTPARK_uk':    [['csat','CSAT','higher'],['qa','QA','higher'],['cph','CPH','higher'],['fcr','FCR','higher'],['tickets','Tickets','none'],['billable','Billable','higher'],['absence','Absence','lower']],
-  'JUSTPARK_so':    [['csat','CSAT','higher'],['qa','QA','higher'],['sla','SLA','higher'],['billable','Billable','higher'],['absence','Absence','lower']],
-  'BUTTERNUTBOX':   [['csat','CSAT','higher'],['qa','QA','higher'],['cpd','CPD','higher'],['billable','Billable','higher'],['absence','Absence','lower']],
-  'Medexpress':     [['csat','CSAT','higher'],['qa','QA','higher'],['aht','AHT','lower'],['tickets','Tickets','none'],['billable','Billable','higher'],['absence','Absence','lower']],
-  'PICKNPAY':       [['qa','QA','higher'],['sla','Talk SLA','higher'],['calls','Calls','none'],['abandon_rate','Abandoned','lower'],['billable','Billable','higher'],['absence','Absence','lower']],
-  'ROYALCANIN':     [['qa','QA','higher'],['cph','CPH','higher'],['tickets','Tickets','none'],['billable','Billable','higher'],['absence','Absence','lower']],
-  'HUNZAG':         [['qa','QA','higher'],['cpd','CPD','higher'],['res_time','Res. time','lower'],['tickets','Tickets','none'],['billable','Billable','higher'],['absence','Absence','lower']],
-  'GOODLIFESORTED': [['qa','QA','higher'],['cph','CPH','higher'],['aht','AHT','lower'],['calls','Calls','none'],['billable','Billable','higher'],['absence','Absence','lower']],
-  'PINTER':         [['csat','CSAT','higher'],['qa','QA','higher'],['res_time','Res. time','lower'],['tickets','Tickets','none'],['billable','Billable','higher'],['absence','Absence','lower']],
-  'BEER52':         [['qa','QA','higher'],['sph','SPH','higher'],['calls','Calls','none'],['sales','Sales','none'],['billable','Billable','higher'],['absence','Absence','lower']],
-  '1LIFE':          [['qa','QA','higher'],['sales','Sales','higher'],['tickets','Tickets','none'],['billable','Billable','higher'],['absence','Absence','lower']],
+  'Gousto':         [['csat','CSAT','higher'],['qa','QA','higher'],['cph','CPH','higher'],['adherence','Adherence','higher'],['fulfil','Fulfil','higher'],['realisation','Realisation','higher'],['absence','Absence','lower']],
+  'VETNIQUE':       [['csat','CSAT','higher'],['qa','QA','higher'],['cph','CPH','higher'],['res_time','Res. time','lower'],['fulfil','Fulfil','higher'],['realisation','Realisation','higher'],['absence','Absence','lower']],
+  'JUSTPARK_usa':   [['csat','CSAT','higher'],['qa','QA','higher'],['fcr','FCR','higher'],['sla','SLA','higher'],['fulfil','Fulfil','higher'],['realisation','Realisation','higher'],['absence','Absence','lower']],
+  'JUSTPARK_uk':    [['csat','CSAT','higher'],['qa','QA','higher'],['cph','CPH','higher'],['fcr','FCR','higher'],['tickets','Tickets','none'],['fulfil','Fulfil','higher'],['realisation','Realisation','higher'],['absence','Absence','lower']],
+  'JUSTPARK_so':    [['csat','CSAT','higher'],['qa','QA','higher'],['sla','SLA','higher'],['fulfil','Fulfil','higher'],['realisation','Realisation','higher'],['absence','Absence','lower']],
+  'BUTTERNUTBOX':   [['csat','CSAT','higher'],['qa','QA','higher'],['cpd','CPD','higher'],['fulfil','Fulfil','higher'],['realisation','Realisation','higher'],['absence','Absence','lower']],
+  'Medexpress':     [['csat','CSAT','higher'],['qa','QA','higher'],['aht','AHT','lower'],['tickets','Tickets','none'],['fulfil','Fulfil','higher'],['realisation','Realisation','higher'],['absence','Absence','lower']],
+  'PICKNPAY':       [['qa','QA','higher'],['sla','Talk SLA','higher'],['calls','Calls','none'],['abandon_rate','Abandoned','lower'],['fulfil','Fulfil','higher'],['realisation','Realisation','higher'],['absence','Absence','lower']],
+  'ROYALCANIN':     [['qa','QA','higher'],['cph','CPH','higher'],['tickets','Tickets','none'],['fulfil','Fulfil','higher'],['realisation','Realisation','higher'],['absence','Absence','lower']],
+  'HUNZAG':         [['qa','QA','higher'],['cpd','CPD','higher'],['res_time','Res. time','lower'],['tickets','Tickets','none'],['fulfil','Fulfil','higher'],['realisation','Realisation','higher'],['absence','Absence','lower']],
+  'GOODLIFESORTED': [['qa','QA','higher'],['cph','CPH','higher'],['aht','AHT','lower'],['calls','Calls','none'],['fulfil','Fulfil','higher'],['realisation','Realisation','higher'],['absence','Absence','lower']],
+  'PINTER':         [['csat','CSAT','higher'],['qa','QA','higher'],['res_time','Res. time','lower'],['tickets','Tickets','none'],['fulfil','Fulfil','higher'],['realisation','Realisation','higher'],['absence','Absence','lower']],
+  'BEER52':         [['qa','QA','higher'],['sph','SPH','higher'],['calls','Calls','none'],['sales','Sales','none'],['fulfil','Fulfil','higher'],['realisation','Realisation','higher'],['absence','Absence','lower']],
+  '1LIFE':          [['qa','QA','higher'],['sales','Sales','higher'],['tickets','Tickets','none'],['fulfil','Fulfil','higher'],['realisation','Realisation','higher'],['absence','Absence','lower']],
 };
 
 // Fail loudly when a campaign we display has no KPI_CONFIG/TARGETS: it is
@@ -627,11 +633,9 @@ if (UNCONFIGURED_CAMPS.length) {
   console.warn(`[dashboard] ${UNCONFIGURED_CAMPS.length} campaign(s) missing KPI_CONFIG/TARGETS — shown grey/unassessed, excluded from Campaign Health: ${UNCONFIGURED_CAMPS.join(', ')}`);
 }
 
-const LOWER_BETTER = new Set(['aht','absence','abandon_rate','error_rate','res_time','acw','avg_resp_time','calls_abn']);
-// KPIs that accumulate over the period (totals), so their targets must be
-// pro-rated to the elapsed fraction of an in-progress month/week. Rate-based
-// KPIs (csat, qa, sph, absence, …) are period-agnostic and never scaled.
-const CUMULATIVE_KPIS = new Set(['sales','billable','calls','tickets']);
+// LOWER_BETTER, CUMULATIVE_KPIS, rag(), overallRag() and agentScore() now live in
+// /shared/names.js (destructured above) so they are unit-testable — same
+// no-import/export pattern as the name helpers.
 
 // ════════════════════════════════════════════════════════════════════════
 // AUTOMATION RULES — target FTE & target monthly hours per campaign
@@ -1778,38 +1782,9 @@ function buildAggregates(rows, gran = 'week') {
 // ════════════════════════════════════════════════════════════════════════
 // RAG, FORMATTERS
 // ════════════════════════════════════════════════════════════════════════
-function rag(val, tgt, direction) {
-  if (val == null || isNaN(val)) return 'grey';
-  if (tgt == null || direction === 'none') return 'grey';
-  if (LOWER_BETTER.has(direction) || direction === 'lower') {
-    if (val <= tgt) return 'green';
-    if (val <= tgt * 1.10) return 'amber';
-    return 'red';
-  }
-  if (val >= tgt) return 'green';
-  if (val >= tgt * 0.95) return 'amber';
-  return 'red';
-}
-
-function overallRag(metrics, targets, config, frac = 1) {
-  let r = false, a = false, assessed = 0;
-  for (const [k,,dir] of config) {
-    if (dir === 'none') continue;
-    const v = metrics[k];
-    let t = targets[k];
-    if (v == null || t == null) continue;
-    if (frac !== 1 && CUMULATIVE_KPIS.has(k)) t = t * frac;  // run-rate target for partial period
-    const x = rag(v, t, dir);
-    assessed++;                             // a KPI we could actually score
-    if (x === 'red') r = true;
-    else if (x === 'amber') a = true;
-  }
-  // Nothing was scorable (campaign missing from KPI_CONFIG/TARGETS, or every
-  // value was null) — return 'none' so callers can hold it out of the tally
-  // instead of the loop falling through to a bogus 'green'.
-  if (assessed === 0) return 'none';
-  return r ? 'red' : a ? 'amber' : 'green';
-}
+// rag() and overallRag() now live in /shared/names.js (destructured at the top of
+// this script) so they can be unit-tested. rag() is a regression-guarded contract
+// — do not reintroduce or modify it here.
 
 function fmtVal(val, kpi) {
   if (val == null || isNaN(val)) return '—';
@@ -1818,12 +1793,13 @@ function fmtVal(val, kpi) {
     return val > 10 ? val.toFixed(1) + '%' : val.toFixed(2);
   }
   if (['absence','abandon_rate','error_rate','calls_abn'].includes(kpi)) return val.toFixed(1) + '%';
+  if (['fulfil','realisation'].includes(kpi)) return val.toFixed(0) + '%';
   return val.toFixed(2);
 }
 
 function fmtTgt(tgt, kpi) {
   if (tgt == null) return '';
-  if (['csat','qa','adherence','fcr','sla','talk_sla','absence','abandon_rate','error_rate','calls_abn','compliance','productivity'].includes(kpi)) return tgt + '%';
+  if (['csat','qa','adherence','fcr','sla','talk_sla','absence','abandon_rate','error_rate','calls_abn','compliance','productivity','fulfil','realisation'].includes(kpi)) return tgt + '%';
   return tgt;
 }
 
@@ -2198,6 +2174,73 @@ function rebuildAggregates() {
     // Latest period is often partial → default to penultimate when available.
     STATE.selectedWeek = STATE.weeks[STATE.weeks.length - 2] || STATE.weeks[STATE.weeks.length - 1];
   }
+  applyDerivedKpis();  // Fulfil (campaign) + Realisation (team/agent) onto the buckets, after billable is final
+}
+
+// Below this many PAID hours in the period, an agent's realisation is too noisy
+// to score — a mid-period starter/leaver or someone on extended leave has a tiny
+// denominator. 40 paid hrs/month, scaled to the period length AND its elapsed
+// fraction (mirroring how required hours are pro-rated), so a week's floor is
+// proportional, not a flat 40. Below it, realisation is DISPLAYED but unscored.
+const REALISATION_MIN_PAID_HRS_MONTH = 40;
+function realisationMinPaidHrs(wk) {
+  const base = STATE.granularity === 'month' ? REALISATION_MIN_PAID_HRS_MONTH
+             : STATE.granularity === 'day'   ? REALISATION_MIN_PAID_HRS_MONTH / (WEEKS_PER_MONTH * 7)
+             : REALISATION_MIN_PAID_HRS_MONTH / WEEKS_PER_MONTH;   // week
+  const frac = periodElapsedFraction(wk, STATE.granularity);
+  return base * (frac < 1 ? frac : 1);
+}
+
+// Compute the two derived, RAG-scored KPIs onto the metric buckets AFTER billable
+// is finalised (attendance override) and shrinkage is built:
+//   • Fulfil       = billable ÷ required — CAMPAIGN buckets only (commercial vs contract)
+//   • Realisation  = billable ÷ paid     — TEAM and AGENT buckets (controllable)
+// Fulfil is deliberately NOT written to team/agent buckets, and realisation NOT to
+// campaign buckets, so overallRag/agentScore score each level on the right metric
+// through their existing null-skip — no per-scorer special-casing.
+function applyDerivedKpis() {
+  // Campaign Fulfil. reqHrsForCampaign already pro-rates required hours for an
+  // in-progress period, and fulfilPct returns null with no target, so a campaign
+  // without a contract target never produces a bogus green.
+  for (const c in (STATE.campaignWeek || {})) {
+    for (const wk in STATE.campaignWeek[c]) {
+      const m = STATE.campaignWeek[c][wk];
+      const f = fulfilPct(m.billable, reqHrsForCampaign(c, wk));
+      if (f != null) m.fulfil = f; else delete m.fulfil;
+    }
+  }
+  // Team Realisation from the team shrinkage bucket's paid (payable) minutes.
+  for (const c in (STATE.teamWeek || {})) {
+    for (const t in STATE.teamWeek[c]) {
+      for (const wk in STATE.teamWeek[c][t]) {
+        const m = STATE.teamWeek[c][t][wk];
+        const pay = STATE.shrinkageTeamWeek?.[c + '||' + t]?.[wk]?.payable_mins || 0;
+        const r = realisationPct(m.billable, pay / 60);
+        if (r != null) m.realisation = r; else delete m.realisation;
+      }
+    }
+  }
+  // Agent Realisation, with the low-paid-hours exclusion: below the threshold the
+  // value is still stored (for display) but flagged _noRealScore so agentScore and
+  // the per-cell colouring skip it.
+  let lowHours = 0, scored = 0;
+  for (const c in (STATE.agentWeek || {})) {
+    for (const t in STATE.agentWeek[c]) {
+      for (const uid in STATE.agentWeek[c][t]) {
+        for (const wk in STATE.agentWeek[c][t][uid]) {
+          const m = STATE.agentWeek[c][t][uid][wk];
+          const paidHrs = (STATE.shrinkageAgentWeek?.[uid]?.[wk]?.payable_mins || 0) / 60;
+          const r = realisationPct(m.billable, paidHrs);
+          if (r == null) { delete m.realisation; delete m._noRealScore; continue; }
+          m.realisation = r;
+          const noScore = paidHrs < realisationMinPaidHrs(wk);
+          if (noScore) m._noRealScore = true; else delete m._noRealScore;
+          if (wk === STATE.selectedWeek) { noScore ? lowHours++ : scored++; }
+        }
+      }
+    }
+  }
+  if (lowHours) console.info(`[realisation] ${lowHours} agent(s) below the ${realisationMinPaidHrs(STATE.selectedWeek).toFixed(1)}h paid-hours floor for ${STATE.selectedWeek} — realisation shown but unscored (${scored} scored).`);
 }
 
 // The period chips come from the metrics feed (User_metrics_3), but the shift
@@ -4420,7 +4463,15 @@ function renderCampaignList(root) {
 // `reqHrs` the pro-rated required hours for slippage/fulfillment (may be null).
 // Returns { cells, has } where cells is .team-stat HTML for whichever metrics
 // we can actually compute from the available data.
-function efficiencyStats(sh, billableHrs, reqHrs) {
+// opts:
+//   realisationTgt  — target for the Realiz cell's rag() colour (so the strip and
+//                     the scored Realisation KPI tile can never disagree). Default 90.
+//   scoreCommercial — colour Slippage & Fulfil (campaign level, where they ARE the
+//                     commercial score). false at team level, where headcount vs
+//                     contracted FTE is not the TL's to control — they show as
+//                     neutral/grey CONTEXT, labelled as campaign context.
+function efficiencyStats(sh, billableHrs, reqHrs, opts = {}) {
+  const { realisationTgt = 90, scoreCommercial = true } = opts;
   const out = [];
   const cell = (lbl, valTxt, rag, title) =>
     `<div class="team-stat ${rag}"${title?` title="${title}"`:''}><div class="team-stat-lbl">${lbl}</div><div class="team-stat-val">${valTxt}</div></div>`;
@@ -4437,17 +4488,20 @@ function efficiencyStats(sh, billableHrs, reqHrs) {
     const u = sh.utilization_pct;
     out.push(cell('Util', u.toFixed(0)+'%', u>=80?'green':u>=70?'amber':'red'));
   }
-  // Realization = billable ÷ paid (payable). Needs both sides.
-  if (sh && sh.payable_mins > 0 && billableHrs != null) {
-    const real = (billableHrs / (sh.payable_mins / 60)) * 100;
-    out.push(cell('Realiz', real.toFixed(0)+'%', real>=85?'green':real>=75?'amber':'red', 'Billable ÷ Paid hours'));
+  // Realization = billable ÷ paid (payable). Coloured by the SAME rag()/target as
+  // the scored Realisation KPI tile, so strip and tile always agree.
+  const real = realisationPct(billableHrs, sh ? (sh.payable_mins || 0) / 60 : 0);
+  if (real != null) {
+    out.push(cell('Realiz', real.toFixed(0)+'%', rag(real, realisationTgt, 'higher'), `Billable ÷ Paid hours · target ${realisationTgt}%`));
   }
-  // Slippage + Fulfillment from required hours.
+  // Slippage + Fulfilment from required hours. Scored (coloured) at campaign level;
+  // neutral context at team level — a resourcing outcome, not the team's score.
   if (reqHrs != null && reqHrs > 0 && billableHrs != null) {
     const slip = ((reqHrs - billableHrs) / reqHrs) * 100;
     const fulfil = (billableHrs / reqHrs) * 100;
-    out.push(cell('Slippage', slip.toFixed(1)+'%', slip<=5?'green':slip<=15?'amber':'red', `Required ${Math.round(reqHrs).toLocaleString()} hrs`));
-    out.push(cell('Fulfil', fulfil.toFixed(0)+'%', fulfil>=95?'green':fulfil>=85?'amber':'red'));
+    const ctx = scoreCommercial ? '' : ' — campaign context, not a team score';
+    out.push(cell('Slippage', slip.toFixed(1)+'%', scoreCommercial ? band(slip,5,15) : 'grey', `vs contracted · Required ${Math.round(reqHrs).toLocaleString()} hrs${ctx}`));
+    out.push(cell('Fulfil', fulfil.toFixed(0)+'%', scoreCommercial ? rag(fulfil,100,'higher') : 'grey', `Billable ÷ Required (vs contracted)${ctx}`));
   }
   return { cells: out.join(''), has: out.length > 0 };
 }
@@ -4484,6 +4538,7 @@ const KPI_GROUP = {
   csat:'Quality', qa:'Quality', fcr:'Quality', error_rate:'Quality',
   sales:'Outcome', sph:'Outcome', cph:'Outcome', cpd:'Outcome',
   calls:'Outcome', tickets:'Outcome', billable:'Outcome',
+  fulfil:'Outcome', realisation:'Outcome',
 };
 const KPI_GROUP_ORDER = ['Operational', 'Quality', 'Outcome'];
 
@@ -4498,22 +4553,9 @@ function kpiCellHtml(m, tgts, k, lbl, dir) {
   </div>`;
 }
 
-// Composite attainment score for an agent: mean of per-KPI (actual ÷ target,
-// inverted for lower-is-better), capped at 150%, × 100. null when nothing
-// scorable. Used for the leaderboard ranking.
-function agentScore(m, cfg, tgts) {
-  let sum = 0, n = 0;
-  for (const [k,, dir] of cfg) {
-    if (dir === 'none') continue;
-    const v = m[k], t = tgts[k];
-    if (v == null || t == null || t === 0) continue;
-    let ratio = dir === 'lower' ? t / v : v / t;
-    if (!isFinite(ratio) || ratio <= 0) continue;
-    sum += Math.min(ratio, 1.5);
-    n++;
-  }
-  return n ? (sum / n) * 100 : null;
-}
+// agentScore() now lives in /shared/names.js (destructured at the top of this
+// script) so it is unit-testable, and it excludes realisation for agents flagged
+// `_noRealScore` (paid hours below the threshold — see applyDerivedKpis).
 
 // Light campaign tile: at-a-glance only (health, fulfilment ring, HC/FTE, how
 // many KPIs are at risk, a billable spark). The full breakdown lives in the
@@ -4640,6 +4682,7 @@ function renderCampaignDetail(root) {
   // KPIs grouped into daily-pulse panels (Operational / Quality / Outcome).
   const groups = {};
   for (const [k, lbl, dir] of cfg) {
+    if (k === 'realisation') continue;  // a team/agent score; shown here only as strip context
     const g = KPI_GROUP[k] || 'Outcome';
     (groups[g] ??= []).push(kpiCellHtml(m, tgts, k, lbl, dir));
   }
@@ -4648,7 +4691,7 @@ function renderCampaignDetail(root) {
   ).join('') || '<div class="flag-empty">No KPIs configured.</div>';
 
   // Efficiency / shrinkage cells.
-  const eff = efficiencyStats(sh, m.billable, creq);
+  const eff = efficiencyStats(sh, m.billable, creq, { scoreCommercial: true, realisationTgt: tgts.realisation });
 
   // Billable vs required trend across all loaded periods.
   const billSeries = STATE.weeks.map(w => STATE.campaignWeek[c]?.[w]?.billable || 0);
@@ -4660,7 +4703,7 @@ function renderCampaignDetail(root) {
   // attainment score. Pick up to two lead KPIs to show (QA/CSAT preferred).
   const leadKeys = (() => {
     const pref = ['qa', 'csat'].filter(k => cfg.some(x => x[0] === k));
-    const rest = cfg.filter(x => x[2] !== 'none' && !pref.includes(x[0])).map(x => x[0]);
+    const rest = cfg.filter(x => x[2] !== 'none' && x[0] !== 'fulfil' && !pref.includes(x[0])).map(x => x[0]);  // fulfil is unset per-agent
     return [...pref, ...rest].slice(0, 2);
   })();
   const leadLbls = leadKeys.map(k => (cfg.find(x => x[0] === k) || [k, k.toUpperCase()])[1]);
@@ -4789,6 +4832,7 @@ function renderTeamList(root) {
     // billable is no longer rendered twice — it comes from cfg once).
     let stats = '';
     for (const [k, lbl, dir] of cfg) {
+      if (k === 'fulfil') continue;  // uncontrollable at team level — shown as context in the efficiency strip below
       const v = m[k], tg = tgts[k];
       const r = dir === 'none' ? 'grey' : rag(v, tg, dir);
       stats += `<div class="team-stat ${r}">
@@ -4803,7 +4847,7 @@ function renderTeamList(root) {
     const campFte = STATE.campaignWeek[c]?.[wk]?.fte || 0;
     const campReq = reqHrsForCampaign(c, wk);
     const teamReq = (campReq != null && campFte > 0) ? campReq * (m.fte / campFte) : null;
-    stats += efficiencyStats(sh, m.billable, teamReq).cells;
+    stats += efficiencyStats(sh, m.billable, teamReq, { scoreCommercial: false, realisationTgt: tgts.realisation }).cells;
 
     html += `
       <div class="team-card" data-team="${t}">
@@ -4876,7 +4920,7 @@ function renderAgentList(root) {
     { key: 'billable', label: 'Billable', kpi: 'billable', num: true, tgt: tgts.billable, dir: 'higher' },
   ];
   for (const [k, lbl, dir] of cfg) {
-    if (k === 'billable' || k === 'absence') continue;
+    if (k === 'billable' || k === 'absence' || k === 'fulfil') continue;  // fulfil is campaign-level, not per-agent
     cols.push({ key: k, label: lbl, kpi: k, num: true, tgt: tgts[k], dir });
   }
   cols.push({ key: 'absence', label: 'Absence', kpi: 'absence', num: true, tgt: tgts.absence, dir: 'lower' });
@@ -4915,8 +4959,12 @@ function renderAgentList(root) {
           html += `<td class="name">${r.name}${isLeader(r) ? ' <span class="camp-risk" style="background:var(--bg-2);color:var(--text3)">TL</span>' : ''}</td>`;
         } else {
           const v = r[c.key];
-          const ragClass = c.dir && c.dir !== 'none' && c.tgt != null ? rag(v, c.tgt, c.dir) + '-cell' : 'dim';
-          html += `<td class="numeric ${ragClass}">${fmtVal(v, c.kpi)}</td>`;
+          // Realisation is shown but UNSCORED (grey + tooltip) when the agent's paid
+          // hours are below the period floor — a tiny denominator makes it noise.
+          const unscored = c.key === 'realisation' && r._noRealScore;
+          const ragClass = unscored ? 'dim' : (c.dir && c.dir !== 'none' && c.tgt != null ? rag(v, c.tgt, c.dir) + '-cell' : 'dim');
+          const title = unscored ? ' title="Unscored — paid hours below the minimum for this period"' : '';
+          html += `<td class="numeric ${ragClass}"${title}>${fmtVal(v, c.kpi)}</td>`;
         }
       }
       html += `</tr>`;
@@ -5172,6 +5220,7 @@ function applyData(rows, attendanceRows, empProfileRows, roleUsers) {
   if (!STATE.selectedWeek || !STATE.weeks.includes(STATE.selectedWeek)) {
     STATE.selectedWeek = STATE.weeks[STATE.weeks.length - 2] || STATE.weeks[STATE.weeks.length - 1];
   }
+  applyDerivedKpis();  // Fulfil (campaign) + Realisation (team/agent) onto the buckets, after billable is final
 }
 
 function setBadge(kind, label) {
