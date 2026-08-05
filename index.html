@@ -531,6 +531,7 @@ svg.ring .rs{font-size:8px;letter-spacing:.5px;text-transform:uppercase}
      script so BoomerangNames is in scope below. Must not be type="module"
      (module scripts defer and would run after this classic script). -->
 <script src="/shared/names.js"></script>
+<script src="/shared/churn.js"></script>
 <script>
 // Shared name-matching helpers live in /shared/names.js (one source of truth
 // for the server too). Pull them into scope so the call sites below are
@@ -538,6 +539,8 @@ svg.ring .rs{font-size:8px;letter-spacing:.5px;text-transform:uppercase}
 const { normalizeName, firstLastKey, stripKnownNameSuffix, buildTeamCanonMap, titleToRole, looksLikeLookupId,
         _buildRoleIndex, buildRoleIndexFromUsers, resolveTeamNode, unassignedShare,
         LOWER_BETTER, CUMULATIVE_KPIS, rag, overallRag, agentScore, fulfilPct, realisationPct } = globalThis.BoomerangNames;
+// Churn / attrition maths — same shared-module pattern as BoomerangNames.
+const { extractChurnRows, computeMonthlyChurn, computeRolling12Churn } = globalThis.BoomerangChurn;
 // ════════════════════════════════════════════════════════════════════════
 // CONFIGURATION
 // ════════════════════════════════════════════════════════════════════════
@@ -591,37 +594,37 @@ const CAMP_SECTION = {
 // scored as Fulfil (billable ÷ required, target 100) at campaign level, and team/
 // agent controllability as Realisation (billable ÷ paid, target 90).
 const TARGETS = {
-  'Gousto':         {csat:88,qa:90,cph:5.5,adherence:95,fulfil:100,realisation:90,absence:5},
-  'VETNIQUE':       {csat:90,qa:95,cph:6,res_time:48,acw:1.25,fulfil:100,realisation:90,absence:5},
-  'JUSTPARK_usa':   {csat:80,qa:85,fcr:90,sla:90,fulfil:100,realisation:90,absence:5},
-  'JUSTPARK_uk':    {csat:80,qa:90,cph:6,fcr:85,fulfil:100,realisation:90,absence:5},
-  'JUSTPARK_so':    {csat:75,qa:90,sla:90,fulfil:100,realisation:90,absence:5},
-  'BUTTERNUTBOX':   {csat:90,qa:90,cpd:50,fulfil:100,realisation:90,absence:5},
-  'Medexpress':     {csat:85,qa:90,compliance:100,productivity:90,fulfil:100,realisation:90,absence:5},
-  'PICKNPAY':       {csat:85,qa:80,talk_sla:90,calls_abn:5,fulfil:100,realisation:90,absence:5},
-  'ROYALCANIN':     {qa:95,cph:4,error_rate:2,fulfil:100,realisation:90,absence:5},
-  'HUNZAG':         {qa:95,cpd:20,res_time:24,fulfil:100,realisation:90,absence:5},
-  'GOODLIFESORTED': {qa:95,cph:4,aht:3,calls_abn:8,fulfil:100,realisation:90,absence:5},
-  'PINTER':         {csat:80,qa:90,res_time:24,avg_resp_time:4,fulfil:100,realisation:90,absence:5},
-  'BEER52':         {qa:90,sph:1.25,fulfil:100,realisation:90,absence:5},
-  '1LIFE':          {qa:90,sales:350,fulfil:100,realisation:90,absence:5},
+  'Gousto':         {csat:88,qa:90,cph:5.5,adherence:95,fulfil:100,realisation:90,churn:20,absence:5},
+  'VETNIQUE':       {csat:90,qa:95,cph:6,res_time:48,acw:1.25,fulfil:100,realisation:90,churn:20,absence:5},
+  'JUSTPARK_usa':   {csat:80,qa:85,fcr:90,sla:90,fulfil:100,realisation:90,churn:20,absence:5},
+  'JUSTPARK_uk':    {csat:80,qa:90,cph:6,fcr:85,fulfil:100,realisation:90,churn:20,absence:5},
+  'JUSTPARK_so':    {csat:75,qa:90,sla:90,fulfil:100,realisation:90,churn:20,absence:5},
+  'BUTTERNUTBOX':   {csat:90,qa:90,cpd:50,fulfil:100,realisation:90,churn:20,absence:5},
+  'Medexpress':     {csat:85,qa:90,compliance:100,productivity:90,fulfil:100,realisation:90,churn:20,absence:5},
+  'PICKNPAY':       {csat:85,qa:80,talk_sla:90,calls_abn:5,fulfil:100,realisation:90,churn:20,absence:5},
+  'ROYALCANIN':     {qa:95,cph:4,error_rate:2,fulfil:100,realisation:90,churn:20,absence:5},
+  'HUNZAG':         {qa:95,cpd:20,res_time:24,fulfil:100,realisation:90,churn:20,absence:5},
+  'GOODLIFESORTED': {qa:95,cph:4,aht:3,calls_abn:8,fulfil:100,realisation:90,churn:20,absence:5},
+  'PINTER':         {csat:80,qa:90,res_time:24,avg_resp_time:4,fulfil:100,realisation:90,churn:20,absence:5},
+  'BEER52':         {qa:90,sph:1.25,fulfil:100,realisation:90,churn:20,absence:5},
+  '1LIFE':          {qa:90,sales:350,fulfil:100,realisation:90,churn:20,absence:5},
 };
 
 const KPI_CONFIG = {
-  'Gousto':         [['csat','CSAT','higher'],['qa','QA','higher'],['cph','CPH','higher'],['adherence','Adherence','higher'],['fulfil','Fulfil','higher'],['realisation','Realisation','higher'],['absence','Absence','lower']],
-  'VETNIQUE':       [['csat','CSAT','higher'],['qa','QA','higher'],['cph','CPH','higher'],['res_time','Res. time','lower'],['fulfil','Fulfil','higher'],['realisation','Realisation','higher'],['absence','Absence','lower']],
-  'JUSTPARK_usa':   [['csat','CSAT','higher'],['qa','QA','higher'],['fcr','FCR','higher'],['sla','SLA','higher'],['fulfil','Fulfil','higher'],['realisation','Realisation','higher'],['absence','Absence','lower']],
-  'JUSTPARK_uk':    [['csat','CSAT','higher'],['qa','QA','higher'],['cph','CPH','higher'],['fcr','FCR','higher'],['tickets','Tickets','none'],['fulfil','Fulfil','higher'],['realisation','Realisation','higher'],['absence','Absence','lower']],
-  'JUSTPARK_so':    [['csat','CSAT','higher'],['qa','QA','higher'],['sla','SLA','higher'],['fulfil','Fulfil','higher'],['realisation','Realisation','higher'],['absence','Absence','lower']],
-  'BUTTERNUTBOX':   [['csat','CSAT','higher'],['qa','QA','higher'],['cpd','CPD','higher'],['fulfil','Fulfil','higher'],['realisation','Realisation','higher'],['absence','Absence','lower']],
-  'Medexpress':     [['csat','CSAT','higher'],['qa','QA','higher'],['aht','AHT','lower'],['tickets','Tickets','none'],['fulfil','Fulfil','higher'],['realisation','Realisation','higher'],['absence','Absence','lower']],
-  'PICKNPAY':       [['qa','QA','higher'],['sla','Talk SLA','higher'],['calls','Calls','none'],['abandon_rate','Abandoned','lower'],['fulfil','Fulfil','higher'],['realisation','Realisation','higher'],['absence','Absence','lower']],
-  'ROYALCANIN':     [['qa','QA','higher'],['cph','CPH','higher'],['tickets','Tickets','none'],['fulfil','Fulfil','higher'],['realisation','Realisation','higher'],['absence','Absence','lower']],
-  'HUNZAG':         [['qa','QA','higher'],['cpd','CPD','higher'],['res_time','Res. time','lower'],['tickets','Tickets','none'],['fulfil','Fulfil','higher'],['realisation','Realisation','higher'],['absence','Absence','lower']],
-  'GOODLIFESORTED': [['qa','QA','higher'],['cph','CPH','higher'],['aht','AHT','lower'],['calls','Calls','none'],['fulfil','Fulfil','higher'],['realisation','Realisation','higher'],['absence','Absence','lower']],
-  'PINTER':         [['csat','CSAT','higher'],['qa','QA','higher'],['res_time','Res. time','lower'],['tickets','Tickets','none'],['fulfil','Fulfil','higher'],['realisation','Realisation','higher'],['absence','Absence','lower']],
-  'BEER52':         [['qa','QA','higher'],['sph','SPH','higher'],['calls','Calls','none'],['sales','Sales','none'],['fulfil','Fulfil','higher'],['realisation','Realisation','higher'],['absence','Absence','lower']],
-  '1LIFE':          [['qa','QA','higher'],['sales','Sales','higher'],['tickets','Tickets','none'],['fulfil','Fulfil','higher'],['realisation','Realisation','higher'],['absence','Absence','lower']],
+  'Gousto':         [['csat','CSAT','higher'],['qa','QA','higher'],['cph','CPH','higher'],['adherence','Adherence','higher'],['fulfil','Fulfil','higher'],['realisation','Realisation','higher'],['churn','Churn','lower'],['absence','Absence','lower']],
+  'VETNIQUE':       [['csat','CSAT','higher'],['qa','QA','higher'],['cph','CPH','higher'],['res_time','Res. time','lower'],['fulfil','Fulfil','higher'],['realisation','Realisation','higher'],['churn','Churn','lower'],['absence','Absence','lower']],
+  'JUSTPARK_usa':   [['csat','CSAT','higher'],['qa','QA','higher'],['fcr','FCR','higher'],['sla','SLA','higher'],['fulfil','Fulfil','higher'],['realisation','Realisation','higher'],['churn','Churn','lower'],['absence','Absence','lower']],
+  'JUSTPARK_uk':    [['csat','CSAT','higher'],['qa','QA','higher'],['cph','CPH','higher'],['fcr','FCR','higher'],['tickets','Tickets','none'],['fulfil','Fulfil','higher'],['realisation','Realisation','higher'],['churn','Churn','lower'],['absence','Absence','lower']],
+  'JUSTPARK_so':    [['csat','CSAT','higher'],['qa','QA','higher'],['sla','SLA','higher'],['fulfil','Fulfil','higher'],['realisation','Realisation','higher'],['churn','Churn','lower'],['absence','Absence','lower']],
+  'BUTTERNUTBOX':   [['csat','CSAT','higher'],['qa','QA','higher'],['cpd','CPD','higher'],['fulfil','Fulfil','higher'],['realisation','Realisation','higher'],['churn','Churn','lower'],['absence','Absence','lower']],
+  'Medexpress':     [['csat','CSAT','higher'],['qa','QA','higher'],['aht','AHT','lower'],['tickets','Tickets','none'],['fulfil','Fulfil','higher'],['realisation','Realisation','higher'],['churn','Churn','lower'],['absence','Absence','lower']],
+  'PICKNPAY':       [['qa','QA','higher'],['sla','Talk SLA','higher'],['calls','Calls','none'],['abandon_rate','Abandoned','lower'],['fulfil','Fulfil','higher'],['realisation','Realisation','higher'],['churn','Churn','lower'],['absence','Absence','lower']],
+  'ROYALCANIN':     [['qa','QA','higher'],['cph','CPH','higher'],['tickets','Tickets','none'],['fulfil','Fulfil','higher'],['realisation','Realisation','higher'],['churn','Churn','lower'],['absence','Absence','lower']],
+  'HUNZAG':         [['qa','QA','higher'],['cpd','CPD','higher'],['res_time','Res. time','lower'],['tickets','Tickets','none'],['fulfil','Fulfil','higher'],['realisation','Realisation','higher'],['churn','Churn','lower'],['absence','Absence','lower']],
+  'GOODLIFESORTED': [['qa','QA','higher'],['cph','CPH','higher'],['aht','AHT','lower'],['calls','Calls','none'],['fulfil','Fulfil','higher'],['realisation','Realisation','higher'],['churn','Churn','lower'],['absence','Absence','lower']],
+  'PINTER':         [['csat','CSAT','higher'],['qa','QA','higher'],['res_time','Res. time','lower'],['tickets','Tickets','none'],['fulfil','Fulfil','higher'],['realisation','Realisation','higher'],['churn','Churn','lower'],['absence','Absence','lower']],
+  'BEER52':         [['qa','QA','higher'],['sph','SPH','higher'],['calls','Calls','none'],['sales','Sales','none'],['fulfil','Fulfil','higher'],['realisation','Realisation','higher'],['churn','Churn','lower'],['absence','Absence','lower']],
+  '1LIFE':          [['qa','QA','higher'],['sales','Sales','higher'],['tickets','Tickets','none'],['fulfil','Fulfil','higher'],['realisation','Realisation','higher'],['churn','Churn','lower'],['absence','Absence','lower']],
 };
 
 // Fail loudly when a campaign we display has no KPI_CONFIG/TARGETS: it is
@@ -1459,6 +1462,10 @@ let STATE = {
   shrinkageCampaignWeek: null,// {[camp]:{[week]:{...derived metrics}}}
   shrinkageTeamWeek: null,    // {[camp||team]:{[week]:{...}}}
   shrinkageAvailable: false,
+  // Churn (from EmployeeProfile full history; aggregate across client campaigns)
+  churnRows: null,        // extractChurnRows() output: {join,exit,reason,status,contractType,campaignSlug}[]
+  churnByMonth: null,     // computeMonthlyChurn(): per-month {month,leavers,avgHC,churn_pct} for the trend
+  churnRolling: null,     // headline: latest month's rolling-12 result (churn_annual_pct + tenure split)
   granularity: 'week',   // 'day' | 'week' | 'month' — re-aggregation grain
   rangeBounds: null,     // {from,to} YYYY-MM-DD → custom day range (one combined bucket)
   weeks: [],             // period labels for the current granularity
@@ -1794,12 +1801,13 @@ function fmtVal(val, kpi) {
   }
   if (['absence','abandon_rate','error_rate','calls_abn'].includes(kpi)) return val.toFixed(1) + '%';
   if (['fulfil','realisation'].includes(kpi)) return val.toFixed(0) + '%';
+  if (kpi === 'churn') return val.toFixed(1) + '%';
   return val.toFixed(2);
 }
 
 function fmtTgt(tgt, kpi) {
   if (tgt == null) return '';
-  if (['csat','qa','adherence','fcr','sla','talk_sla','absence','abandon_rate','error_rate','calls_abn','compliance','productivity','fulfil','realisation'].includes(kpi)) return tgt + '%';
+  if (['csat','qa','adherence','fcr','sla','talk_sla','absence','abandon_rate','error_rate','calls_abn','compliance','productivity','fulfil','realisation','churn'].includes(kpi)) return tgt + '%';
   return tgt;
 }
 
@@ -4210,6 +4218,28 @@ function renderSummary() {
           { dir:'', txt:`${Math.round(totalCalls).toLocaleString()} calls · ${Math.round(totalTickets).toLocaleString()} tkts` }),
     hero(absStatus, 'Absence', absenceRate != null ? absenceRate.toFixed(1)+'%' : '—', null,
       absDeltaTxt || { dir:'', txt:'target ≤5%' }),
+    // Churn — rolling 12-month attrition, aggregate across all client campaigns.
+    // The two tenure tiles are COMPONENTS of the first (shared denominator → they
+    // sum to it), not independent metrics; labels + subtitles say so. band(20,30)
+    // (green ≤20, amber ≤30, red >30) on all three — annual scale, deliberately NOT
+    // the absence single-digit bands. '—' (never 0.0%) when we couldn't compute it;
+    // '—' + "insufficient history" when the 12-month window predates our data.
+    ...(() => {
+      const cr = STATE.churnRolling;
+      const ok = cr && !cr.incomplete_window;
+      const insufficient = cr && cr.incomplete_window;
+      const pct = (v) => (ok && v != null) ? v.toFixed(1) + '%' : '—';
+      const sub = (txt) => insufficient ? { dir:'', txt:'insufficient history' } : { dir:'', txt };
+      return [
+        hero(ok ? band(cr.churn_annual_pct, 20, 30) : 'info', 'Churn (12mo)', pct(cr && cr.churn_annual_pct),
+          null, sub('rolling annual · target ≤20%')),
+        hero(ok ? band(cr.churn_early_pct, 20, 30) : 'info', 'Early (<3mo)', pct(cr && cr.churn_early_pct),
+          null, insufficient ? { dir:'', txt:'insufficient history' }
+            : { dir:'', txt: (cr && cr.early_share_of_leavers_pct != null) ? `${Math.round(cr.early_share_of_leavers_pct)}% of all leavers` : 'component of 12mo churn' }),
+        hero(ok ? band(cr.churn_established_pct, 20, 30) : 'info', 'Established (3mo+)', pct(cr && cr.churn_established_pct),
+          null, sub('component of 12mo churn · ≤20%')),
+      ];
+    })(),
     hero(slipStatus, 'Slippage', slippage != null ? slippage.toFixed(1)+'%' : '—', null,
       slipDeltaTxt || { dir:'', txt: addHrsPeriod > 0
         ? `${Math.round(reqHrsExpected).toLocaleString()} hrs req (incl +${Math.round(addHrsPeriod).toLocaleString()})`
@@ -4306,6 +4336,19 @@ function renderSummary() {
           <div class="chart-sub" style="text-align:center;margin-top:8px;text-transform:none;letter-spacing:0">${fmtK(atRisk)} of ${fmtK(sumV)} billable hrs are in <span style="color:var(--red-text)">red</span> campaigns</div>`;
         })()}
       </div>
+    </div>
+    <div class="chart-card" style="margin-top:14px">
+      <div class="chart-head">
+        <div class="chart-title">Monthly churn</div>
+        <div class="chart-sub">leavers ÷ avg headcount each month — a MONTHLY rate, not the rolling annual in the tiles above (they differ ~10×)</div>
+      </div>
+      ${(() => {
+        const rows = STATE.churnByMonth || [];
+        if (!rows.length) return '<div class="flag-empty" style="padding:24px">No churn history yet.</div>';
+        const series = rows.map(m => m.churn_pct == null ? 0 : m.churn_pct);
+        const labels = rows.map(m => m.month.slice(2));  // 'YY-MM'
+        return svgArea(series, { labels, fmt: (v) => v.toFixed(1) + '%' });
+      })()}
     </div>
     <div class="sum-card">
       <h3>Watch list</h3>
@@ -4689,6 +4732,7 @@ function renderCampaignDetail(root) {
   const groups = {};
   for (const [k, lbl, dir] of cfg) {
     if (k === 'realisation') continue;  // a team/agent score; shown here only as strip context
+    if (k === 'churn') continue;        // aggregate HR metric — Summary hero tiles only this pass, not per-campaign
     const g = KPI_GROUP[k] || 'Outcome';
     (groups[g] ??= []).push(kpiCellHtml(m, tgts, k, lbl, dir));
   }
@@ -4839,6 +4883,7 @@ function renderTeamList(root) {
     let stats = '';
     for (const [k, lbl, dir] of cfg) {
       if (k === 'fulfil') continue;  // uncontrollable at team level — shown as context in the efficiency strip below
+      if (k === 'churn') continue;   // aggregate HR metric — Summary hero tiles only this pass
       const v = m[k], tg = tgts[k];
       const r = dir === 'none' ? 'grey' : rag(v, tg, dir);
       stats += `<div class="team-stat ${r}">
@@ -4926,7 +4971,7 @@ function renderAgentList(root) {
     { key: 'billable', label: 'Billable', kpi: 'billable', num: true, tgt: tgts.billable, dir: 'higher' },
   ];
   for (const [k, lbl, dir] of cfg) {
-    if (k === 'billable' || k === 'absence' || k === 'fulfil') continue;  // fulfil is campaign-level, not per-agent
+    if (k === 'billable' || k === 'absence' || k === 'fulfil' || k === 'churn') continue;  // fulfil campaign-level; churn is aggregate HR, not per-agent
     cols.push({ key: k, label: lbl, kpi: k, num: true, tgt: tgts[k], dir });
   }
   cols.push({ key: 'absence', label: 'Absence', kpi: 'absence', num: true, tgt: tgts.absence, dir: 'lower' });
@@ -5227,6 +5272,46 @@ function applyData(rows, attendanceRows, empProfileRows, roleUsers) {
     STATE.selectedWeek = STATE.weeks[STATE.weeks.length - 2] || STATE.weeks[STATE.weeks.length - 1];
   }
   applyDerivedKpis();  // Fulfil (campaign) + Realisation (team/agent) onto the buckets, after billable is final
+  buildChurn();        // Attrition from EmployeeProfile full history (incl. leavers), aggregate across client campaigns
+}
+
+// Last `n` calendar months as 'YYYY-MM', oldest → newest, ending with the current
+// month (UTC). Used as the window list for the rolling/monthly churn series.
+function recentMonths(n) {
+  const now = new Date();
+  let y = now.getUTCFullYear(), m = now.getUTCMonth();  // m is 0-based
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    out.unshift(`${y}-${String(m + 1).padStart(2, '0')}`);
+    if (--m < 0) { m = 11; y--; }
+  }
+  return out;
+}
+
+// Churn is aggregate across all client campaigns this pass (server-side
+// _campaign_slug already excludes internal/admin staff; extractChurnRows drops the
+// rest). The headline tile is the rolling-12 figure for the latest month; the
+// trend uses the per-month churn_pct. Per-campaign is a documented follow-on.
+function buildChurn() {
+  STATE.churnRows = []; STATE.churnByMonth = []; STATE.churnRolling = null;
+  const emp = STATE.rawEmpRows;
+  if (!emp || !emp.length) return;
+  try {
+    STATE.churnRows = extractChurnRows(emp, parseDate);        // parseDate injected — keeps the shared module pure
+    // Report-back diagnostics: an earliest exit date that's suspiciously recent
+    // would mean the Zoho view drops old leavers on a rolling window, so churn
+    // silently decays the further back you look — flag it here, don't hide it.
+    const withExit = STATE.churnRows.filter(r => r.exit);
+    let earliest = null;
+    for (const r of withExit) if (!earliest || +r.exit < +earliest) earliest = r.exit;
+    console.info(`[churn] ${emp.length} EmployeeProfile rows → ${STATE.churnRows.length} churnRows (in a campaign, with a join date) · ${withExit.length} have an exit date · earliest exit ${earliest ? earliest.toISOString().slice(0, 10) : '(none)'}`);
+    const months = recentMonths(13);
+    STATE.churnByMonth = computeMonthlyChurn(STATE.churnRows, months);
+    const rolling = computeRolling12Churn(STATE.churnRows, months);
+    STATE.churnRolling = rolling[rolling.length - 1] || null;  // latest month's trailing-12 window = the headline
+  } catch (e) {
+    console.warn('[churn] compute failed:', e.message);
+  }
 }
 
 function setBadge(kind, label) {
