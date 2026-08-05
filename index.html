@@ -2616,6 +2616,12 @@ let _periodPopOpen = false;      // period picker popover open/closed
 let _periodOutsideBound = false; // guard: outside-click listener bound once
 function render() {
   $('loadingView').style.display = 'none';
+  // Keep the DOM tab/panel visibility in sync with STATE.view on EVERY render.
+  // A cold load never calls setView() (only tab clicks do), and the HTML marks the
+  // Summary tab active but not its panel — so without this the initial view renders
+  // into a display:none panel and the page looks blank until a tab is clicked.
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('act', t.dataset.view === STATE.view));
+  document.querySelectorAll('.view').forEach(v => v.classList.toggle('act', v.id === STATE.view + 'View'));
   // Footer
   const now = new Date();
   $('footer').innerHTML = `
