@@ -2405,20 +2405,26 @@ function applyShiftBillable() {
       if (STATE.teamWeek[camp] && STATE.teamWeek[camp][team] && STATE.teamWeek[camp][team][wk])
         STATE.teamWeek[camp][team][wk].billable = b.byTeamWeek[tk][wk];
   }
-  // Push the same attendance billable down to each agent so the BAE breakdown
-  // reconciles to its team total (keyed camp||uid, so it lands wherever the
-  // agent sits regardless of team key). Agents whose attendance didn't name-match
-  // keep their User_metrics_3 value.
+  // Push attendance billable down to each agent so the BAE breakdown reconciles
+  // to its team total, AND add a row for anyone whose attendance lands on a team
+  // but whose METRICS live in another campaign — a cross-campaign Team Leader who
+  // leads this team (their call data sits under a different campaign) or a cover
+  // worker. Keyed camp||uid, so it lands on the right team regardless of where
+  // the person's metrics are. Only ever into a team bucket that already exists
+  // (never invents a team). Synthesised rows carry billable only (no KPI values),
+  // flagged _attendanceOnly so the renderer can mark the leader.
   const agentByKey = b.byAgentWeek || {};
-  for (const camp in STATE.agentWeek)
-    for (const team in STATE.agentWeek[camp])
-      for (const uid in STATE.agentWeek[camp][team]) {
-        const aw = agentByKey[camp + '||' + uid];
-        if (!aw) continue;
-        for (const wk in STATE.agentWeek[camp][team][uid])
-          if (aw[wk] != null && STATE.agentWeek[camp][team][uid][wk])
-            STATE.agentWeek[camp][team][uid][wk].billable = aw[wk];
-      }
+  for (const ak in agentByKey) {
+    const j = ak.indexOf('||'); const camp = ak.slice(0, j), uid = ak.slice(j + 2);
+    const team = STATE.agentMeta[uid]?.team;
+    if (!team || team === UNASSIGNED_TEAM) continue;
+    if (!(STATE.teamWeek[camp] && STATE.teamWeek[camp][team])) continue;
+    const bucket = ((STATE.agentWeek[camp] ??= {})[team] ??= {})[uid] ??= {};
+    for (const wk in agentByKey[ak]) {
+      if (bucket[wk]) bucket[wk].billable = agentByKey[ak][wk];             // existing metrics row → override billable
+      else bucket[wk] = { billable: agentByKey[ak][wk], _attendanceOnly: true }; // attendance-only → synthesise a row
+    }
+  }
   if (Object.keys(b.unmatched).length) {
     console.warn('[shift] billable not attributed — unmatched shift names:',
       Object.fromEntries(Object.entries(b.unmatched).map(([k, v]) => [k, Math.round(v) + 'h'])));
@@ -4806,6 +4812,12 @@ function renderAgentList(root) {
     if (sortKey === 'name') return sortDir === 'asc' ? av.localeCompare(bv) : bv.localeCompare(av);
     return sortDir === 'asc' ? av - bv : bv - av;
   });
+  // The team node is named after its Team Leader, so a row with that exact name
+  // is the leader themselves (their own hours) — pin to the top, don't count as a
+  // BAE. Applies to real TL teams, not the "— direct & unassigned" catch-alls.
+  const isLeader = (r) => r.name === t;
+  const baeCount = rows.filter(r => !isLeader(r)).length;
+  rows.sort((a, b) => (isLeader(a) === isLeader(b)) ? 0 : (isLeader(a) ? -1 : 1));
 
   // Choose columns from cfg (skip 'none' types like Tickets/Calls if duplicated)
   const cols = [
@@ -4833,7 +4845,7 @@ function renderAgentList(root) {
     <div class="agent-tbl-wrap">
       <div class="agent-tbl-head">
         <div class="agent-tbl-title">${t} — agent breakdown</div>
-        <div class="agent-tbl-sub">${rows.length} BAE${rows.length===1?'':'s'} · ${pLbl(wk)}</div>
+        <div class="agent-tbl-sub">${baeCount} BAE${baeCount===1?'':'s'}${rows.some(isLeader)?' + leader':''} · ${pLbl(wk)}</div>
       </div>
       <table class="agent-tbl">
         <thead><tr>
@@ -4849,7 +4861,7 @@ function renderAgentList(root) {
       html += `<tr>`;
       for (const c of cols) {
         if (c.key === 'name') {
-          html += `<td class="name">${r.name}</td>`;
+          html += `<td class="name">${r.name}${isLeader(r) ? ' <span class="camp-risk" style="background:var(--bg-2);color:var(--text3)">TL</span>' : ''}</td>`;
         } else {
           const v = r[c.key];
           const ragClass = c.dir && c.dir !== 'none' && c.tgt != null ? rag(v, c.tgt, c.dir) + '-cell' : 'dim';
