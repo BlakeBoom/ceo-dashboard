@@ -532,6 +532,7 @@ svg.ring .rs{font-size:8px;letter-spacing:.5px;text-transform:uppercase}
      (module scripts defer and would run after this classic script). -->
 <script src="/shared/names.js"></script>
 <script src="/shared/churn.js"></script>
+<script src="/shared/hours.js"></script>
 <script>
 // Shared name-matching helpers live in /shared/names.js (one source of truth
 // for the server too). Pull them into scope so the call sites below are
@@ -541,6 +542,8 @@ const { normalizeName, firstLastKey, stripKnownNameSuffix, buildTeamCanonMap, ti
         LOWER_BETTER, CUMULATIVE_KPIS, rag, overallRag, agentScore, fulfilPct, realisationPct } = globalThis.BoomerangNames;
 // Churn / attrition maths — same shared-module pattern as BoomerangNames.
 const { extractChurnRows, computeMonthlyChurn, computeRolling12Churn } = globalThis.BoomerangChurn;
+// Hours-sourcing rule: billable may only come from attendance, never metrics.
+const { seedBillableFromMetrics } = globalThis.BoomerangHours;
 // ════════════════════════════════════════════════════════════════════════
 // CONFIGURATION
 // ════════════════════════════════════════════════════════════════════════
@@ -1523,7 +1526,11 @@ function rollup(rows) {
     avg_resp_time: meanNonZero(rows.map(x => x.response_time != null ? x.response_time : x.avg_resp_time)),
     error_rate: meanNonZero(rows.map(x => x.error_rate)),
 
-    billable: sumSafe(rows.map(x => x.billable_hours != null ? x.billable_hours : x.billable)),
+    // Billable is an HOURS figure and may come ONLY from AttendanceUserReport, so
+    // seed it via the shared rule (always null; renders "—", skipped by scorers).
+    // applyShiftBillable() fills it from attendance where a bucket exists; absent
+    // attendance it stays null — NOT the User_metrics_3 hours column, and NOT 0.
+    billable: seedBillableFromMetrics(rows),
     calls: sumSafe(rows.map(x => x.calls)),
     tickets: sumSafe(rows.map(x => x.tickets)),
     sales: sumSafe(rows.map(x => x.sales)),
@@ -1537,9 +1544,13 @@ function rollup(rows) {
   for (const x of rows) if (x.user_id != null) uniqUsers.add(x.user_id);
   r.fte = uniqUsers.size;
 
-  // Absence rate = absent / (absent + present) * 100
-  const denom = r.absent_days + r.ftes_present;
-  r.absence = denom > 0 ? (r.absent_days / denom) * 100 : null;
+  // Absence is an attendance figure and may come ONLY from AttendanceUserReport,
+  // never from the User_metrics_3 absenteeism/FTE columns. Seed it null;
+  // overlayAttendanceAbsence() fills it from the shrinkage (attendance) buckets when
+  // attendance is available. Without attendance it stays null → "—", never a
+  // metrics-derived rate. (absent_days / ftes_present are retained above only as raw
+  // passthroughs; they are not a valid source for the displayed absence figure.)
+  r.absence = null;
 
   // Abandon rate from totals
   r.abandon_rate = r.calls > 0 ? (r.abandoned / r.calls) * 100 : null;
@@ -1682,16 +1693,16 @@ function periodNoun() {
 // can verify billable is attributed to the right campaign. Open the console.
 function logWgDebug() {
   const d = STATE.wgDebug || {};
-  const totals = {}; // workgroup → {camp, hrs} across all loaded periods
+  const totals = {}; // workgroup → {camp, rows} across all loaded periods
   for (const camp in d) for (const wk in d[camp]) for (const wg in d[camp][wk]) {
-    (totals[wg] ??= { camp, hrs: 0 }).hrs += d[camp][wk][wg];
+    (totals[wg] ??= { camp, rows: 0 }).rows += d[camp][wk][wg];
   }
-  const tbl = Object.entries(totals).map(([wg, o]) => ({ workgroup: wg, campaign: o.camp, billable_hrs_all_periods: Math.round(o.hrs) }))
-    .sort((a, b) => b.billable_hrs_all_periods - a.billable_hrs_all_periods);
-  console.log('%c[workgroup → campaign → billable hrs, ALL loaded periods]', 'font-weight:bold');
+  const tbl = Object.entries(totals).map(([wg, o]) => ({ workgroup: wg, campaign: o.camp, rows_all_periods: o.rows }))
+    .sort((a, b) => b.rows_all_periods - a.rows_all_periods);
+  console.log('%c[workgroup → campaign → row count, ALL loaded periods]', 'font-weight:bold');
   console.table(tbl);
   if (STATE.wgSkipped && Object.keys(STATE.wgSkipped).length) {
-    console.warn('[workgroups with NO campaign mapping — billable dropped]', STATE.wgSkipped);
+    console.warn('[workgroups with NO campaign mapping — rows dropped]', STATE.wgSkipped);
   }
 }
 
@@ -1702,8 +1713,8 @@ function buildAggregates(rows, gran = 'week') {
   const teamWeekRows = {};   // camp -> team -> week -> rows[]
   const agentWeekRows = {};  // camp -> team -> user_id -> week -> rows[]
   const agentMeta = {};
-  const wgDebug = {};        // workgroup → { camp, hrs } : where billable lands
-  const wgSkipped = {};      // workgroup → hrs : rows dropped (no campaign mapping)
+  const wgDebug = {};        // workgroup → { camp, rows } : how the mapping distributes rows
+  const wgSkipped = {};      // workgroup → row count : rows dropped (no campaign mapping)
 
   // Pre-pass: collect raw team-node names per campaign, then build a per-campaign
   // canonical map so duplicate leader spellings collapse before bucketing (and
@@ -1724,13 +1735,14 @@ function buildAggregates(rows, gran = 'week') {
       camp = WG_MAP[r.workgroup];
     }
     const _wg = (r.workgroup ?? '(blank)');
-    const _bh = (r.billable_hours != null ? +r.billable_hours : +r.billable) || 0;
-    if (!camp) { wgSkipped[_wg] = (wgSkipped[_wg] || 0) + _bh; continue; }
+    // Diagnostic counts ROWS, not billable hours — billable may not be sourced from
+    // User_metrics_3, and these rows carry no valid hours figure at this stage.
+    if (!camp) { wgSkipped[_wg] = (wgSkipped[_wg] || 0) + 1; continue; }
     const week = periodKeyFor(r, gran);
     if (!week) continue;
-    // Per camp → period → workgroup billable, so the breakdown matches the
-    // billable shown for the selected period (not an all-time sum).
-    ((wgDebug[camp] ??= {})[week] ??= {})[_wg] = (wgDebug[camp][week][_wg] || 0) + _bh;
+    // Per camp → period → workgroup row count, so we can see how the workgroup→
+    // campaign mapping distributes rows (not an hours figure).
+    ((wgDebug[camp] ??= {})[week] ??= {})[_wg] = (wgDebug[camp][week][_wg] || 0) + 1;
     weeks.add(week);
     const team = canonTeam(camp, resolveTeamForRow(r));
     const uid = r.user_id;
@@ -1793,6 +1805,11 @@ function buildAggregates(rows, gran = 'week') {
 // rag() and overallRag() now live in /shared/names.js (destructured at the top of
 // this script) so they can be unit-tested. rag() is a regression-guarded contract
 // — do not reintroduce or modify it here.
+
+// Billable and other hours figures are null when AttendanceUserReport hasn't
+// supplied them (never sourced from User_metrics_3). Render "—", NEVER 0 — a 0
+// would read as a real, catastrophic hours figure.
+function fmtHrs(val) { return val == null || isNaN(val) ? '—' : Math.round(val).toLocaleString(); }
 
 function fmtVal(val, kpi) {
   if (val == null || isNaN(val)) return '—';
@@ -4049,8 +4066,11 @@ function renderSummary() {
   const prevWk = prevWeek(wk);
   const camps = Object.keys(STATE.campaignWeek).filter(c => STATE.campaignWeek[c][wk]);
 
-  let totalFTE = 0, totalBillable = 0, totalCalls = 0, totalTickets = 0;
-  let prevFTE = 0, prevBillable = 0;
+  // Billable stays null until a bucket actually supplies an attendance figure, so
+  // "no attendance anywhere" reads as "—", not a real 0 (which would show 0 hrs and
+  // 100% slippage). Non-hours totals (calls/tickets/FTE headcount) start at 0.
+  let totalFTE = 0, totalBillable = null, totalCalls = 0, totalTickets = 0;
+  let prevFTE = 0, prevBillable = null;
   let green = 0, amber = 0, red = 0, unconfigured = 0;
   const unconfiguredCamps = [];
   let absentSum = 0, presentSum = 0;
@@ -4064,7 +4084,7 @@ function renderSummary() {
   for (const c of camps) {
     const m = STATE.campaignWeek[c][wk];
     totalFTE += m.fte || 0;
-    totalBillable += m.billable || 0;
+    if (m.billable != null) totalBillable = (totalBillable || 0) + m.billable;
     totalCalls += m.calls || 0;
     totalTickets += m.tickets || 0;
     // Absence is sourced from AttendanceUserReport (shrinkage buckets), not the
@@ -4084,7 +4104,7 @@ function renderSummary() {
     if (prevWk && STATE.campaignWeek[c][prevWk]) {
       const mp = STATE.campaignWeek[c][prevWk];
       prevFTE += mp.fte || 0;
-      prevBillable += mp.billable || 0;
+      if (mp.billable != null) prevBillable = (prevBillable || 0) + mp.billable;
       const sAbsP = STATE.shrinkageCampaignWeek?.[c]?.[prevWk];
       prevAbsentSum += sAbsP?.absence_days || 0;
       prevPresentSum += sAbsP?.absence_denom_days || 0;
@@ -4111,7 +4131,7 @@ function renderSummary() {
   const baseReqExpected = reqHrsTotal * frac;
   const addHrsPeriod = additionalHrsTotal(wk);
   const reqHrsExpected = baseReqExpected + addHrsPeriod;
-  const slippage = reqHrsExpected > 0 ? ((reqHrsExpected - totalBillable) / reqHrsExpected) * 100 : null;
+  const slippage = (totalBillable != null && reqHrsExpected > 0) ? ((reqHrsExpected - totalBillable) / reqHrsExpected) * 100 : null;
   let prevSlippage = null;
   if (prevWk) {
     let prevReqHrs = 0;
@@ -4119,7 +4139,7 @@ function renderSummary() {
       if (STATE.campaignWeek[c][prevWk]) prevReqHrs += reqHrsForCampPeriod(c, prevWk);
     }
     prevReqHrs += additionalHrsTotal(prevWk);
-    prevSlippage = prevReqHrs > 0 ? ((prevReqHrs - prevBillable) / prevReqHrs) * 100 : null;
+    prevSlippage = (prevBillable != null && prevReqHrs > 0) ? ((prevReqHrs - prevBillable) / prevReqHrs) * 100 : null;
   }
   const slipDelta = slippage != null && prevSlippage != null ?
     { val: slippage - prevSlippage, dir: slippage < prevSlippage ? 'up' : (slippage > prevSlippage ? 'down' : 'flat') } : null;
@@ -4179,7 +4199,7 @@ function renderSummary() {
     return base + additionalHrsTotal(w);   // dashed required line includes approved extra
   });
   const weekLabels = STATE.weeks.map(w => pLbl(w));
-  const fulfilment = reqHrsExpected > 0 ? (totalBillable / reqHrsExpected) * 100 : null;
+  const fulfilment = (totalBillable != null && reqHrsExpected > 0) ? (totalBillable / reqHrsExpected) * 100 : null;
   const fmtK = (n) => Math.abs(n) >= 1000 ? (n/1000).toFixed(n>=10000?0:1)+'k' : Math.round(n);
 
   // Hero card builder.
@@ -4207,7 +4227,7 @@ function renderSummary() {
   const onColour = (s) => s !== 'info';                // coloured cards get white rings
 
   const heroCards = [
-    hero(fulfilStatus, 'Billable Hours', Math.round(totalBillable).toLocaleString(),
+    hero(fulfilStatus, 'Billable Hours', fmtHrs(totalBillable),
       svgRing(fulfilment != null ? Math.min(100, fulfilment) : 0, { light: onColour(fulfilStatus), val: fulfilment != null ? Math.round(fulfilment)+'%' : '—', sub: 'of req' }), billDeltaTxt),
     hero(healthStatus, 'Campaign Health', `${green}/${total}`,
       svgRing(gPct, { light: onColour(healthStatus), val: Math.round(gPct)+'%', sub: 'on track' }),
@@ -4276,12 +4296,12 @@ function renderSummary() {
       + ${Math.round(addHrsPeriod).toLocaleString()}h approved additional this ${periodNoun()}.
     </div>` : '';
 
-  // Make a degraded/attendance-outage state OBVIOUS rather than silently showing
-  // different numbers: without the attendance feed, Shrinkage & Absence are
-  // hidden and Billable falls back to the (smaller) User_metrics_3 figure.
+  // Make the attendance-outage state OBVIOUS: hours figures may ONLY come from
+  // AttendanceUserReport, so without it they are UNAVAILABLE (shown as "—"), never
+  // approximated from User_metrics_3. Name the affected metrics so it's unambiguous.
   const attendanceNote = STATE.attendanceMissing ? `
     <div class="err-banner show" style="background:rgba(239,68,68,.10);border-color:rgba(239,68,68,.45);color:var(--red-text);margin-bottom:12px">
-      ⚠ Attendance data unavailable — Shrinkage & Absence are hidden and Billable/Slippage may be understated (falling back to User_metrics_3). Retrying automatically.
+      ⚠ Attendance data unavailable — hours-based figures (Billable, Fulfil, Slippage, Realisation, Shrinkage, Absence, delivered FTE) are shown as “—” rather than estimated. Retrying automatically.
     </div>` : (STATE.attendanceStale ? `
     <div class="err-banner show" style="background:rgba(245,158,11,.08);border-color:rgba(245,158,11,.4);color:var(--amber-text);margin-bottom:12px">
       ⚠ Attendance feed didn't refresh this cycle — showing last-known shrinkage data.
@@ -4305,7 +4325,9 @@ function renderSummary() {
           <div class="chart-title">Billable hours over time</div>
           <div class="chart-sub">${isPartial ? `${periodNoun()}-to-date · ${pctElapsed}% elapsed` : 'vs required (dashed)'}</div>
         </div>
-        ${svgArea(billSeries, { labels: weekLabels, series2: reqSeries.some(v=>v>0) ? reqSeries : null, fmt: fmtK })}
+        ${STATE.attendanceMissing
+          ? `<div class="flag-empty" style="padding:32px">Attendance data unavailable — billable hours shown as “—”.</div>`
+          : svgArea(billSeries, { labels: weekLabels, series2: reqSeries.some(v=>v>0) ? reqSeries : null, fmt: fmtK })}
       </div>
       <div class="chart-card">
         <div class="chart-head"><div class="chart-title">Capacity by campaign</div><div class="chart-sub">coloured by health</div></div>
@@ -4574,6 +4596,7 @@ function reqHrsForCampaign(c, wk) {
 // a team inside the campaign (pass the team's billable). Returns null when the
 // campaign has no FTE target configured.
 function deliveredFte(campKey, wk, billableHrs) {
+  if (billableHrs == null) return null;              // no attendance hours → no delivered FTE (not 0)
   const reqFte = reqFteForCampPeriod(campKey, wk);   // day-weighted avg across the range
   if (!(reqFte > 0)) return null;
   const reqHrs = reqHrsForCampaign(campKey, wk);
@@ -4642,7 +4665,7 @@ function campaignCardHtml(c, wk) {
   });
 
   const creq = reqHrsForCampaign(c, wk);
-  const cfulfil = creq != null && creq > 0 ? Math.min(100, (m.billable / creq) * 100) : null;
+  const cfulfil = (m.billable != null && creq != null && creq > 0) ? Math.min(100, (m.billable / creq) * 100) : null;
   const ring = svgRing(cfulfil != null ? cfulfil : 0, {
     size: 52, stroke: 9, color: ragColor(overall),
     val: cfulfil != null ? Math.round(cfulfil) + '%' : '—', sub: 'of req',
@@ -4699,7 +4722,7 @@ function renderCampaignDetail(root) {
 
   const overall = overallRag(m, tgts, cfg);
   const creq = reqHrsForCampaign(c, wk);
-  const fulfil = creq != null && creq > 0 ? (m.billable / creq) * 100 : null;
+  const fulfil = (m.billable != null && creq != null && creq > 0) ? (m.billable / creq) * 100 : null;
   const fte = deliveredFte(c, wk, m.billable);
   const sh = STATE.shrinkageAvailable ? STATE.shrinkageCampaignWeek?.[c]?.[wk] : null;
 
@@ -4717,7 +4740,7 @@ function renderCampaignDetail(root) {
   const shrStatus = sh && sh.shrinkage_total_pct != null ? band(sh.shrinkage_total_pct, 25, 35) : 'info';
 
   const heroCards = [
-    hero(fulfilStatus, 'Billable Hours', Math.round(m.billable).toLocaleString(),
+    hero(fulfilStatus, 'Billable Hours', fmtHrs(m.billable),
       svgRing(fulfil != null ? Math.min(100, fulfil) : 0, { light: onColour(fulfilStatus), val: fulfil != null ? Math.round(fulfil) + '%' : '—', sub: 'of req' }),
       creq != null ? `${Math.round(creq).toLocaleString()} hrs required` : 'no target set'),
     hero('info', 'Capacity', `${m.fte} HC`, null,
@@ -4792,7 +4815,7 @@ function renderCampaignDetail(root) {
       ${showTeamCol ? `<td style="color:var(--text3);font-size:12px">${a.team}</td>` : ''}
       <td class="numeric"><b>${a.score != null ? Math.round(a.score) + '%' : '—'}</b></td>
       ${leadKeys.map(k => `<td class="numeric">${fmtVal(a.m[k], k)}</td>`).join('')}
-      <td class="numeric">${Math.round(a.m.billable || 0).toLocaleString()}</td>
+      <td class="numeric">${fmtHrs(a.m.billable)}</td>
     </tr>`).join('');
 
   // Team summary (mini table), clickable through to the team view.
@@ -4806,7 +4829,7 @@ function renderCampaignDetail(root) {
       <td><span class="camp-overall ${tRag}" style="display:inline-block;margin-right:7px;vertical-align:middle"></span>${t}</td>
       <td class="numeric">${tm.fte}</td>
       <td class="numeric">${tFte != null ? tFte.toFixed(1) : '—'}</td>
-      <td class="numeric">${Math.round(tm.billable).toLocaleString()}</td>
+      <td class="numeric">${fmtHrs(tm.billable)}</td>
     </tr>`;
   }
 
@@ -4826,7 +4849,9 @@ function renderCampaignDetail(root) {
       </div>
       <div class="chart-card">
         <div class="chart-head"><div class="chart-title">Billable hours over time</div><div class="chart-sub">vs required (dashed)</div></div>
-        ${svgArea(billSeries, { labels: weekLabels, series2: reqSeries.some(v=>v>0) ? reqSeries : null, fmt: fmtK })}
+        ${STATE.attendanceMissing
+          ? `<div class="flag-empty" style="padding:32px">Attendance data unavailable — billable hours shown as “—”.</div>`
+          : svgArea(billSeries, { labels: weekLabels, series2: reqSeries.some(v=>v>0) ? reqSeries : null, fmt: fmtK })}
       </div>
     </div>
     ${hasTeams ? `
@@ -5133,7 +5158,7 @@ function renderTrends() {
     const series = STATE.weeks.map(w => STATE.campaignWeek[c][w]?.billable || 0);
     const maxV = Math.max(...series, 1);
     const billPrev = prevWk ? (STATE.campaignWeek[c][prevWk]?.billable || 0) : null;
-    const billDelta = billPrev != null ? m.billable - billPrev : null;
+    const billDelta = (m.billable != null && billPrev != null) ? m.billable - billPrev : null;
     const billDir = billDelta == null ? 'flat' : Math.abs(billDelta) < 1 ? 'flat' : billDelta > 0 ? 'up' : 'down';
     const overall = overallRag(m, tgts, cfg);
 
@@ -5151,7 +5176,7 @@ function renderTrends() {
       <td><span class="camp-overall ${overall}" style="display:inline-block;margin-right:7px;vertical-align:middle"></span>${CAMP_DISPLAY[c]||c}</td>
       <td class="numeric">${m.fte}</td>
       <td class="numeric">${(() => { const f = deliveredFte(c, wk, m.billable); return f != null ? f.toFixed(1) : '—'; })()}</td>
-      <td class="numeric">${Math.round(m.billable).toLocaleString()}</td>
+      <td class="numeric">${fmtHrs(m.billable)}</td>
       <td>
         <div class="mini-spark">${series.map((v,i)=>`<span class="${STATE.weeks[i]===wk?'act':''}" style="height:${Math.max(2,(v/maxV)*16)}px"></span>`).join('')}</div>
       </td>
@@ -5275,9 +5300,10 @@ function applyData(rows, attendanceRows, empProfileRows, roleUsers) {
   // the granularity changes, then build it for the current granularity.
   // IMPORTANT: only overwrite when this fetch actually returned rows. A failed
   // or empty refresh must NOT wipe the last-good data — otherwise a transient
-  // blip silently drops Shrinkage/Absence and flips Billable to the (smaller)
-  // User_metrics_3 source, making one session look materially different from
-  // another for the same day. Keep the previous rows and flag the failure.
+  // blip silently drops Shrinkage/Absence and Billable. Billable is never sourced
+  // from User_metrics_3: with no attendance it stays null and renders "—", so a
+  // failed refresh shows honest gaps rather than a different-source number. Keep
+  // the previous rows and flag the failure.
   const attOk = !!(attendanceRows && attendanceRows.length);
   const empOk = !!(empProfileRows && empProfileRows.length);
   if (attOk) STATE.rawAttRows = attendanceRows;

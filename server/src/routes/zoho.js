@@ -37,9 +37,15 @@ function profileName(r) {
 // filtering). This is how we row-limit the attendance / profile feeds to exactly
 // the caller's agents, so every role runs the same formulas on fewer rows rather
 // than on a different (org-wide) dataset.
-async function allowedNameKeys(user) {
+async function allowedNameKeys(user, since) {
   if (seesAllScope(user)) return null;
-  const metrics = scopeMetricsRows(user, await fetchView(VIEW.userMetrics));
+  // Date-bound the metrics fetch when the request is date-bounded: userMetrics has
+  // its date column pinned ('metric_date'), so this adds no probing and turns the
+  // old full-view scan into a small window. No `since` → unbounded, as before.
+  const raw = since
+    ? await fetchViewByDate(VIEW.userMetrics, since, '9999-12-31')
+    : await fetchView(VIEW.userMetrics);
+  const metrics = scopeMetricsRows(user, raw);
   const keys = new Set();
   for (const r of metrics) {
     const full = normName(metricName(r)); if (full) keys.add(full);
@@ -118,7 +124,7 @@ async function getDepartmentCampaignMap() {
 // Department lookup id, and log resolution quality once — unresolvable ids
 // silently shrink the churn denominator (inflating the rate), so it must be
 // visible, not silent.
-async function attachCampaignToProfiles(rows) {
+async function attachCampaignToProfiles(rows, { log = true } = {}) {
   const map = await getDepartmentCampaignMap();
   const counts = { campaign: 0, internal: 0, blank: 0, unresolved: 0 };
   for (const r of rows) {
@@ -127,8 +133,44 @@ async function attachCampaignToProfiles(rows) {
     r._campaign_slug = slug;
     r._campaign_name = name;
   }
-  console.info(`[zoho/EmployeeProfile] department resolution: ${rows.length} rows · ${counts.campaign} campaign · ${counts.internal} internal/admin · ${counts.blank} blank · ${counts.unresolved} unresolved-lookup-id (map=${map.size})`);
+  // Log only for the EmployeeProfile request itself; the Attendance path resolves
+  // the same rows to scope by campaign and would otherwise double this line.
+  if (log) console.info(`[zoho/EmployeeProfile] department resolution: ${rows.length} rows · ${counts.campaign} campaign · ${counts.internal} internal/admin · ${counts.blank} blank · ${counts.unresolved} unresolved-lookup-id (map=${map.size})`);
   return rows;
+}
+
+// EmployeeProfile is ~2,200 rows and rarely changes within a session. The scoped
+// Attendance path needs it to map People IDs → campaigns (campaign lead) or → names
+// (team leader), so cache it process-local like the department map to avoid
+// re-fetching the whole view on every poll. 10-minute TTL: shorter than the map's
+// hour because profiles change daily (hires/leavers), long enough to cover a
+// session's refresh cadence. (The EmployeeProfile request itself stays uncached —
+// churn needs current data.)
+const PROFILE_TTL_MS = 10 * 60 * 1000;
+let _profiles = null, _profilesAt = 0;
+async function getEmployeeProfiles() {
+  if (_profiles && Date.now() - _profilesAt < PROFILE_TTL_MS) return _profiles;
+  _profiles = await fetchView(VIEW.employee);
+  _profilesAt = Date.now();
+  return _profiles;
+}
+
+// The People IDs whose attendance a scoped caller may see. A campaign lead resolves
+// via Department → _campaign_slug (includes leavers, needs no unbounded metrics
+// fetch and none of the name-normalisation machinery); a team leader is narrower
+// than a campaign, so keeps the name path — but with the metrics fetch date-bounded.
+async function allowedAttendanceIds(user, since) {
+  const profiles = await getEmployeeProfiles();
+  const idOf = (p) => String(p['ID'] ?? p.id ?? p.employee_id ?? '');
+  const ids = new Set();
+  if (user.role === 'campaign_lead' && user.campaign_slug) {
+    await attachCampaignToProfiles(profiles, { log: false });
+    for (const p of profiles) if (p._campaign_slug === user.campaign_slug) { const id = idOf(p); if (id) ids.add(id); }
+  } else {
+    const keys = await allowedNameKeys(user, since);
+    for (const p of profiles) if (nameAllowed(profileName(p), keys)) { const id = idOf(p); if (id) ids.add(id); }
+  }
+  return ids;
 }
 
 router.get('/view/:key', requireRole('tm'), async (req, res) => {
@@ -170,16 +212,11 @@ router.get('/view/:key', requireRole('tm'), async (req, res) => {
         }
       }
     } else if (req.params.key === 'AttendanceUserReport' && !seesAllScope(req.user)) {
-      // Attendance keys people by Zoho People ID and has no campaign column; map the
-      // caller's allowed names → IDs via EmployeeProfile, then keep only those rows.
-      const keys = await allowedNameKeys(req.user);
-      const profiles = await fetchView(VIEW.employee);
-      const allowedIds = new Set();
-      for (const p of profiles) {
-        if (!nameAllowed(profileName(p), keys)) continue;
-        const id = String(p['ID'] ?? p.id ?? p.employee_id ?? '');
-        if (id) allowedIds.add(id);
-      }
+      // Attendance keys people by Zoho People ID and has no campaign column, so scope
+      // it by the set of People IDs the caller may see (campaign-slug for a lead,
+      // name-matched for a team leader). This drops the old unbounded User_metrics_3
+      // fetch from the campaign-lead path entirely.
+      const allowedIds = await allowedAttendanceIds(req.user, since);
       rows = rows.filter(r => allowedIds.has(String(r['Employee'] ?? r.employee ?? '')));
     }
     // Match the shape the existing extractRows() in index.html expects.
