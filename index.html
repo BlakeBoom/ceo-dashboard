@@ -1990,11 +1990,33 @@ const empIdToUid = (empRows, agentMeta) => {
   return map;
 };
 
+// Empty shrinkage-component bucket (one week of one agent / one campaign-agent).
+function emptyShrinkageBucket() {
+  return {
+    payable_mins: 0, total_mins: 0,
+    planned_mins: 0, unplanned_mins: 0, productive_mins: 0, unclassified_mins: 0,
+    paid_break_mins: 0, unpaid_break_mins: 0, late_entry_mins: 0, early_exit_mins: 0,
+    present_days: 0, leave_days: 0, planned_days: 0, absence_days: 0, scheduled_days: 0, absence_mins: 0,
+    shifted_days: 0, absence_denom_days: 0,
+  };
+}
+
+// Build shrinkage components from attendance. Returns TWO views of the same rows:
+//   • byAgent: uid → week → components — every matched agent, ALL their shifts
+//     (agent-level Absence / Realisation are per-person, campaign-agnostic).
+//   • byShiftCamp: "shiftCamp||memberKey" → week → components — bucketed by the
+//     SHIFT's campaign, exactly like billable, so campaign/team Absence reconciles
+//     with billable AND is identical for an admin (all rows) and a campaign lead
+//     (server-scoped to the campaign's shift rows). memberKey is the uid, or
+//     'att:'+empId for attendance we couldn't match to a metrics agent — so those
+//     hours land in the campaign's "— Unassigned" bucket instead of vanishing
+//     (which is what made a lead's absence differ from an admin's).
 function buildShrinkageByAgentWeek(attRows, empProfileRows, umAgentMeta, gran = 'week') {
   // Zoho People ID → user_id, resolving duplicate/terminated records too.
   const empIdToUserId = empIdToUid(empProfileRows, umAgentMeta);
 
-  const result = {};  // user_id → week → shrinkage components
+  const byAgent = {};      // uid → week → components
+  const byShiftCamp = {};  // "shiftCamp||memberKey" → week → components
   let unmatchedRows = 0;
   let totalRows = 0;
   const statusDist = {};   // status → {count, payable_mins, with_pay, zero_pay}
@@ -2004,7 +2026,7 @@ function buildShrinkageByAgentWeek(attRows, empProfileRows, umAgentMeta, gran = 
     totalRows++;
     const empId = String(row['Employee'] ?? row.employee ?? '');
     const uid = empIdToUserId.get(empId);
-    if (!uid) { unmatchedRows++; continue; }
+    if (!uid) unmatchedRows++;
 
     const week = periodKeyForDate(row['Date'] ?? row.date, gran);
     if (!week) continue;
@@ -2017,6 +2039,7 @@ function buildShrinkageByAgentWeek(attRows, empProfileRows, umAgentMeta, gran = 
     // was actually rostered — i.e. the Shift column isn't "Not Shifted"/blank.
     const shift = (row['Shift'] ?? row.shift ?? '').toString().trim();
     const isShifted = !!shift && !/^not\s*shifted$/i.test(shift);
+    const af = absenceFraction(status);
 
     // Payable hours: prefer "Payable Hours (Mins)" numeric, else parse "Payable Hours"
     const payableMins = +row['Payable Hours (Mins)'] || parseHMS(row['Payable Hours']) || 0;
@@ -2030,56 +2053,53 @@ function buildShrinkageByAgentWeek(attRows, empProfileRows, umAgentMeta, gran = 
     const sd = statusDist[status || '(blank)'] ??= { cls, count: 0, payable_mins: 0, total_mins: 0, with_pay: 0, zero_pay: 0, shifted: 0, not_shifted: 0, absence_days: 0 };
     sd.count++; sd.payable_mins += payableMins; sd.total_mins += totalMins;
     if (payableMins > 0) sd.with_pay++; else sd.zero_pay++;
-    if (isShifted) { sd.shifted++; const afDiag = absenceFraction(status); if (afDiag !== null) sd.absence_days += afDiag; } else sd.not_shifted++;
+    if (isShifted) { sd.shifted++; if (af !== null) sd.absence_days += af; } else sd.not_shifted++;
 
-    result[uid] ??= {};
-    result[uid][week] ??= {
-      payable_mins: 0, total_mins: 0,
-      planned_mins: 0, unplanned_mins: 0, productive_mins: 0, unclassified_mins: 0,
-      paid_break_mins: 0, unpaid_break_mins: 0, late_entry_mins: 0, early_exit_mins: 0,
-      present_days: 0, leave_days: 0, planned_days: 0, absence_days: 0, scheduled_days: 0, absence_mins: 0,
-      shifted_days: 0, absence_denom_days: 0,
-    };
-    const w = result[uid][week];
-    w.scheduled_days += 1;   // every attendance row
-    if (isShifted) w.shifted_days += 1;   // rostered days = headcount basis (NOT the absence denominator)
-    w.payable_mins += payableMins;
-    w.total_mins += totalMins;
-    w.paid_break_mins += paidBreak;
-    w.unpaid_break_mins += unpaidBreak;
-    w.late_entry_mins += lateEntry;
-    w.early_exit_mins += earlyExit;
-
-    if (cls === 'productive') {
-      w.productive_mins += totalMins;
-      w.present_days += 1;
-    } else if (cls === 'planned') {
-      w.planned_mins += payableMins;
-      w.leave_days += 1;
-      w.planned_days += 1;
-    } else if (cls === 'unplanned') {
-      w.unplanned_mins += payableMins;
-      w.leave_days += 1;
-    } else {
-      w.unclassified_mins += payableMins;
-    }
-    // Absence is computed independently of the mins classification above so it
-    // also catches compound statuses (e.g. "...,(First Half), 0.5 day Absent")
-    // that don't exact-match SHRINKAGE_STATUS. Only rostered, non-excluded days
-    // count: `absence_denom_days` is the Absent% denominator (distinct from
-    // `shifted_days`, which stays the headcount basis). Annual/Not-Shifted days
-    // (af === null) count toward NEITHER numerator nor denominator.
-    if (isShifted) {
-      const af = absenceFraction(status);
-      if (af !== null) {
+    // Apply this row's contribution to a components bucket. Identical math whether
+    // the bucket is agent-level or shift-campaign-level.
+    const apply = (w) => {
+      w.scheduled_days += 1;                 // every attendance row
+      if (isShifted) w.shifted_days += 1;    // rostered days = headcount basis (NOT the absence denominator)
+      w.payable_mins += payableMins;
+      w.total_mins += totalMins;
+      w.paid_break_mins += paidBreak;
+      w.unpaid_break_mins += unpaidBreak;
+      w.late_entry_mins += lateEntry;
+      w.early_exit_mins += earlyExit;
+      if (cls === 'productive')      { w.productive_mins += totalMins; w.present_days += 1; }
+      else if (cls === 'planned')    { w.planned_mins += payableMins; w.leave_days += 1; w.planned_days += 1; }
+      else if (cls === 'unplanned')  { w.unplanned_mins += payableMins; w.leave_days += 1; }
+      else                           { w.unclassified_mins += payableMins; }
+      // Absence is computed independently of the mins classification above so it
+      // also catches compound statuses (e.g. "...,(First Half), 0.5 day Absent")
+      // that don't exact-match SHRINKAGE_STATUS. Only rostered, non-excluded days
+      // count: `absence_denom_days` is the Absent% denominator (distinct from
+      // `shifted_days`, the headcount basis). Annual/Not-Shifted days (af === null)
+      // count toward NEITHER numerator nor denominator.
+      if (isShifted && af !== null) {
         w.absence_denom_days += 1;           // rostered & not excluded → in the rate
         w.absence_days += af;                // af may be 0 (present) → numerator no-op
         w.absence_mins += payableMins * af;
       }
+      // Column-level shrinkage adds on top of status-based:
+      w.planned_mins   += paidBreak;
+      w.unplanned_mins += lateEntry + earlyExit + unpaidBreak;
+    };
+
+    // Agent-level (matched agents only, all campaigns).
+    if (uid) {
+      (byAgent[uid] ??= {})[week] ??= emptyShrinkageBucket();
+      apply(byAgent[uid][week]);
     }
-    // Column-level shrinkage adds on top of status-based:
-    w.planned_mins   += paidBreak;
-    w.unplanned_mins += lateEntry + earlyExit + unpaidBreak;
+    // Shift-campaign level (mirrors billable). Rows whose shift maps to no campaign
+    // (Office Admin, blank, …) belong to no campaign's absence and are excluded —
+    // the same rows billable excludes.
+    const shiftCamp = shiftToCampaign(shift);
+    if (shiftCamp) {
+      const key = shiftCamp + '||' + (uid || ('att:' + empId));
+      (byShiftCamp[key] ??= {})[week] ??= emptyShrinkageBucket();
+      apply(byShiftCamp[key][week]);
+    }
   }
 
   if (UNCLASSIFIED_STATUSES.size > 0) {
@@ -2093,19 +2113,27 @@ function buildShrinkageByAgentWeek(attRows, empProfileRows, umAgentMeta, gran = 
     .sort((a, b) => b[1].count - a[1].count)
     .map(([k, v]) => [k, { cls: v.cls, rows: v.count, avg_payable_min: Math.round(v.payable_mins / v.count), rows_with_pay: v.with_pay, rows_zero_pay: v.zero_pay, shifted: v.shifted, not_shifted: v.not_shifted, absence_days: +v.absence_days.toFixed(1) }])));
 
-  return result;
+  return { byAgent, byShiftCamp };
 }
 
-// Roll up agent-week shrinkage to team-week and campaign-week
-function rollupShrinkage(agentShrinkage, agentMeta) {
+// Roll up shift-campaign shrinkage to team-week and campaign-week. Input is
+// buildShrinkageByAgentWeek().byShiftCamp — "shiftCamp||memberKey" → week →
+// components — so campaign/team are attributed by the SHIFT (like billable), and
+// a cross-campaign agent's day counts toward whichever campaign's shift they
+// worked. memberKey is a uid (→ their metrics team) or 'att:'+empId (unmatched →
+// the campaign's "— Unassigned" team), so unmatched hours still count toward the
+// campaign total instead of vanishing.
+function rollupShrinkage(byShiftCamp, agentMeta) {
   const campaignWeek = {};
   const teamWeek = {};
-  const hc = new Map();   // "<scope-key> <week>" -> Set(uid) of rostered agents
-  for (const [uid, byWeek] of Object.entries(agentShrinkage)) {
-    const meta = agentMeta[uid];
-    if (!meta) continue;
-    const camp = meta.camp;
-    const team = meta.team;
+  const hc = new Map();   // "<scope-key> <week>" -> Set(uid) of rostered agents
+  for (const [compositeKey, byWeek] of Object.entries(byShiftCamp)) {
+    const sep = compositeKey.indexOf('||');
+    const camp = compositeKey.slice(0, sep);
+    const memberKey = compositeKey.slice(sep + 2);          // uid, or 'att:'+empId
+    const team = memberKey.startsWith('att:')
+      ? UNASSIGNED_TEAM
+      : (agentMeta[memberKey]?.team || UNASSIGNED_TEAM);
     for (const [week, m] of Object.entries(byWeek)) {
       const acc = (host, k) => {
         host[k] ??= {};
@@ -2124,11 +2152,11 @@ function rollupShrinkage(agentShrinkage, agentMeta) {
         a.absence_mins      += m.absence_mins || 0;
         a.shifted_days      += m.shifted_days || 0;
         a.absence_denom_days += m.absence_denom_days || 0;
-        // Headcount = distinct agents actually rostered (shifted) in the period.
+        // Headcount = distinct people actually rostered (shifted) on the campaign.
         if ((m.shifted_days || 0) > 0) {
-          const hk = k + ' ' + week;
+          const hk = k + ' ' + week;
           let s = hc.get(hk); if (!s) hc.set(hk, s = new Set());
-          s.add(uid);
+          s.add(memberKey);
         }
       };
       acc(campaignWeek, camp);
@@ -2161,7 +2189,7 @@ function rollupShrinkage(agentShrinkage, agentMeta) {
     teamWeek[c][w].headcount = hc.get(c + ' ' + w)?.size || 0;
     derive(teamWeek[c][w]);
   }
-  return { campaignWeek, teamWeek, agentShrinkage };
+  return { campaignWeek, teamWeek };
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -2305,9 +2333,12 @@ function rebuildShrinkage() {
   const att = STATE.rawAttRows, emp = STATE.rawEmpRows;
   if (!att || !emp || !att.length || !emp.length) { STATE.shrinkageAvailable = false; return; }
   try {
-    const agentShr = buildShrinkageByAgentWeek(att, emp, STATE.agentMeta, STATE.granularity);
-    const rolled = rollupShrinkage(agentShr, STATE.agentMeta);
-    STATE.shrinkageAgentWeek = agentShr;
+    const shr = buildShrinkageByAgentWeek(att, emp, STATE.agentMeta, STATE.granularity);
+    // Campaign/team roll up by SHIFT campaign (shr.byShiftCamp), so absence &
+    // headcount reconcile with billable and match between admin and a scoped lead;
+    // agent-level stays per-person (shr.byAgent), campaign-agnostic.
+    const rolled = rollupShrinkage(shr.byShiftCamp, STATE.agentMeta);
+    STATE.shrinkageAgentWeek = shr.byAgent;
     STATE.shrinkageCampaignWeek = rolled.campaignWeek;
     STATE.shrinkageTeamWeek = rolled.teamWeek;
     STATE.shrinkageAvailable = true;
