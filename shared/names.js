@@ -298,10 +298,51 @@
     return (billableHrs / paidHrs) * 100;
   }
 
+  // ── Shift → campaign ────────────────────────────────────────────────────────
+  // The campaign name appears somewhere in the Shift column (not always at the
+  // start); contains-matches, ordered specific-first. Shared so the server can
+  // scope a campaign lead's attendance by shift→campaign EXACTLY the way the
+  // dashboard attributes billable by shift — the two must agree or a lead's total
+  // won't match an admin's.
+  const SHIFT_PATTERNS = [
+    [/beer\s*52/i,                  'BEER52'],
+    [/\bhyve\b/i,                   'HYVE'],
+    [/bb\s*marro|\bmarro\b/i,       'BUTTERNUTBOX'],
+    [/butternut|\bbbox\b/i,         'BUTTERNUTBOX'],
+    [/gousto/i,                     'Gousto'],
+    [/hunza\s*g/i,                  'HUNZAG'],
+    [/med\s*express|\bmedx\b/i,     'Medexpress'],
+    [/pic?k\s*n\s*pay|\bpnp\b/i,    'PICKNPAY'],
+    [/royal\s*canin/i,              'ROYALCANIN'],
+    [/good\s*life|\bgls\b/i,        'GOODLIFESORTED'],
+    [/lint\s*bells|vetnique/i,      'VETNIQUE'],
+    [/pinter/i,                     'PINTER'],
+    [/1\s*life|one\s*life/i,        '1LIFE'],
+    [/just\s*park.*(space\s*owner|\bsp\b|event\s*pass|\bus\b)/i, 'JUSTPARK_usa'],
+    [/just\s*park/i,                'JUSTPARK_uk'],
+  ];
+  function shiftToCampaign(shiftName) {
+    if (!shiftName) return null;
+    for (const [re, key] of SHIFT_PATTERNS) if (re.test(shiftName)) return key;
+    return null;
+  }
+  // Every campaign key a shift references, so a '+' split shift (two campaigns in
+  // one row) is included for a lead when their campaign is EITHER segment. Primary
+  // match first.
+  function shiftCampaignKeys(shiftName) {
+    const s = String(shiftName ?? '');
+    if (!s) return [];
+    const keys = new Set();
+    const primary = shiftToCampaign(s); if (primary) keys.add(primary);
+    if (s.indexOf('+') >= 0) for (const part of s.split('+')) { const k = shiftToCampaign(part); if (k) keys.add(k); }
+    return [...keys];
+  }
+
   root.BoomerangNames = {
     normalizeName, firstLastKey, stripKnownNameSuffix, stripTeamLabel, buildTeamCanonMap,
     titleToRole, looksLikeLookupId,
     _buildRoleIndex, buildRoleIndexFromUsers, resolveTeamNode, unassignedShare,
     LOWER_BETTER, CUMULATIVE_KPIS, rag, overallRag, agentScore, fulfilPct, realisationPct,
+    SHIFT_PATTERNS, shiftToCampaign, shiftCampaignKeys,
   };
 })(globalThis);

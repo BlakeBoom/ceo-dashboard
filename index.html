@@ -539,7 +539,8 @@ svg.ring .rs{font-size:8px;letter-spacing:.5px;text-transform:uppercase}
 // unchanged.
 const { normalizeName, firstLastKey, stripKnownNameSuffix, buildTeamCanonMap, titleToRole, looksLikeLookupId,
         _buildRoleIndex, buildRoleIndexFromUsers, resolveTeamNode, unassignedShare,
-        LOWER_BETTER, CUMULATIVE_KPIS, rag, overallRag, agentScore, fulfilPct, realisationPct } = globalThis.BoomerangNames;
+        LOWER_BETTER, CUMULATIVE_KPIS, rag, overallRag, agentScore, fulfilPct, realisationPct,
+        shiftToCampaign } = globalThis.BoomerangNames;
 // Churn / attrition maths — same shared-module pattern as BoomerangNames.
 const { extractChurnRows, computeMonthlyChurn, computeRolling12Churn } = globalThis.BoomerangChurn;
 // Hours-sourcing rule: billable may only come from attendance, never metrics.
@@ -1129,28 +1130,9 @@ function absenceFraction(status) {
 // ════════════════════════════════════════════════════════════════════════
 // The campaign name appears somewhere in the Shift string (not always at the
 // start), so these are contains-matches, ordered specific-first.
-const SHIFT_PATTERNS = [
-  [/beer\s*52/i,                  'BEER52'],
-  [/\bhyve\b/i,                   'HYVE'],
-  [/bb\s*marro|\bmarro\b/i,       'BUTTERNUTBOX'], // "BB Marro" summer shift = Butternut Box
-  [/butternut|\bbbox\b/i,         'BUTTERNUTBOX'],
-  [/gousto/i,                     'Gousto'],
-  [/hunza\s*g/i,                  'HUNZAG'],
-  [/med\s*express|\bmedx\b/i,     'Medexpress'],
-  [/pic?k\s*n\s*pay|\bpnp\b/i,    'PICKNPAY'],
-  [/royal\s*canin/i,              'ROYALCANIN'],
-  [/good\s*life|\bgls\b/i,        'GOODLIFESORTED'],
-  [/lint\s*bells|vetnique/i,      'VETNIQUE'],
-  [/pinter/i,                     'PINTER'],
-  [/1\s*life|one\s*life/i,        '1LIFE'],
-  [/just\s*park.*(space\s*owner|\bsp\b|event\s*pass|\bus\b)/i, 'JUSTPARK_usa'], // US incl Event Pass / Space Owner
-  [/just\s*park/i,                'JUSTPARK_uk'],  // remaining Just Park = UK
-];
-function shiftToCampaign(shiftName) {
-  if (!shiftName) return null;
-  for (const [re, key] of SHIFT_PATTERNS) if (re.test(shiftName)) return key;
-  return null;
-}
+// SHIFT_PATTERNS / shiftToCampaign now live in /shared/names.js (destructured at
+// the top of this script) so the server can scope attendance by shift→campaign the
+// same way the dashboard attributes billable by shift.
 
 // Some shift types are only partially billable — e.g. a mixed Customer-Service
 // + Team-Leader shift where only the CS half bills. Fraction of the shift's
