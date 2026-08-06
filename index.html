@@ -1967,9 +1967,28 @@ function dateToWeekLabel(s) {
 // EmployeeProfile People ID → metrics user_id (buildEmpIdToUid) now lives in
 // /shared/names.js — see the top-of-script destructure. It resolves Terminated /
 // duplicate records too, so attendance keyed to an old People ID still matches. A
-// thin adapter turns agentMeta ({uid:{name}}) into the {name,uid}[] it expects.
-const empIdToUid = (empRows, agentMeta) =>
-  buildEmpIdToUid(empRows, Object.entries(agentMeta || {}).map(([uid, m]) => ({ name: m.name, uid })));
+// thin adapter turns agentMeta ({uid:{name}}) into the {name,uid}[] it expects,
+// and hands it the stable ID-link (HR employee number → uid, from /api/users
+// /team-map) so matching prefers the namesake-proof number over the name. When the
+// ID-link is empty (no merged users, or the endpoint failed) it degrades cleanly
+// to the same name matching as before.
+let _empIdToUidLogged = false;
+const empIdToUid = (empRows, agentMeta) => {
+  const empNoToUid = STATE.teamMap && STATE.teamMap.empNoToUid;
+  const stats = {};
+  const map = buildEmpIdToUid(
+    empRows,
+    Object.entries(agentMeta || {}).map(([uid, m]) => ({ name: m.name, uid })),
+    empNoToUid, stats
+  );
+  // One line per data load (not per rebuild) so ID-link coverage is visible
+  // without spamming the console on every granularity toggle.
+  if (!_empIdToUidLogged) {
+    _empIdToUidLogged = true;
+    console.info(`[empid→uid] ${stats.total} People IDs matched · ${stats.byId} via stable ID-link${stats.idLinkUsed ? ` (col "${stats.empNoCol}", ${empNoToUid ? empNoToUid.size : 0} HR numbers)` : ' (unavailable)'} · ${stats.byName} via name`);
+  }
+  return map;
+};
 
 function buildShrinkageByAgentWeek(attRows, empProfileRows, umAgentMeta, gran = 'week') {
   // Zoho People ID → user_id, resolving duplicate/terminated records too.
@@ -2183,7 +2202,12 @@ function rebuildAggregates() {
   STATE.wgDebug = agg.wgDebug; STATE.wgSkipped = agg.wgSkipped; logWgDebug();
   rebuildShrinkage();
   applyShiftBillable();
-  overlayAttendanceHeadcount();  // re-run: attendance-only period buckets (e.g. the current week-to-date, created by applyShiftBillable) get their rostered headcount too
+  // Re-run both overlays: attendance-only period buckets (e.g. a metrics-less month
+  // like Mar, or the current week-to-date) are created by applyShiftBillable AFTER
+  // rebuildShrinkage ran, so they must be re-visited to pick up their rostered
+  // headcount AND absence from the shrinkage feed (else HC shows blank, absence "—").
+  overlayAttendanceHeadcount();
+  overlayAttendanceAbsence();
   mergeAttendanceWeeks();
   if (!STATE.selectedWeek || !STATE.weeks.includes(STATE.selectedWeek)) {
     // Latest period is often partial → default to penultimate when available.
@@ -4710,7 +4734,7 @@ function campaignCardHtml(c, wk) {
         <div class="camp-tile-meta">
           ${riskBadge}
           <div class="camp-meta">
-            <span class="camp-meta-chip" title="Headcount — distinct people active this ${periodNoun()}">${m.fte} HC</span>
+            <span class="camp-meta-chip" title="Headcount — distinct people active this ${periodNoun()}">${m.fte ?? '—'} HC</span>
             ${fte != null ? `<span class="camp-meta-chip" title="Delivered FTE = billable hrs ÷ hours-per-FTE (from Targets)">${fte.toFixed(1)} FTE</span>` : ''}
           </div>
           <div class="spark">${spark}</div>
@@ -4770,7 +4794,7 @@ function renderCampaignDetail(root) {
     hero(fulfilStatus, 'Billable Hours', fmtHrs(m.billable),
       svgRing(fulfil != null ? Math.min(100, fulfil) : 0, { light: onColour(fulfilStatus), val: fulfil != null ? Math.round(fulfil) + '%' : '—', sub: 'of req' }),
       creq != null ? `${Math.round(creq).toLocaleString()} hrs required` : 'no target set'),
-    hero('info', 'Capacity', `${m.fte} HC`, null,
+    hero('info', 'Capacity', `${m.fte ?? '—'} HC`, null,
       fte != null ? `${fte.toFixed(1)} delivered FTE${reqFteForCampPeriod(c, wk) ? ` · ${(+reqFteForCampPeriod(c, wk).toFixed(1))} target` : ''}` : 'distinct people active'),
     sh && sh.shrinkage_total_pct != null
       ? hero(shrStatus, 'Shrinkage', sh.shrinkage_total_pct.toFixed(1) + '%',
@@ -4854,7 +4878,7 @@ function renderCampaignDetail(root) {
     const tFte = deliveredFte(c, wk, tm.billable);
     teamRows += `<tr data-team="${t}" style="cursor:pointer">
       <td><span class="camp-overall ${tRag}" style="display:inline-block;margin-right:7px;vertical-align:middle"></span>${t}</td>
-      <td class="numeric">${tm.fte}</td>
+      <td class="numeric">${tm.fte ?? '—'}</td>
       <td class="numeric">${tFte != null ? tFte.toFixed(1) : '—'}</td>
       <td class="numeric">${fmtHrs(tm.billable)}</td>
     </tr>`;
@@ -4972,7 +4996,7 @@ function renderTeamList(root) {
       <div class="team-card" data-team="${t}">
         <div class="team-head">
           <div class="team-name"><span class="camp-overall ${overall}" style="margin-right:7px"></span>${t}</div>
-          <div class="camp-meta"><span class="camp-meta-chip" title="Headcount — distinct people active this ${periodNoun()}">${m.fte} HC</span>${(() => { const f = deliveredFte(c, wk, m.billable); return f != null ? `<span class="camp-meta-chip" title="Delivered FTE = billable hrs ÷ hours-per-FTE (from Targets)">${f.toFixed(1)} FTE</span>` : ''; })()}</div>
+          <div class="camp-meta"><span class="camp-meta-chip" title="Headcount — distinct people active this ${periodNoun()}">${m.fte ?? '—'} HC</span>${(() => { const f = deliveredFte(c, wk, m.billable); return f != null ? `<span class="camp-meta-chip" title="Delivered FTE = billable hrs ÷ hours-per-FTE (from Targets)">${f.toFixed(1)} FTE</span>` : ''; })()}</div>
         </div>
         <div class="team-stats">${stats}</div>
       </div>
@@ -5201,7 +5225,7 @@ function renderTrends() {
 
     return `<tr>
       <td><span class="camp-overall ${overall}" style="display:inline-block;margin-right:7px;vertical-align:middle"></span>${CAMP_DISPLAY[c]||c}</td>
-      <td class="numeric">${m.fte}</td>
+      <td class="numeric">${m.fte ?? '—'}</td>
       <td class="numeric">${(() => { const f = deliveredFte(c, wk, m.billable); return f != null ? f.toFixed(1) : '—'; })()}</td>
       <td class="numeric">${fmtHrs(m.billable)}</td>
       <td>
@@ -5269,6 +5293,7 @@ function renderTrends() {
 // ════════════════════════════════════════════════════════════════════════
 function applyData(rows, attendanceRows, empProfileRows, roleUsers) {
   STATE.rawAgentWeek = rows;
+  _empIdToUidLogged = false;   // log ID-link coverage once per fresh data load
   // Map each dashboard campaign key to its canonical churn slug from the
   // server-attached _campaign_slug, so per-campaign churn lines up with the
   // metrics campaigns without a duplicated workgroup→slug table on the client.
@@ -5342,6 +5367,7 @@ function applyData(rows, attendanceRows, empProfileRows, roleUsers) {
   rebuildShrinkage();
   applyShiftBillable();
   overlayAttendanceHeadcount();  // re-run: attendance-only period buckets (e.g. the current week-to-date) get their rostered headcount
+  overlayAttendanceAbsence();    // ...and their absence, symmetric with the headcount re-run
   mergeAttendanceWeeks();        // surface live-but-metrics-less periods (week/month-to-date) on first load, same as rebuildAggregates()
 
   // Default selected week = penultimate (latest week is often incomplete)
@@ -5488,13 +5514,18 @@ async function fetchTeamMap() {
     if (!r.ok) return null;
     const j = await r.json();
     if (!Array.isArray(j.nodes)) return null;
-    const byId = new Map(), byName = new Map();
+    const byId = new Map(), byName = new Map(), empNoToUid = new Map();
     for (const n of j.nodes) {
       const node = { team_node: n.team_node, node_type: n.node_type };
       if (n.zoho_user_id != null) byId.set(String(n.zoho_user_id), node);
       if (n.name_key) byName.set(n.name_key, node);   // server pre-guarantees name uniqueness
+      // Stable ID-link: HR employee number → metrics user_id, for matching
+      // attendance to agents by number instead of by (collision-prone) name.
+      if (n.zoho_employee_no != null && n.zoho_user_id != null) {
+        empNoToUid.set(String(n.zoho_employee_no).trim(), String(n.zoho_user_id));
+      }
     }
-    return { byId, byName };
+    return { byId, byName, empNoToUid };
   } catch { return null; }
 }
 
