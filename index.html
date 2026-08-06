@@ -2556,27 +2556,6 @@ function applyShiftBillable() {
     const j = uk.indexOf('||'); const camp = uk.slice(0, j), empId = uk.slice(j + 2);
     seedUnassigned(camp, 'att:' + empId, b.unmatchedNames?.[empId] || ('Unmatched · ' + empId), b.byUnmatched[uk], true);
   }
-  // Headcount for the Unassigned catch-all: its people aren't in the metrics
-  // roster (or resolve cross-campaign), so shrinkage/metrics gave it no HC and it
-  // rendered real hours next to a blank "—". Its headcount IS knowable — the
-  // distinct people we just seeded rows for — so set the team-week fte to that
-  // count, and fte=1 on each seeded row, so HC reads a number, not "—". (overlay
-  // AttendanceHeadcount skips this team, so it won't clobber these with a partial
-  // shrinkage count.)
-  for (const camp in STATE.agentWeek) {
-    const team = STATE.agentWeek[camp][U];
-    if (!team) continue;
-    const teamBk = STATE.teamWeek[camp]?.[U];
-    const perWeek = {};
-    for (const key in team) {
-      for (const wk in team[key]) {
-        if (!(team[key][wk]?.billable > 0)) continue;
-        team[key][wk].fte ??= 1;
-        (perWeek[wk] ??= new Set()).add(key);
-      }
-    }
-    if (teamBk) for (const wk in perWeek) if (teamBk[wk]) teamBk[wk].fte = perWeek[wk].size;
-  }
   for (const tk in b.byTeamWeek) {
     const i = tk.indexOf('||'); const camp = tk.slice(0, i), team = tk.slice(i + 2);
     if (!(STATE.teamWeek[camp] && STATE.teamWeek[camp][team])) continue;
@@ -2619,6 +2598,40 @@ function applyShiftBillable() {
         if (!row || row.billable == null) continue;
         if (row._attendanceOnly) continue;  // synthesised attendance rows (incl. Unassigned unmatched) always have real hours
         if (agentByKey[camp + '||' + uid]?.[wk] == null) row.billable = 0;  // attendance-driven week, no shift for this BAE
+      }
+    }
+  }
+  // Team headcount from the billable breakdown itself, so the HC column is always
+  // consistent with the FTE/Billable columns beside it. overlayAttendanceHeadcount
+  // fills HC from the shrinkage feed, but shrinkage buckets by METRICS campaign
+  // while billable buckets by SHIFT campaign — so in an attendance-only month (e.g.
+  // Mar) the shrinkage HC lookup misses its bucket and HC rendered "—" next to real
+  // hours. Count the distinct people who actually billed to each team-week (after
+  // the reconcile pass, so 0-hour members don't inflate it) and fill fte from it.
+  //   • Unassigned: force this count (its unmatched people are never in metrics /
+  //     shrinkage, and the overlay skips it, so nothing else will set its HC).
+  //   • Every other team: only fill where metrics/shrinkage left HC blank (`??=`),
+  //     so a real headcount still wins; overlayAttendanceHeadcount runs after this
+  //     and overrides with the shrinkage count wherever attendance has one.
+  // Also fte=1 on each billing agent row, so the per-agent drill-down HC reads a
+  // number rather than blank for attendance-only (synthesised) rows.
+  for (const camp in STATE.agentWeek) {
+    for (const team in STATE.agentWeek[camp]) {
+      const teamBk = STATE.teamWeek[camp]?.[team];
+      if (!teamBk) continue;
+      const rows = STATE.agentWeek[camp][team];
+      const perWeek = {};
+      for (const uid in rows) {
+        for (const wk in rows[uid]) {
+          if (!(rows[uid][wk]?.billable > 0)) continue;
+          rows[uid][wk].fte ??= 1;
+          (perWeek[wk] ??= new Set()).add(uid);
+        }
+      }
+      for (const wk in perWeek) {
+        if (!teamBk[wk]) continue;
+        if (team === U) teamBk[wk].fte = perWeek[wk].size;   // force: full matched+unmatched count
+        else teamBk[wk].fte ??= perWeek[wk].size;            // fill only where metrics/shrinkage gave none
       }
     }
   }
