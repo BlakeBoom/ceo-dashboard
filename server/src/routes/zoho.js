@@ -11,10 +11,10 @@ import { requireRole } from '../rbac.js';
 import { fetchView, fetchViewByDate, VIEW } from '../zoho.js';
 import { canonicalCampaign, buildDepartmentMap, resolveDeptCampaign, CAMPAIGN_VIEW_ID, DIVISIONS_VIEW_ID } from '../provision.js';
 import { seesAllScope } from '../rbac.js';
-// Shared with the dashboard so name matching lines up exactly (see
-// /shared/names.js). firstLast is this file's local name for firstLastKey.
+// Shared with the dashboard so name matching AND shift→campaign line up exactly
+// (see /shared/names.js). firstLast is this file's local name for firstLastKey.
 import '../../../shared/names.js';
-const { normalizeName: normName, firstLastKey: firstLast } = globalThis.BoomerangNames;
+const { normalizeName: normName, firstLastKey: firstLast, shiftCampaignKeys } = globalThis.BoomerangNames;
 
 const router = Router();
 
@@ -155,21 +155,16 @@ async function getEmployeeProfiles() {
   return _profiles;
 }
 
-// The People IDs whose attendance a scoped caller may see. A campaign lead resolves
-// via Department → _campaign_slug (includes leavers, needs no unbounded metrics
-// fetch and none of the name-normalisation machinery); a team leader is narrower
-// than a campaign, so keeps the name path — but with the metrics fetch date-bounded.
+// The People IDs whose attendance a TEAM LEADER may see: their agents, name-matched
+// via EmployeeProfile (a team can't be expressed as a campaign slug, so shift→
+// campaign scoping doesn't apply). Metrics fetch is date-bounded via allowedNameKeys.
+// (Campaign leads take the shift→campaign path in the route and never reach here.)
 async function allowedAttendanceIds(user, since) {
   const profiles = await getEmployeeProfiles();
   const idOf = (p) => String(p['ID'] ?? p.id ?? p.employee_id ?? '');
   const ids = new Set();
-  if (user.role === 'campaign_lead' && user.campaign_slug) {
-    await attachCampaignToProfiles(profiles, { log: false });
-    for (const p of profiles) if (p._campaign_slug === user.campaign_slug) { const id = idOf(p); if (id) ids.add(id); }
-  } else {
-    const keys = await allowedNameKeys(user, since);
-    for (const p of profiles) if (nameAllowed(profileName(p), keys)) { const id = idOf(p); if (id) ids.add(id); }
-  }
+  const keys = await allowedNameKeys(user, since);
+  for (const p of profiles) if (nameAllowed(profileName(p), keys)) { const id = idOf(p); if (id) ids.add(id); }
   return ids;
 }
 
@@ -212,12 +207,18 @@ router.get('/view/:key', requireRole('tm'), async (req, res) => {
         }
       }
     } else if (req.params.key === 'AttendanceUserReport' && !seesAllScope(req.user)) {
-      // Attendance keys people by Zoho People ID and has no campaign column, so scope
-      // it by the set of People IDs the caller may see (campaign-slug for a lead,
-      // name-matched for a team leader). This drops the old unbounded User_metrics_3
-      // fetch from the campaign-lead path entirely.
-      const allowedIds = await allowedAttendanceIds(req.user, since);
-      rows = rows.filter(r => allowedIds.has(String(r['Employee'] ?? r.employee ?? '')));
+      if (req.user.role === 'campaign_lead' && req.user.campaign_slug) {
+        // Scope by SHIFT → campaign, exactly how the dashboard attributes billable,
+        // so a lead's total matches an admin's (it includes cross-department cover
+        // who worked the campaign's shifts). No People-ID lookup, no profile fetch.
+        const slug = req.user.campaign_slug;
+        rows = rows.filter(r => shiftCampaignKeys(r['Shift'] ?? r.shift ?? '').some(k => canonicalCampaign(k)?.slug === slug));
+      } else {
+        // Team leader: narrower than a campaign and shifts don't express a team, so
+        // scope by their agents' People IDs (name-matched, metrics date-bounded).
+        const allowedIds = await allowedAttendanceIds(req.user, since);
+        rows = rows.filter(r => allowedIds.has(String(r['Employee'] ?? r.employee ?? '')));
+      }
     }
     // Match the shape the existing extractRows() in index.html expects.
     res.json({ data: rows });

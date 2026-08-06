@@ -8,7 +8,8 @@ import assert from 'node:assert/strict';
 // contract the browser and the server modules use.
 import '../shared/names.js';
 const { normalizeName, firstLastKey, stripKnownNameSuffix, buildTeamCanonMap, titleToRole, looksLikeLookupId,
-        buildRoleIndexFromUsers, resolveTeamNode, unassignedShare } = globalThis.BoomerangNames;
+        buildRoleIndexFromUsers, resolveTeamNode, unassignedShare,
+        shiftToCampaign, shiftCampaignKeys } = globalThis.BoomerangNames;
 const UNASSIGNED = '— Unassigned';
 
 // provision.js eagerly imports db.js, which reads env vars at module-eval and
@@ -219,4 +220,20 @@ test('BUG 4: a one-TL (scoped tm) index dumps the org to UNASSIGNED → guard tr
 test('resolveTeamNode: returns the raw leader label when the index is null', () => {
   assert.equal(resolveTeamNode('Anyone', "Rugshana's team", null, UNASSIGNED), "Rugshana's team");
   assert.equal(resolveTeamNode('Anyone', '', null, UNASSIGNED), UNASSIGNED);
+});
+
+// ── shiftToCampaign / shiftCampaignKeys (Phase 8b: shift→campaign scoping) ─────
+test('shiftToCampaign maps shift text to a campaign key, else null', () => {
+  assert.equal(shiftToCampaign('MedExpress Day Shift'), 'Medexpress');
+  assert.equal(shiftToCampaign('JustPark Space Owner Evening'), 'JUSTPARK_usa');
+  assert.equal(shiftToCampaign('Just Park UK'), 'JUSTPARK_uk');
+  assert.equal(shiftToCampaign('Beer52 CS'), 'BEER52');
+  assert.equal(shiftToCampaign('Office Admin'), null);
+  assert.equal(shiftToCampaign(''), null);
+});
+test('shiftCampaignKeys returns every campaign a split shift touches', () => {
+  assert.deepEqual(shiftCampaignKeys('MedExpress Day'), ['Medexpress']);
+  const split = shiftCampaignKeys('HYVE (11:00-12:00) +Gousto Split Shift (12:00-20:00)');
+  assert.ok(split.includes('HYVE') && split.includes('Gousto'), `got ${split}`);
+  assert.deepEqual(shiftCampaignKeys('Office Admin'), []);
 });
