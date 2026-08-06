@@ -4225,7 +4225,7 @@ function renderSummary() {
     // (green ≤20, amber ≤30, red >30) on all three — annual scale, deliberately NOT
     // the absence single-digit bands. '—' (never 0.0%) when we couldn't compute it;
     // '—' + "insufficient history" when the 12-month window predates our data.
-    ...(isExec(AUTH.user) ? (() => {
+    ...(canSeeChurn(AUTH.user) ? (() => {
       const cr = currentChurnRolling();   // 12 months ending at the SELECTED period, not today
       const ok = cr && !cr.incomplete_window;
       const insufficient = cr && cr.incomplete_window;
@@ -4339,7 +4339,7 @@ function renderSummary() {
         })()}
       </div>
     </div>
-    ${isExec(AUTH.user) ? `
+    ${canSeeChurn(AUTH.user) ? `
     <div class="chart-card" style="margin-top:14px">
       <div class="chart-head">
         <div class="chart-title">Monthly churn</div>
@@ -4732,7 +4732,7 @@ function renderCampaignDetail(root) {
     // Per-campaign churn (rolling 12mo to the selected period), exec-only — churn
     // needs the full EmployeeProfile history that scoped feeds don't carry. HRM
     // staff are already excluded upstream in extractChurnRows.
-    ...(isExec(AUTH.user) ? (() => {
+    ...(canSeeChurn(AUTH.user) ? (() => {
       const cr = churnRollingForCampaign(c);
       const ok = cr && !cr.incomplete_window;
       const winTo = cr && cr.windowEnd ? cr.windowEnd.toLocaleDateString('en-GB', { month: 'short', year: 'numeric', timeZone: 'UTC' }) : '';
@@ -5352,7 +5352,7 @@ function buildChurn() {
   // excludes every leaver, so churn would read a meaningless ~0%. Compute it only
   // for admin/exco (who get the unscoped feed). Per-campaign churn, scoped by
   // _campaign_slug so it keeps that campaign's leavers, is the documented follow-on.
-  if (!isExec(AUTH.user)) return;
+  if (!canSeeChurn(AUTH.user)) return;
   const emp = STATE.rawEmpRows;
   if (!emp || !emp.length) return;
   try {
@@ -5527,6 +5527,11 @@ const AUTH = { user: null };
 const ROLE_RANK = { agent: 0, tm: 1, campaign_lead: 2, exco: 3, admin: 4 };
 // Admin + EXCO both see all campaign data; only admin reaches settings.
 const isExec = (u) => u && (u.role === 'admin' || u.role === 'exco');
+// Who may see churn: admin/exco (org-wide) plus a campaign lead (their own
+// campaign — the server sends them their campaign's full EmployeeProfile history,
+// incl. leavers). A team leader is excluded: churn is a campaign metric and their
+// feed is name-scoped to current agents, so leavers — the numerator — are absent.
+const canSeeChurn = (u) => isExec(u) || (u && u.role === 'campaign_lead');
 
 async function apiFetch(path, opts = {}) {
   const r = await fetch(path, {
