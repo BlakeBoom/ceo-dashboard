@@ -155,6 +155,38 @@ async function getEmployeeProfiles() {
   return _profiles;
 }
 
+// People IDs (attendance "Employee") that worked a CAMPAIGN's shifts in the last
+// 26 weeks (the dashboard's attendance window). Used to widen a campaign lead's
+// EmployeeProfile scope: attendance is attributed by SHIFT → campaign, but
+// EmployeeProfile is scoped by HR Department → campaign, so a cover worker whose
+// Department isn't the campaign is dropped from the profile feed — and then their
+// in-scope attendance has no identity row to name/ID-match against, so they show
+// as "unmatched" for the lead while an admin (unscoped profile) matches them fine.
+// Including their profile row by attendance People ID fixes that. Cached
+// process-local (short TTL) so the profile request doesn't add a full attendance
+// fetch on every poll. Shift→campaign uses the SAME shiftCampaignKeys the
+// attendance route scopes by, so the two agree exactly.
+const ATT_IDS_TTL_MS = 5 * 60 * 1000;
+const _attIdsCache = new Map();  // slug -> { ids:Set<string>, at:number }
+function isoWeeksAgo(n) {
+  return new Date(Date.now() - n * 7 * 86400000).toISOString().slice(0, 10);
+}
+async function campaignShiftAttendanceIds(slug) {
+  const hit = _attIdsCache.get(slug);
+  if (hit && Date.now() - hit.at < ATT_IDS_TTL_MS) return hit.ids;
+  const rows = await fetchViewByDate(VIEW.attendance, isoWeeksAgo(26), '9999-12-31');
+  const ids = new Set();
+  for (const r of rows) {
+    const shift = r['Shift'] ?? r.shift ?? '';
+    if (shiftCampaignKeys(shift).some(k => canonicalCampaign(k)?.slug === slug)) {
+      const id = String(r['Employee'] ?? r.employee ?? '');
+      if (id) ids.add(id);
+    }
+  }
+  _attIdsCache.set(slug, { ids, at: Date.now() });
+  return ids;
+}
+
 // The People IDs whose attendance a TEAM LEADER may see: their agents, name-matched
 // via EmployeeProfile (a team can't be expressed as a campaign slug, so shift→
 // campaign scoping doesn't apply). Metrics fetch is date-bounded via allowedNameKeys.
@@ -196,8 +228,26 @@ router.get('/view/:key', requireRole('tm'), async (req, res) => {
         if (req.user.role === 'campaign_lead' && req.user.campaign_slug) {
           // A campaign lead needs their campaign's FULL history — including leavers,
           // who are churn's numerator and are absent from current metrics — so scope
-          // by the resolved _campaign_slug, not by name.
-          rows = rows.filter(r => r._campaign_slug === req.user.campaign_slug);
+          // by the resolved _campaign_slug, not by name. ALSO include the identity
+          // rows of anyone who worked the campaign's shifts (attendance is attributed
+          // by shift, so cover workers from other HR departments belong to this
+          // campaign operationally); without their profile row the lead can't match
+          // their attendance and they show "unmatched". Those extra rows are tagged
+          // _match_only so churn (Department-based) ignores them — they exist purely
+          // to bridge People ID → identity for the attendance matcher.
+          const slug = req.user.campaign_slug;
+          const attIds = await campaignShiftAttendanceIds(slug).catch(err => {
+            console.warn('[zoho/EmployeeProfile] shift-attendance widen failed:', err.message);
+            return new Set();
+          });
+          const idOf = (r) => String(r['ID'] ?? r.id ?? r.employee_id ?? '');
+          rows = rows.filter(r => {
+            const inCamp = r._campaign_slug === slug;
+            const worked = attIds.has(idOf(r));
+            if (!inCamp && !worked) return false;
+            if (!inCamp) r._match_only = true;   // present for matching, excluded from churn
+            return true;
+          });
         } else {
           // A team leader is narrower than a campaign and doesn't get campaign-level
           // churn, so keep the name filter (their current agents) rather than widen

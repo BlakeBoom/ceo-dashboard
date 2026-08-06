@@ -5502,7 +5502,11 @@ function buildChurn() {
   // for admin/exco (who get the unscoped feed). Per-campaign churn, scoped by
   // _campaign_slug so it keeps that campaign's leavers, is the documented follow-on.
   if (!canSeeChurn(AUTH.user)) return;
-  const emp = STATE.rawEmpRows;
+  // Drop _match_only rows: a campaign lead's EmployeeProfile is widened with the
+  // identity rows of cross-department cover workers so the attendance matcher can
+  // name them, but those people belong to another campaign's HR roster and must
+  // not count toward THIS campaign's attrition.
+  const emp = (STATE.rawEmpRows || []).filter(r => !r._match_only);
   if (!emp || !emp.length) return;
   try {
     STATE.churnRows = extractChurnRows(emp, parseDate);        // parseDate injected — keeps the shared module pure
