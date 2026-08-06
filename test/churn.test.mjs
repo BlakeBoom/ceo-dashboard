@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import '../shared/churn.js';
 const {
   detectChurnCols, extractChurnRows, headcountAsAt, leaversBetween,
-  tenureBucket, computeMonthlyChurn, computeRolling12Churn, INVOLUNTARY_RE,
+  tenureBucket, computeMonthlyChurn, computeRolling12Churn, INVOLUNTARY_RE, EXCLUDED_EMPID_RE,
 } = globalThis.BoomerangChurn;
 
 // UTC date-only parser, mirroring how the dashboard/tests treat Zoho dates.
@@ -151,4 +151,20 @@ test('extractChurnRows drops non-campaign rows by default, keeps them when campa
   ];
   assert.equal(extractChurnRows(emp, pd).length, 1);
   assert.equal(extractChurnRows(emp, pd, { campaignOnly: false }).length, 2);
+});
+test('extractChurnRows excludes HRM-prefixed Employee IDs (numerator and denominator)', () => {
+  const emp = [
+    { 'Employee ID': '1302',    'Group Joining Date': '2024-01-01', 'Date of exit (Last Day of Employment)': '',           _campaign_slug: 'beer52' },
+    { 'Employee ID': 'HRM045',  'Group Joining Date': '2024-01-01', 'Date of exit (Last Day of Employment)': '2025-06-01', _campaign_slug: 'beer52' }, // a leaver, but HR staff
+    { 'Employee ID': 'hrm099',  'Group Joining Date': '2024-01-01', 'Date of exit (Last Day of Employment)': '',           _campaign_slug: 'beer52' }, // case-insensitive
+  ];
+  const got = extractChurnRows(emp, pd);
+  assert.equal(got.length, 1);                 // only the real agent survives
+  assert.equal(got[0].empId, '1302');
+  assert.match('HRM045', EXCLUDED_EMPID_RE);
+  assert.doesNotMatch('CHRM1', EXCLUDED_EMPID_RE);   // must be a PREFIX, not a substring
+});
+test('detectChurnCols finds the Employee ID column by normalised key', () => {
+  const cols = detectChurnCols([{ 'Employee ID': '1302', 'Group Joining Date': '2024-01-01', 'Date of exit (Last Day of Employment)': '' }]);
+  assert.equal(cols.empId, 'Employee ID');
 });

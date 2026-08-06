@@ -147,6 +147,10 @@ router.get('/view/:key', requireRole('tm'), async (req, res) => {
     // returned — never the formulas or the figures computed from them.
     if (req.params.key === 'User_metrics_3') {
       rows = scopeMetricsRows(req.user, rows);
+      // Attach the canonical campaign slug so the dashboard can line each metrics
+      // campaign up with the churn feed (whose _campaign_slug comes from the same
+      // canonicalCampaign) without duplicating the workgroup→slug map client-side.
+      for (const r of rows) { const c = canonicalCampaign(r.workgroup); r._campaign_slug = c ? c.slug : null; }
     } else if (!seesAllScope(req.user)) {
       // Attendance & EmployeeProfile have no campaign/team column, so we narrow
       // them to the caller's agents by name. admin/exco skip this entirely.

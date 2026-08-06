@@ -23,9 +23,17 @@
     reason:       ['reasonforexit', 'exitreason', 'reasonforleaving', 'reason'],
     status:       ['employeestatus', 'status'],
     contractType: ['employeecontracttype', 'contracttype'],
+    // The human Employee ID (e.g. "HRM123", "1302") — NOT the Zoho record id
+    // ('id' → 610962…), which is why 'id' is deliberately absent from the list.
+    empId:        ['employeeid', 'employeeno', 'employeenumber', 'empno', 'empid', 'staffnumber'],
   };
 
-  let _warnedNoCols = false;
+  // Employee IDs with this prefix are HR / management staff, excluded from
+  // attrition entirely (numerator and denominator). Exported so it can be tuned
+  // without touching logic. Anchored + case-insensitive, tolerant of leading space.
+  const EXCLUDED_EMPID_RE = /^\s*hrm/i;
+
+  let _warnedNoCols = false, _warnedNoEmpId = false;
   // Returns { join, exit, reason, status, contractType } (actual header keys, or
   // null per field) — or null overall when EITHER date column is missing. Null
   // rather than a zero-filled result is deliberate: the same reasoning as
@@ -42,6 +50,10 @@
     if (!out.join || !out.exit) {
       if (!_warnedNoCols) { console.warn('[churn] EmployeeProfile is missing a join and/or exit date column — churn disabled.'); _warnedNoCols = true; }
       return null;
+    }
+    if (!out.empId && !_warnedNoEmpId) {
+      console.warn('[churn] no Employee ID column detected — HRM-prefixed staff cannot be excluded from attrition.');
+      _warnedNoEmpId = true;
     }
     return out;
   }
@@ -60,10 +72,12 @@
     const cols = detectChurnCols(empRows);
     if (!cols) return [];
     const out = [];
-    let droppedNoJoin = 0, droppedNotInCampaign = 0;
+    let droppedNoJoin = 0, droppedHrm = 0, droppedNotInCampaign = 0;
     for (const r of (empRows || [])) {
       const join = parseDate(r[cols.join]);
       if (!join) { droppedNoJoin++; continue; }            // no join date → not a real tenure
+      const empId = cols.empId ? String(r[cols.empId] ?? '') : '';
+      if (EXCLUDED_EMPID_RE.test(empId)) { droppedHrm++; continue; }  // HR / management — never in attrition
       const campaignSlug = r._campaign_slug ?? null;
       if (campaignOnly && campaignSlug == null) { droppedNotInCampaign++; continue; }  // admin/internal
       out.push({
@@ -72,10 +86,11 @@
         reason: (cols.reason ? r[cols.reason] : '') || '',
         status: (cols.status ? r[cols.status] : '') || '',
         contractType: (cols.contractType ? r[cols.contractType] : '') || '',
+        empId,
         campaignSlug,
       });
     }
-    console.info(`[churn] extractChurnRows: ${out.length} kept · dropped ${droppedNoJoin} no-join-date · dropped ${droppedNotInCampaign} not-in-a-campaign (campaignOnly=${campaignOnly})`);
+    console.info(`[churn] extractChurnRows: ${out.length} kept · dropped ${droppedNoJoin} no-join-date · dropped ${droppedHrm} HRM-prefixed · dropped ${droppedNotInCampaign} not-in-a-campaign (campaignOnly=${campaignOnly})`);
     return out;
   }
 
@@ -212,6 +227,6 @@
 
   root.BoomerangChurn = {
     detectChurnCols, extractChurnRows, headcountAsAt, leaversBetween,
-    tenureBucket, computeMonthlyChurn, computeRolling12Churn, INVOLUNTARY_RE,
+    tenureBucket, computeMonthlyChurn, computeRolling12Churn, INVOLUNTARY_RE, EXCLUDED_EMPID_RE,
   };
 })(globalThis);

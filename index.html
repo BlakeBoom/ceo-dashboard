@@ -1466,6 +1466,7 @@ let STATE = {
   churnRows: null,          // extractChurnRows() output: {join,exit,reason,status,contractType,campaignSlug}[]
   churnByMonth: null,       // computeMonthlyChurn(): per-month {month,leavers,avgHC,churn_pct} for the trend
   churnRollingByMonth: null,// computeRolling12Churn() per month; the tile picks the month of the SELECTED period end
+  campaignSlugByKey: null,  // dashboard campaign key → canonical churn slug (from server-attached _campaign_slug)
   granularity: 'week',   // 'day' | 'week' | 'month' — re-aggregation grain
   rangeBounds: null,     // {from,to} YYYY-MM-DD → custom day range (one combined bucket)
   weeks: [],             // period labels for the current granularity
@@ -4728,6 +4729,19 @@ function renderCampaignDetail(root) {
       : hero('info', 'Volume', (Math.round((m.calls || 0) + (m.tickets || 0))).toLocaleString(), null,
           `${Math.round(m.calls || 0).toLocaleString()} calls · ${Math.round(m.tickets || 0).toLocaleString()} tkts`),
     hero(absStatus, 'Absence', m.absence != null ? m.absence.toFixed(1) + '%' : '—', null, 'target ≤5%'),
+    // Per-campaign churn (rolling 12mo to the selected period), exec-only — churn
+    // needs the full EmployeeProfile history that scoped feeds don't carry. HRM
+    // staff are already excluded upstream in extractChurnRows.
+    ...(isExec(AUTH.user) ? (() => {
+      const cr = churnRollingForCampaign(c);
+      const ok = cr && !cr.incomplete_window;
+      const winTo = cr && cr.windowEnd ? cr.windowEnd.toLocaleDateString('en-GB', { month: 'short', year: 'numeric', timeZone: 'UTC' }) : '';
+      const val = ok && cr.churn_annual_pct != null ? cr.churn_annual_pct.toFixed(1) + '%' : '—';
+      const sub = !cr ? 'no HR data for this campaign'
+        : cr.incomplete_window ? 'insufficient history'
+        : `12mo to ${winTo}${ok && cr.churn_early_pct != null ? ` · ${cr.churn_early_pct.toFixed(1)}% early / ${cr.churn_established_pct.toFixed(1)}% est` : ''}`;
+      return [hero(ok ? band(cr.churn_annual_pct, 20, 30) : 'info', 'Churn (12mo)', val, null, sub)];
+    })() : []),
   ].join('');
 
   // KPIs grouped into daily-pulse panels (Operational / Quality / Outcome).
@@ -5203,6 +5217,14 @@ function renderTrends() {
 // ════════════════════════════════════════════════════════════════════════
 function applyData(rows, attendanceRows, empProfileRows, roleUsers) {
   STATE.rawAgentWeek = rows;
+  // Map each dashboard campaign key to its canonical churn slug from the
+  // server-attached _campaign_slug, so per-campaign churn lines up with the
+  // metrics campaigns without a duplicated workgroup→slug table on the client.
+  STATE.campaignSlugByKey = {};
+  for (const r of rows) {
+    const key = r.campaign_key || WG_MAP[r.workgroup];
+    if (key && r._campaign_slug && !(key in STATE.campaignSlugByKey)) STATE.campaignSlugByKey[key] = r._campaign_slug;
+  }
   _DATE_COL = detectDateCol(rows);
   // Role index drives the team-leader-only drill-down. Prefer the authoritative
   // resolved roles from Postgres (GET /api/users/roles — org-wide name+role, so
@@ -5309,6 +5331,17 @@ function currentChurnRolling() {
   if (!arr.length) return null;
   const ym = churnMonthForSelection();
   return arr.find(r => r.month === ym) || arr[arr.length - 1];
+}
+// Per-campaign rolling-12 churn for a dashboard campaign key, ending at the
+// selected period's month. Computed on demand (one month, one campaign's rows —
+// cheap). null when there are no churn rows for that campaign (or churn isn't
+// loaded — it's exec-only, since scoped feeds exclude leavers).
+function churnRollingForCampaign(campKey) {
+  const slug = STATE.campaignSlugByKey?.[campKey];
+  if (!slug || !STATE.churnRows || !STATE.churnRows.length) return null;
+  const rows = STATE.churnRows.filter(r => r.campaignSlug === slug);
+  if (!rows.length) return null;
+  return computeRolling12Churn(rows, [churnMonthForSelection()])[0] || null;
 }
 
 function buildChurn() {
