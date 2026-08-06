@@ -126,23 +126,35 @@ export const DATE_COL_CANDIDATES = ['Date', 'date', 'DATE', 'call_date',
   'Report_Date', 'log_date', 'day', 'Day', 'datetime', 'date_time', 'Date_Time',
   'created_date', 'Created_Date'];
 
+// Sentinel: this view has NO date column, so it must never be probed or
+// date-filtered — return it unfiltered. EmployeeProfile is the case that matters:
+// probing it walks all 18 candidates and fails slowly on Created_Date (7330).
+export const NO_DATE_COL = Symbol('no-date-col');
+
 // Known date-column names per view, used to skip probing on the common path.
-// Anything not listed here falls back to probing DATE_COL_CANDIDATES.
+// A NO_DATE_COL value pins a view as having no date column at all. Anything not
+// listed here falls back to probing DATE_COL_CANDIDATES.
 export const VIEW_DATE_COL = {
   [VIEW.userMetrics]: 'metric_date',
   [VIEW.attendance]:  'Date',
+  [VIEW.employee]:    NO_DATE_COL,   // EmployeeProfile has no date column — never probe/filter it
 };
 
 // Resolved date-column name per view, cached for the lifetime of the lambda so
-// we only probe once. Seeded with the known mapping above.
+// we only probe once. Seeded with the known mapping above; a NO_DATE_COL entry
+// (seeded or learned from a fully-failed probe) short-circuits to an unfiltered
+// fetch so no view is ever probed twice in a lambda's lifetime.
 const _dateColCache = new Map(Object.entries(VIEW_DATE_COL));
 
 // Fetch a view filtered to [start, end] (inclusive, 'YYYY-MM-DD') server-side.
 // Since the date column name varies per view, try candidates until one isn't
 // rejected by Zoho as an unknown filter column (errorCode 7330); a bad column
-// returns a fast 400, so probing is cheap. The winner is cached per view.
+// returns a fast 400, so probing is cheap. The winner is cached per view. A view
+// with no usable date column is cached as NO_DATE_COL and thereafter fetched
+// unfiltered rather than re-probed.
 export async function fetchViewByDate(viewId, start, end, candidates = DATE_COL_CANDIDATES) {
   const cached = _dateColCache.get(viewId);
+  if (cached === NO_DATE_COL) return fetchView(viewId);   // no date column → unfiltered, no probe
   const order = cached ? [cached, ...candidates.filter(c => c !== cached)] : candidates;
   let lastErr;
   for (const col of order) {
@@ -160,7 +172,11 @@ export async function fetchViewByDate(viewId, start, end, candidates = DATE_COL_
       throw err;
     }
   }
-  throw lastErr || new Error(`No usable date column for view ${viewId}`);
+  // Every candidate was unknown → this view has no date column. Cache the failed
+  // probe and serve unfiltered from now on instead of throwing (or re-probing).
+  _dateColCache.set(viewId, NO_DATE_COL);
+  console.warn(`[zoho] view ${viewId} has no usable date column — serving unfiltered (${lastErr?.message || 'probe exhausted'})`);
+  return fetchView(viewId);
 }
 
 export function monthBounds(yyyyMm) {
