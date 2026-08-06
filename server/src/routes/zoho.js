@@ -147,29 +147,40 @@ router.get('/view/:key', requireRole('tm'), async (req, res) => {
     // returned — never the formulas or the figures computed from them.
     if (req.params.key === 'User_metrics_3') {
       rows = scopeMetricsRows(req.user, rows);
-    } else if (!seesAllScope(req.user)) {
-      // Attendance & EmployeeProfile have no campaign/team column, so we narrow
-      // them to the caller's agents by name. admin/exco skip this entirely.
-      const keys = await allowedNameKeys(req.user);
-      if (req.params.key === 'EmployeeProfile') {
-        rows = rows.filter(r => nameAllowed(profileName(r), keys));
-      } else if (req.params.key === 'AttendanceUserReport') {
-        // Attendance keys people by Zoho People ID; map allowed names → IDs via
-        // EmployeeProfile, then keep only those rows.
-        const profiles = await fetchView(VIEW.employee);
-        const allowedIds = new Set();
-        for (const p of profiles) {
-          if (!nameAllowed(profileName(p), keys)) continue;
-          const id = String(p['ID'] ?? p.id ?? p.employee_id ?? '');
-          if (id) allowedIds.add(id);
-        }
-        rows = rows.filter(r => allowedIds.has(String(r['Employee'] ?? r.employee ?? '')));
-      }
-    }
-    // Resolve Department → campaign server-side (the browser can't read the raw
-    // lookup id) so churn can exclude internal/admin staff from its denominator.
-    if (req.params.key === 'EmployeeProfile') {
+      // Attach the canonical campaign slug so the dashboard can line each metrics
+      // campaign up with the churn feed (whose _campaign_slug comes from the same
+      // canonicalCampaign) without duplicating the workgroup→slug map client-side.
+      for (const r of rows) { const c = canonicalCampaign(r.workgroup); r._campaign_slug = c ? c.slug : null; }
+    } else if (req.params.key === 'EmployeeProfile') {
+      // Resolve Department → campaign FIRST (the browser can't read the raw lookup
+      // id), so churn can exclude internal/admin staff — then scope.
       rows = await attachCampaignToProfiles(rows);
+      if (!seesAllScope(req.user)) {
+        if (req.user.role === 'campaign_lead' && req.user.campaign_slug) {
+          // A campaign lead needs their campaign's FULL history — including leavers,
+          // who are churn's numerator and are absent from current metrics — so scope
+          // by the resolved _campaign_slug, not by name.
+          rows = rows.filter(r => r._campaign_slug === req.user.campaign_slug);
+        } else {
+          // A team leader is narrower than a campaign and doesn't get campaign-level
+          // churn, so keep the name filter (their current agents) rather than widen
+          // their view to the whole campaign's leaver history.
+          const keys = await allowedNameKeys(req.user);
+          rows = rows.filter(r => nameAllowed(profileName(r), keys));
+        }
+      }
+    } else if (req.params.key === 'AttendanceUserReport' && !seesAllScope(req.user)) {
+      // Attendance keys people by Zoho People ID and has no campaign column; map the
+      // caller's allowed names → IDs via EmployeeProfile, then keep only those rows.
+      const keys = await allowedNameKeys(req.user);
+      const profiles = await fetchView(VIEW.employee);
+      const allowedIds = new Set();
+      for (const p of profiles) {
+        if (!nameAllowed(profileName(p), keys)) continue;
+        const id = String(p['ID'] ?? p.id ?? p.employee_id ?? '');
+        if (id) allowedIds.add(id);
+      }
+      rows = rows.filter(r => allowedIds.has(String(r['Employee'] ?? r.employee ?? '')));
     }
     // Match the shape the existing extractRows() in index.html expects.
     res.json({ data: rows });
