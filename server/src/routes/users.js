@@ -64,10 +64,15 @@ router.get('/roles', async (req, res) => {
 // same sensitivity as /roles. Registered before the /:id routes.
 router.get('/team-map', async (req, res) => {
   const { rows: users } = await query(
-    `SELECT id, full_name, role, campaign_id, manager_id, zoho_user_id
+    `SELECT id, full_name, role, campaign_id, manager_id, zoho_user_id, zoho_employee_no
        FROM users WHERE active = TRUE`
   );
   const { nodes } = computeTeamStructure(users);
+  // The stable ID-link the dashboard uses to match attendance → metrics by HR
+  // number instead of by name: zoho_employee_no is the EmployeeProfile "Employee
+  // ID", zoho_user_id is the metrics user_id. Emitting both per node lets the
+  // browser build peopleId → empNo → uid without any name matching.
+  const empNoById = new Map(users.map(u => [u.id, u.zoho_employee_no]));
   // Two join keys, because zoho_user_id only exists for people the bonus sync
   // registered (bonus-ruled campaigns). name_key (clean, normalised full name)
   // is set by provisioning for EVERY active employee, so non-bonus campaigns
@@ -84,6 +89,7 @@ router.get('/team-map', async (req, res) => {
     const k = nameKeyById.get(n.user_id);
     return {
       zoho_user_id: n.zoho_user_id,
+      zoho_employee_no: empNoById.get(n.user_id) ?? null,
       name_key: (k && nameCount.get(k) === 1) ? k : null,
       team_node: n.team_node,
       node_type: n.node_type,

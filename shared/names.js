@@ -298,33 +298,80 @@
     return (billableHrs / paidHrs) * 100;
   }
 
+  // Detect the EmployeeProfile HR employee-number column ("Employee ID" /
+  // "Employee Number" / …) — the stable HR number the users table stores as
+  // zoho_employee_no. This is NOT the People "ID" column (r['ID'], a 15-16 digit
+  // Zoho People record id that attendance is keyed to); the 'id' header is never
+  // a candidate, so the two never collide. Mirrors provision.js's empNo detection
+  // so client and server pick the same column. Returns the raw header key or null.
+  function detectEmpNoCol(empRows) {
+    const sample = (empRows || []).find(r => r) || {};
+    const cands = ['employeenumber', 'employeeno', 'employeeid', 'empno', 'empid', 'staffnumber'];
+    const nk = (k) => String(k).toLowerCase().replace(/[^a-z0-9]/g, '');
+    const byNorm = new Map(Object.keys(sample).map(k => [nk(k), k]));
+    for (const c of cands) if (byNorm.has(c)) return byNorm.get(c);
+    return null;
+  }
+
   // ── Attendance People ID → metrics user_id ──────────────────────────────────
-  // Map EVERY EmployeeProfile People ID → metrics user_id by name, INCLUDING
-  // Terminated / duplicate records. Attendance is frequently keyed to a person's
-  // OLD (terminated) People ID while the metrics roster only matches their current
+  // Map EVERY EmployeeProfile People ID → metrics user_id, INCLUDING Terminated /
+  // duplicate records. Attendance is frequently keyed to a person's OLD
+  // (terminated) People ID while the metrics roster only matches their current
   // (active) one, so an active-only index leaves a large share of real hours
-  // unmatched (they fall to "— Unassigned"). Full-name match is preferred over
-  // first+last to limit namesake collisions; a metrics name truncated at ~30 chars
-  // is handled by the prefix fallback. First metrics agent to claim a key wins.
-  // `agents` is an array of { name, uid }. Returns Map(peopleId → uid).
-  function buildEmpIdToUid(empRows, agents) {
+  // unmatched (they fall to "— Unassigned").
+  //
+  // Two layers, most-authoritative first:
+  //   1. STABLE ID-LINK (optional `empNoToUid`): attendance People ID → the row's
+  //      HR employee number → users.zoho_employee_no → its zoho_user_id (== metrics
+  //      uid). This is namesake-proof: it can never fuse two different people who
+  //      share a name. It only covers people whose HR + metrics halves are merged
+  //      onto one users row AND who carry metrics this period (validUids).
+  //   2. NAME FALLBACK (always): full-name preferred over first+last to limit
+  //      namesake collisions; a metrics name truncated at ~30 chars is handled by
+  //      the prefix fallback. Used for every People ID the ID-link doesn't cover.
+  //
+  // `agents` is an array of { name, uid }. `empNoToUid` is an optional
+  // Map(zoho_employee_no → uid). `stats` (optional) is filled with coverage counts
+  // for diagnostics. First metrics agent to claim a key wins. Returns Map(peopleId
+  // → uid).
+  function buildEmpIdToUid(empRows, agents, empNoToUid, stats) {
     const fullToUid = new Map(), flToUid = new Map(), fulls = [];
+    const validUids = new Set();
     for (const a of (agents || [])) {
+      validUids.add(a.uid);
       const full = normalizeName(a.name);
       if (full) { if (!fullToUid.has(full)) fullToUid.set(full, a.uid); fulls.push({ full, uid: a.uid }); }
       const fl = firstLastKey(a.name); if (fl && !flToUid.has(fl)) flToUid.set(fl, a.uid);
     }
+    // The ID-link is only usable when we were given a non-empty map AND can find
+    // the employee-number column to read the join key from.
+    const idLink = (empNoToUid instanceof Map && empNoToUid.size) ? empNoToUid : null;
+    const empNoCol = idLink ? detectEmpNoCol(empRows) : null;
+    let byId = 0, byName = 0;
     const map = new Map();
     for (const r of (empRows || [])) {
       const id = String(r['ID'] ?? r.id ?? r.employee_id ?? '');
       if (!id || map.has(id)) continue;
+      // 1) Stable ID-link — wins over names, but only onto an agent that actually
+      //    carries metrics this period (else fall through to names, which land the
+      //    same non-covered People IDs where they'd land without the ID-link).
+      if (idLink && empNoCol) {
+        const empNo = String(r[empNoCol] ?? '').trim();
+        const uid = empNo ? idLink.get(empNo) : undefined;
+        if (uid != null && validUids.has(uid)) { map.set(id, uid); byId++; continue; }
+      }
+      // 2) Name fallback.
       const nm = stripKnownNameSuffix(r['Employee Name'] ?? r.employee_name);
       const full = normalizeName(nm), fl = firstLastKey(nm);
       let uid = (full && fullToUid.get(full)) ?? (fl && flToUid.get(fl));
       if (uid == null && full && full.length >= 20) {   // metrics name truncated → EP name starts with it
         for (const c of fulls) if (full.startsWith(c.full)) { uid = c.uid; break; }
       }
-      if (uid != null) map.set(id, uid);
+      if (uid != null) { map.set(id, uid); byName++; }
+    }
+    if (stats && typeof stats === 'object') {
+      stats.byId = byId; stats.byName = byName; stats.total = map.size;
+      stats.idLinkUsed = !!(idLink && empNoCol); stats.empNoCol = empNoCol || null;
     }
     return map;
   }
@@ -374,6 +421,6 @@
     titleToRole, looksLikeLookupId,
     _buildRoleIndex, buildRoleIndexFromUsers, resolveTeamNode, unassignedShare,
     LOWER_BETTER, CUMULATIVE_KPIS, rag, overallRag, agentScore, fulfilPct, realisationPct,
-    SHIFT_PATTERNS, shiftToCampaign, shiftCampaignKeys, buildEmpIdToUid,
+    SHIFT_PATTERNS, shiftToCampaign, shiftCampaignKeys, buildEmpIdToUid, detectEmpNoCol,
   };
 })(globalThis);

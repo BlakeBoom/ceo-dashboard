@@ -1967,9 +1967,28 @@ function dateToWeekLabel(s) {
 // EmployeeProfile People ID → metrics user_id (buildEmpIdToUid) now lives in
 // /shared/names.js — see the top-of-script destructure. It resolves Terminated /
 // duplicate records too, so attendance keyed to an old People ID still matches. A
-// thin adapter turns agentMeta ({uid:{name}}) into the {name,uid}[] it expects.
-const empIdToUid = (empRows, agentMeta) =>
-  buildEmpIdToUid(empRows, Object.entries(agentMeta || {}).map(([uid, m]) => ({ name: m.name, uid })));
+// thin adapter turns agentMeta ({uid:{name}}) into the {name,uid}[] it expects,
+// and hands it the stable ID-link (HR employee number → uid, from /api/users
+// /team-map) so matching prefers the namesake-proof number over the name. When the
+// ID-link is empty (no merged users, or the endpoint failed) it degrades cleanly
+// to the same name matching as before.
+let _empIdToUidLogged = false;
+const empIdToUid = (empRows, agentMeta) => {
+  const empNoToUid = STATE.teamMap && STATE.teamMap.empNoToUid;
+  const stats = {};
+  const map = buildEmpIdToUid(
+    empRows,
+    Object.entries(agentMeta || {}).map(([uid, m]) => ({ name: m.name, uid })),
+    empNoToUid, stats
+  );
+  // One line per data load (not per rebuild) so ID-link coverage is visible
+  // without spamming the console on every granularity toggle.
+  if (!_empIdToUidLogged) {
+    _empIdToUidLogged = true;
+    console.info(`[empid→uid] ${stats.total} People IDs matched · ${stats.byId} via stable ID-link${stats.idLinkUsed ? ` (col "${stats.empNoCol}", ${empNoToUid ? empNoToUid.size : 0} HR numbers)` : ' (unavailable)'} · ${stats.byName} via name`);
+  }
+  return map;
+};
 
 function buildShrinkageByAgentWeek(attRows, empProfileRows, umAgentMeta, gran = 'week') {
   // Zoho People ID → user_id, resolving duplicate/terminated records too.
@@ -5274,6 +5293,7 @@ function renderTrends() {
 // ════════════════════════════════════════════════════════════════════════
 function applyData(rows, attendanceRows, empProfileRows, roleUsers) {
   STATE.rawAgentWeek = rows;
+  _empIdToUidLogged = false;   // log ID-link coverage once per fresh data load
   // Map each dashboard campaign key to its canonical churn slug from the
   // server-attached _campaign_slug, so per-campaign churn lines up with the
   // metrics campaigns without a duplicated workgroup→slug table on the client.
@@ -5494,13 +5514,18 @@ async function fetchTeamMap() {
     if (!r.ok) return null;
     const j = await r.json();
     if (!Array.isArray(j.nodes)) return null;
-    const byId = new Map(), byName = new Map();
+    const byId = new Map(), byName = new Map(), empNoToUid = new Map();
     for (const n of j.nodes) {
       const node = { team_node: n.team_node, node_type: n.node_type };
       if (n.zoho_user_id != null) byId.set(String(n.zoho_user_id), node);
       if (n.name_key) byName.set(n.name_key, node);   // server pre-guarantees name uniqueness
+      // Stable ID-link: HR employee number → metrics user_id, for matching
+      // attendance to agents by number instead of by (collision-prone) name.
+      if (n.zoho_employee_no != null && n.zoho_user_id != null) {
+        empNoToUid.set(String(n.zoho_employee_no).trim(), String(n.zoho_user_id));
+      }
     }
-    return { byId, byName };
+    return { byId, byName, empNoToUid };
   } catch { return null; }
 }
 

@@ -257,3 +257,44 @@ test('buildEmpIdToUid: prefix fallback for a metrics name truncated at ~30 chars
   const emp = [{ ID: 'X', 'Employee Name': 'Kimlin Adosinda Opperman Van Der Merwe' }];
   assert.equal(buildEmpIdToUid(emp, agents).get('X'), 'u2');
 });
+
+// ── Stable ID-link (People ID → HR employee number → metrics uid) ─────────────
+const { detectEmpNoCol } = globalThis.BoomerangNames;
+test('detectEmpNoCol finds the HR number column, never the People "ID" column', () => {
+  const emp = [{ ID: '610962000012345', 'Employee ID': '1302', 'Employee Name': 'A B' }];
+  assert.equal(detectEmpNoCol(emp), 'Employee ID');
+});
+test('ID-link wins over names: two namesakes are never fused', () => {
+  // Two DIFFERENT people share a name; only the HR number tells them apart.
+  const agents = [{ name: 'John Smith', uid: 'uJOHN_A' }, { name: 'John Smith', uid: 'uJOHN_B' }];
+  const emp = [
+    { ID: 'PID_A', 'Employee ID': '1001', 'Employee Name': 'John Smith' },
+    { ID: 'PID_B', 'Employee ID': '1002', 'Employee Name': 'John Smith' },
+  ];
+  const empNoToUid = new Map([['1001', 'uJOHN_A'], ['1002', 'uJOHN_B']]);
+  const map = buildEmpIdToUid(emp, agents, empNoToUid);
+  assert.equal(map.get('PID_A'), 'uJOHN_A');   // name matching alone would collapse both to one uid
+  assert.equal(map.get('PID_B'), 'uJOHN_B');
+});
+test('ID-link falls back to names when the HR number is not in the link (or metrics is stale)', () => {
+  const agents = [{ name: 'Jane Doe', uid: 'uJANE' }];
+  const emp = [
+    { ID: 'PID_1', 'Employee ID': '2001', 'Employee Name': 'Jane Doe' },      // covered by ID-link
+    { ID: 'PID_2', 'Employee ID': '9999', 'Employee Name': 'Jane Doe' },      // HR number absent → name fallback
+  ];
+  // 9999 maps to a uid NOT in this period's roster → must be ignored, not trusted.
+  const empNoToUid = new Map([['2001', 'uJANE'], ['9999', 'uGHOST']]);
+  const stats = {};
+  const map = buildEmpIdToUid(emp, agents, empNoToUid, stats);
+  assert.equal(map.get('PID_1'), 'uJANE');     // via ID-link
+  assert.equal(map.get('PID_2'), 'uJANE');     // 9999→uGHOST rejected (not a current agent) → name match
+  assert.equal(stats.byId, 1);
+  assert.equal(stats.byName, 1);
+  assert.equal(stats.idLinkUsed, true);
+});
+test('empty/absent ID-link degrades to pure name matching (back-compat)', () => {
+  const agents = [{ name: 'Sam Lee', uid: 'uSAM' }];
+  const emp = [{ ID: 'P', 'Employee ID': '3003', 'Employee Name': 'Sam Lee' }];
+  assert.equal(buildEmpIdToUid(emp, agents).get('P'), 'uSAM');           // no 3rd arg
+  assert.equal(buildEmpIdToUid(emp, agents, new Map()).get('P'), 'uSAM'); // empty map
+});
