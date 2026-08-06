@@ -386,10 +386,11 @@
     [/beer\s*52/i,                  'BEER52'],
     // HYVE runs live trade-show events; agents' shifts are labelled with the
     // event name, not "HYVE". Map every spelling variant of those events to the
-    // HYVE campaign: "Mining Indaba" (incl. no-space / hyphen / "Investing in
-    // African Mining Indaba") and "CWIEME" (incl. "CWIEME Berlin/Chicago",
-    // "CWIEME Connect", and the loose "C-WIEME" hyphenation).
-    [/\bhyve\b|mining[\s-]*indaba|\bc[\s-]*wieme\b/i, 'HYVE'],
+    // HYVE campaign: "Indaba" (bare, or "Mining Indaba" / "Investing in African
+    // Mining Indaba", no-space / hyphen) and "CWIEME" (incl. "CWIEME Berlin/
+    // Chicago", "CWIEME Connect", and the loose "C-WIEME" hyphenation). "Indaba"
+    // is matched on its own — in this roster it always refers to the Mining Indaba.
+    [/\bhyve\b|indaba|\bc[\s-]*wieme\b/i, 'HYVE'],
     [/bb\s*marro|\bmarro\b/i,       'BUTTERNUTBOX'],
     [/butternut|\bbbox\b/i,         'BUTTERNUTBOX'],
     [/gousto/i,                     'Gousto'],
