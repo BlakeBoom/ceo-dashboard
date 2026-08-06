@@ -237,3 +237,23 @@ test('shiftCampaignKeys returns every campaign a split shift touches', () => {
   assert.ok(split.includes('HYVE') && split.includes('Gousto'), `got ${split}`);
   assert.deepEqual(shiftCampaignKeys('Office Admin'), []);
 });
+
+// ── buildEmpIdToUid (Phase 8c: resolve terminated/duplicate People IDs) ────────
+const { buildEmpIdToUid } = globalThis.BoomerangNames;
+test('buildEmpIdToUid maps active AND terminated duplicate records to the same uid', () => {
+  const agents = [{ name: 'Sasha-Lee Tammy De Klerk', uid: 'u1' }];
+  const emp = [
+    { ID: 'ACTIVE_1', 'Employee Name': 'Sasha-Lee Tammy De Klerk', 'Employee Status': 'Active' },
+    { ID: 'TERM_1',   'Employee Name': 'Sasha-Lee Tammy De Klerk', 'Employee Status': 'Terminated' },
+    { ID: 'OTHER',    'Employee Name': 'Someone Else Entirely',     'Employee Status': 'Active' },
+  ];
+  const map = buildEmpIdToUid(emp, agents);
+  assert.equal(map.get('ACTIVE_1'), 'u1');
+  assert.equal(map.get('TERM_1'), 'u1');           // the regression: was unmatched → "— Unassigned"
+  assert.equal(map.get('OTHER'), undefined);       // genuinely not in metrics → stays unmatched
+});
+test('buildEmpIdToUid: prefix fallback for a metrics name truncated at ~30 chars', () => {
+  const agents = [{ name: 'Kimlin Adosinda Opperman Van Der', uid: 'u2' }];  // truncated in metrics
+  const emp = [{ ID: 'X', 'Employee Name': 'Kimlin Adosinda Opperman Van Der Merwe' }];
+  assert.equal(buildEmpIdToUid(emp, agents).get('X'), 'u2');
+});

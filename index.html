@@ -540,7 +540,7 @@ svg.ring .rs{font-size:8px;letter-spacing:.5px;text-transform:uppercase}
 const { normalizeName, firstLastKey, stripKnownNameSuffix, buildTeamCanonMap, titleToRole, looksLikeLookupId,
         _buildRoleIndex, buildRoleIndexFromUsers, resolveTeamNode, unassignedShare,
         LOWER_BETTER, CUMULATIVE_KPIS, rag, overallRag, agentScore, fulfilPct, realisationPct,
-        shiftToCampaign } = globalThis.BoomerangNames;
+        shiftToCampaign, buildEmpIdToUid } = globalThis.BoomerangNames;
 // Churn / attrition maths — same shared-module pattern as BoomerangNames.
 const { extractChurnRows, computeMonthlyChurn, computeRolling12Churn } = globalThis.BoomerangChurn;
 // Hours-sourcing rule: billable may only come from attendance, never metrics.
@@ -1964,15 +1964,16 @@ function dateToWeekLabel(s) {
   return `W${weekNum}, ${target.getUTCFullYear()}`;
 }
 
+// EmployeeProfile People ID → metrics user_id (buildEmpIdToUid) now lives in
+// /shared/names.js — see the top-of-script destructure. It resolves Terminated /
+// duplicate records too, so attendance keyed to an old People ID still matches. A
+// thin adapter turns agentMeta ({uid:{name}}) into the {name,uid}[] it expects.
+const empIdToUid = (empRows, agentMeta) =>
+  buildEmpIdToUid(empRows, Object.entries(agentMeta || {}).map(([uid, m]) => ({ name: m.name, uid })));
+
 function buildShrinkageByAgentWeek(attRows, empProfileRows, umAgentMeta, gran = 'week') {
-  // Build name matcher: fullname → Zoho People ID
-  const nameMatch = buildNameMatcher(empProfileRows);
-  // Reverse: Zoho People ID → user_id (via matched fullname)
-  const empIdToUserId = new Map();
-  for (const [uid, meta] of Object.entries(umAgentMeta || {})) {
-    const empId = nameMatch(meta.name);
-    if (empId) empIdToUserId.set(String(empId), uid);
-  }
+  // Zoho People ID → user_id, resolving duplicate/terminated records too.
+  const empIdToUserId = empIdToUid(empProfileRows, umAgentMeta);
 
   const result = {};  // user_id → week → shrinkage components
   let unmatchedRows = 0;
@@ -2363,11 +2364,10 @@ function overlayAttendanceHeadcount() {
 // workgroup-based billable from User_metrics_3 wherever attendance covers a
 // campaign/period.
 function buildBillableByShift(attRows, empProfileRows, agentMeta, gran) {
-  const nameMatch = buildNameMatcher(empProfileRows);
-  const empToUid = new Map();
-  for (const [uid, meta] of Object.entries(agentMeta || {})) {
-    const e = nameMatch(meta.name); if (e) empToUid.set(String(e), uid);
-  }
+  // Zoho People ID → user_id, resolving duplicate/terminated records too, so
+  // attendance keyed to an old People ID still lands on its real agent/team
+  // instead of "— Unassigned".
+  const empToUid = empIdToUid(empProfileRows, agentMeta);
   // Employee ID → display name, so attendance that doesn't match a metrics agent
   // (the "— Unassigned" hours) can still be shown by name in the drill-down.
   const eidToName = new Map();

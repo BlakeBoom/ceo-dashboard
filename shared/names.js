@@ -298,6 +298,37 @@
     return (billableHrs / paidHrs) * 100;
   }
 
+  // ── Attendance People ID → metrics user_id ──────────────────────────────────
+  // Map EVERY EmployeeProfile People ID → metrics user_id by name, INCLUDING
+  // Terminated / duplicate records. Attendance is frequently keyed to a person's
+  // OLD (terminated) People ID while the metrics roster only matches their current
+  // (active) one, so an active-only index leaves a large share of real hours
+  // unmatched (they fall to "— Unassigned"). Full-name match is preferred over
+  // first+last to limit namesake collisions; a metrics name truncated at ~30 chars
+  // is handled by the prefix fallback. First metrics agent to claim a key wins.
+  // `agents` is an array of { name, uid }. Returns Map(peopleId → uid).
+  function buildEmpIdToUid(empRows, agents) {
+    const fullToUid = new Map(), flToUid = new Map(), fulls = [];
+    for (const a of (agents || [])) {
+      const full = normalizeName(a.name);
+      if (full) { if (!fullToUid.has(full)) fullToUid.set(full, a.uid); fulls.push({ full, uid: a.uid }); }
+      const fl = firstLastKey(a.name); if (fl && !flToUid.has(fl)) flToUid.set(fl, a.uid);
+    }
+    const map = new Map();
+    for (const r of (empRows || [])) {
+      const id = String(r['ID'] ?? r.id ?? r.employee_id ?? '');
+      if (!id || map.has(id)) continue;
+      const nm = stripKnownNameSuffix(r['Employee Name'] ?? r.employee_name);
+      const full = normalizeName(nm), fl = firstLastKey(nm);
+      let uid = (full && fullToUid.get(full)) ?? (fl && flToUid.get(fl));
+      if (uid == null && full && full.length >= 20) {   // metrics name truncated → EP name starts with it
+        for (const c of fulls) if (full.startsWith(c.full)) { uid = c.uid; break; }
+      }
+      if (uid != null) map.set(id, uid);
+    }
+    return map;
+  }
+
   // ── Shift → campaign ────────────────────────────────────────────────────────
   // The campaign name appears somewhere in the Shift column (not always at the
   // start); contains-matches, ordered specific-first. Shared so the server can
@@ -343,6 +374,6 @@
     titleToRole, looksLikeLookupId,
     _buildRoleIndex, buildRoleIndexFromUsers, resolveTeamNode, unassignedShare,
     LOWER_BETTER, CUMULATIVE_KPIS, rag, overallRag, agentScore, fulfilPct, realisationPct,
-    SHIFT_PATTERNS, shiftToCampaign, shiftCampaignKeys,
+    SHIFT_PATTERNS, shiftToCampaign, shiftCampaignKeys, buildEmpIdToUid,
   };
 })(globalThis);
