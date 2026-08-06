@@ -241,6 +241,7 @@ test('HYVE event shifts (Mining Indaba / CWIEME) map to the HYVE campaign', () =
   for (const s of [
     'Mining Indaba', 'Mining Indaba Day', 'MiningIndaba', 'Mining-Indaba',
     'Investing in African Mining Indaba', 'Mining Indaba Support',
+    'Indaba', 'Indaba Cape Town',   // bare "Indaba" → HYVE in this roster
   ]) assert.equal(shiftToCampaign(s), 'HYVE', `mining indaba variant: "${s}"`);
   for (const s of [
     'CWIEME', 'CWIEME Berlin', 'CWIEME Chicago', 'CWIEME Connect',
