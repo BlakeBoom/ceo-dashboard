@@ -2386,9 +2386,19 @@ function buildBillableByShift(attRows, empProfileRows, agentMeta, gran) {
   for (const [uid, meta] of Object.entries(agentMeta || {})) {
     const e = nameMatch(meta.name); if (e) empToUid.set(String(e), uid);
   }
+  // Employee ID → display name, so attendance that doesn't match a metrics agent
+  // (the "— Unassigned" hours) can still be shown by name in the drill-down.
+  const eidToName = new Map();
+  for (const r of (empProfileRows || [])) {
+    const id = String(r['ID'] ?? r.id ?? '');
+    const nm = r['Employee Name'] ?? r.employee_name;
+    if (id && nm) eidToName.set(id, stripKnownNameSuffix(nm) || String(nm).trim());
+  }
   const byCampWeek = {};   // camp -> week -> hrs
   const byTeamWeek = {};   // "camp||team" -> week -> hrs
   const byAgentWeek = {};  // "camp||uid" -> week -> hrs (so the BAE breakdown reconciles to its team)
+  const byUnmatched = {};  // "camp||empId" -> week -> hrs (attendance with no matching metrics agent)
+  const unmatchedNames = {}; // empId -> EmployeeProfile name (for the Unassigned drill-down)
   const unmatched = {};    // shift name -> hrs (no campaign match)
   const nonBillable = {};  // role -> hrs (excluded: non-billable role)
   const excluded = {};     // week -> "shift||reason" -> {shift,reason,role,camp,hrs}
@@ -2410,7 +2420,8 @@ function buildBillableByShift(attRows, empProfileRows, agentMeta, gran) {
     const ym = date ? `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}` : null;
     const shift = (row['Shift'] ?? row.shift ?? '').toString();
     const role = detectRole(shift);
-    const uid = empToUid.get(String(row['Employee'] ?? row.employee ?? ''));
+    const empId = String(row['Employee'] ?? row.employee ?? '');
+    const uid = empToUid.get(empId);
     const team = (uid && agentMeta[uid] && agentMeta[uid].team) || '— Unassigned';
     // Attribute an amount of billable hours to a campaign (and its team bucket).
     const attribute = (c, amt) => {
@@ -2421,6 +2432,12 @@ function buildBillableByShift(attRows, empProfileRows, agentMeta, gran) {
       if (uid != null) {
         const ak = c + '||' + uid;
         (byAgentWeek[ak] ??= {})[week] = (byAgentWeek[ak][week] || 0) + amt;
+      } else if (empId) {
+        // Attendance we couldn't tie to a metrics agent → track by Employee ID so
+        // the "— Unassigned" catch-all can name it instead of showing empty hours.
+        const uk = c + '||' + empId;
+        (byUnmatched[uk] ??= {})[week] = (byUnmatched[uk][week] || 0) + amt;
+        if (!(empId in unmatchedNames)) unmatchedNames[empId] = eidToName.get(empId) || null;
       }
     };
     const markNonBillable = (c, lbl, reason, amt) => {
@@ -2470,7 +2487,7 @@ function buildBillableByShift(attRows, empProfileRows, agentMeta, gran) {
     }
     attribute(camp, bill);
   }
-  return { byCampWeek, byTeamWeek, byAgentWeek, unmatched, nonBillable, excluded };
+  return { byCampWeek, byTeamWeek, byAgentWeek, byUnmatched, unmatchedNames, unmatched, nonBillable, excluded };
 }
 
 // Override billable in the already-built campaign/team rollups with the
@@ -2500,6 +2517,34 @@ function applyShiftBillable() {
     for (const wk in b.byCampWeek[camp])
       (STATE.campaignWeek[camp][wk] ??= { _attendanceOnly: true }).billable = b.byCampWeek[camp][wk];
   }
+  const agentByKey = b.byAgentWeek || {};
+  // Give the "— Unassigned" catch-all faces BEFORE the team-total override, so its
+  // total (from byTeamWeek) has rows to drill into: matched people whose team
+  // resolves to Unassigned (cross-campaign cover, already in byAgentWeek) and
+  // UNMATCHED attendance (People IDs not in the metrics roster, named from
+  // EmployeeProfile). Rows are attendance-only; the reconciliation pass skips them.
+  const U = UNASSIGNED_TEAM;
+  const seedUnassigned = (camp, key, name, byWk, unmatched) => {
+    if (!STATE.campaignWeek[camp]) return;              // real campaign only
+    const teamBk = ((STATE.teamWeek[camp] ??= {})[U] ??= {});
+    const agents = ((STATE.agentWeek[camp] ??= {})[U] ??= {});
+    if (name) STATE.agentMeta[key] ??= { name, team: U, camp, _unmatched: unmatched };
+    const bucket = (agents[key] ??= {});
+    for (const wk in byWk) {
+      if (bucket[wk]) bucket[wk].billable = byWk[wk];
+      else bucket[wk] = { billable: byWk[wk], _attendanceOnly: true, _unmatched: unmatched };
+      teamBk[wk] ??= { _attendanceOnly: true };         // so the byTeamWeek override can set the total below
+    }
+  };
+  for (const ak in agentByKey) {
+    const j = ak.indexOf('||'); const camp = ak.slice(0, j), uid = ak.slice(j + 2);
+    if (STATE.agentMeta[uid]?.team !== U) continue;     // only those that resolve to Unassigned
+    seedUnassigned(camp, uid, STATE.agentMeta[uid]?.name, agentByKey[ak], false);
+  }
+  for (const uk in (b.byUnmatched || {})) {
+    const j = uk.indexOf('||'); const camp = uk.slice(0, j), empId = uk.slice(j + 2);
+    seedUnassigned(camp, 'att:' + empId, b.unmatchedNames?.[empId] || ('Unmatched · ' + empId), b.byUnmatched[uk], true);
+  }
   for (const tk in b.byTeamWeek) {
     const i = tk.indexOf('||'); const camp = tk.slice(0, i), team = tk.slice(i + 2);
     if (!(STATE.teamWeek[camp] && STATE.teamWeek[camp][team])) continue;
@@ -2514,11 +2559,10 @@ function applyShiftBillable() {
   // the person's metrics are. Only ever into a team bucket that already exists
   // (never invents a team). Synthesised rows carry billable only (no KPI values),
   // flagged _attendanceOnly so the renderer can mark the leader.
-  const agentByKey = b.byAgentWeek || {};
   for (const ak in agentByKey) {
     const j = ak.indexOf('||'); const camp = ak.slice(0, j), uid = ak.slice(j + 2);
     const team = STATE.agentMeta[uid]?.team;
-    if (!team || team === UNASSIGNED_TEAM) continue;
+    if (!team || team === UNASSIGNED_TEAM) continue;    // Unassigned handled by seedUnassigned above
     if (!(STATE.teamWeek[camp] && STATE.teamWeek[camp][team])) continue;
     const bucket = ((STATE.agentWeek[camp] ??= {})[team] ??= {})[uid] ??= {};
     for (const wk in agentByKey[ak]) {
@@ -2541,6 +2585,7 @@ function applyShiftBillable() {
       for (const uid in teamAgents) {
         const row = teamAgents[uid][wk];
         if (!row || row.billable == null) continue;
+        if (row._attendanceOnly) continue;  // synthesised attendance rows (incl. Unassigned unmatched) always have real hours
         if (agentByKey[camp + '||' + uid]?.[wk] == null) row.billable = 0;  // attendance-driven week, no shift for this BAE
       }
     }
@@ -5048,7 +5093,7 @@ function renderAgentList(root) {
       html += `<tr>`;
       for (const c of cols) {
         if (c.key === 'name') {
-          html += `<td class="name">${r.name}${isLeader(r) ? ' <span class="camp-risk" style="background:var(--bg-2);color:var(--text3)">TL</span>' : ''}</td>`;
+          html += `<td class="name">${r.name}${isLeader(r) ? ' <span class="camp-risk" style="background:var(--bg-2);color:var(--text3)">TL</span>' : ''}${r._unmatched ? ' <span class="camp-risk" style="background:var(--bg-2);color:var(--text3)" title="Attendance hours not matched to the metrics roster">unmatched</span>' : ''}</td>`;
         } else {
           const v = r[c.key];
           // Realisation is shown but UNSCORED (grey + tooltip) when the agent's paid
