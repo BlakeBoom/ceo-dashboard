@@ -92,6 +92,7 @@ input:focus-visible,select:focus-visible{outline:none;border-color:var(--accent)
 .chip.ok{background:rgba(34,197,94,.16);color:var(--green-text)}
 .chip.warn{background:rgba(245,158,11,.16);color:#b45309}
 .chip.role-admin{background:rgba(139,92,246,.18);color:#7c3aed}
+.chip.role-exco{background:rgba(99,102,241,.18);color:#4f46e5}
 .chip.role-campaign_lead{background:rgba(59,130,246,.18);color:#2563eb}
 .chip.role-tm{background:rgba(14,165,233,.16);color:#0284c7}
 .chip.role-agent{background:var(--border-light);color:var(--text2)}
@@ -469,6 +470,7 @@ svg.ring .rs{font-size:8px;letter-spacing:.5px;text-transform:uppercase}
         <button class="tab" data-view="targets" data-min-role="exco">Targets</button>
         <button class="tab" data-view="rules" data-min-role="admin">Rules</button>
         <button class="tab" data-view="users" data-min-role="admin">Users</button>
+        <button class="tab" data-view="access" data-min-role="admin">Access</button>
       </div>
       <div class="gran-toggle" id="granNav">
         <button class="gran-btn" data-gran="day">Day</button>
@@ -523,6 +525,7 @@ svg.ring .rs{font-size:8px;letter-spacing:.5px;text-transform:uppercase}
   <div id="targetsView" class="view"></div>
   <div id="rulesView" class="view"></div>
   <div id="usersView" class="view"></div>
+  <div id="accessView" class="view"></div>
 
   <div class="footer" id="footer"></div>
 </div>
@@ -2867,6 +2870,95 @@ function render() {
   else if (STATE.view === 'targets') renderTargets();
   else if (STATE.view === 'rules') renderRules();
   else if (STATE.view === 'users') renderUsers();
+  else if (STATE.view === 'access') renderAccess();
+}
+
+// ─── Access view (admin) ────────────────────────────────────────
+// A per-role matrix letting an admin hide tabs from a role's tab bar (e.g. while
+// a tab is being built out). Purely a display convenience — it never grants a
+// tab the role's min-role doesn't already allow, and admins are never subject to
+// it (so this screen can't lock itself away). Persisted via /api/settings.
+const ACCESS_STATE = { draft: null, saving: false, msg: '' };
+const ROLE_DISPLAY = { agent: 'Agent', tm: 'Team Leader', campaign_lead: 'Campaign Lead', exco: 'EXCO' };
+
+// The matrix columns are read straight from the live tab bar, so it always
+// mirrors the actual tabs (add a tab → it appears here automatically).
+function accessTabDefs() {
+  return Array.from(document.querySelectorAll('.tab'))
+    .map(t => ({ view: t.dataset.view, label: t.textContent.trim(), min: t.dataset.minRole || 'agent' }))
+    .filter(t => t.view);
+}
+
+function renderAccess() {
+  const host = $('accessView');
+  const u = AUTH.user;
+  if (!u || u.role !== 'admin') { host.innerHTML = '<div class="flag-empty" style="padding:32px">Admins only.</div>'; return; }
+  if (!ACCESS_STATE.draft) ACCESS_STATE.draft = JSON.parse(JSON.stringify(TAB_VIS || {}));
+  const draft = ACCESS_STATE.draft;
+  const tabs = accessTabDefs();
+
+  const headCells = tabs.map(t => `<th class="numeric" title="Minimum role: ${t.min}">${esc(t.label)}</th>`).join('');
+  const bodyRows = TAB_VIS_EDIT_ROLES.map(role => {
+    const rank = ROLE_RANK[role] ?? 0;
+    const cells = tabs.map(t => {
+      const permitted = rank >= (ROLE_RANK[t.min] ?? 0);
+      if (!permitted) return `<td class="numeric" style="color:var(--text3)" title="${ROLE_DISPLAY[role]} can't reach ${esc(t.label)} (min role: ${t.min})">—</td>`;
+      const visible = !(draft[role] && draft[role][t.view] === false);
+      return `<td class="numeric"><input type="checkbox" class="acc-chk" data-role="${role}" data-view="${t.view}" ${visible ? 'checked' : ''} title="${ROLE_DISPLAY[role]} · ${esc(t.label)}"></td>`;
+    }).join('');
+    return `<tr><td><span class="chip role-${role}">${ROLE_DISPLAY[role]}</span></td>${cells}</tr>`;
+  }).join('');
+
+  host.innerHTML = `
+    <div class="sum-card">
+      <div class="agent-tbl-head" style="padding:0 0 12px">
+        <h3 style="margin:0">Tab access by role</h3>
+        <span class="agent-tbl-sub" style="margin-left:auto">Untick a tab to hide it from that view level. Admins always see every tab.</span>
+      </div>
+      <div style="overflow-x:auto">
+        <table class="trend-tbl">
+          <thead><tr><th>View level</th>${headCells}</tr></thead>
+          <tbody>${bodyRows}</tbody>
+        </table>
+      </div>
+      <div style="display:flex;gap:10px;align-items:center;margin-top:16px">
+        <button id="accSave" class="btn-primary" ${ACCESS_STATE.saving ? 'disabled' : ''}>${ACCESS_STATE.saving ? 'Saving…' : 'Save changes'}</button>
+        <button id="accReset" class="btn-ghost">Reset</button>
+        <span style="color:var(--text3);font-size:12px">${esc(ACCESS_STATE.msg || '')}</span>
+      </div>
+      <p style="color:var(--text3);font-size:12px;margin-top:14px;line-height:1.5;max-width:640px">
+        Hiding a tab removes it from that role's tab bar — a display convenience while a tab is worked on. It is not a security control: the underlying data endpoints enforce their own permissions regardless. Greyed “—” cells are blocked by the tab's minimum role and can't be enabled here.
+      </p>
+    </div>`;
+
+  host.querySelectorAll('.acc-chk').forEach(chk => chk.onchange = () => {
+    const { role, view } = chk.dataset;
+    draft[role] ??= {};
+    if (chk.checked) delete draft[role][view];   // visible → no override stored
+    else draft[role][view] = false;              // hidden
+    if (!Object.keys(draft[role]).length) delete draft[role];
+    ACCESS_STATE.msg = '';
+  });
+  $('accReset').onclick = () => { ACCESS_STATE.draft = JSON.parse(JSON.stringify(TAB_VIS || {})); ACCESS_STATE.msg = ''; renderAccess(); };
+  $('accSave').onclick = async () => {
+    ACCESS_STATE.saving = true; renderAccess();
+    try {
+      const r = await apiFetch('/api/settings/tab-visibility', { method: 'PUT', body: JSON.stringify({ visibility: draft }) });
+      if (r.ok) {
+        const j = await r.json();
+        TAB_VIS = (j && j.visibility) || {};
+        ACCESS_STATE.draft = JSON.parse(JSON.stringify(TAB_VIS));
+        ACCESS_STATE.msg = 'Saved. Other users see the change on their next load.';
+        applyRoleVisibility();   // no-op for the admin's own bar, but keeps state consistent
+      } else {
+        ACCESS_STATE.msg = 'Save failed — check your connection and try again.';
+      }
+    } catch {
+      ACCESS_STATE.msg = 'Network error — try again.';
+    } finally {
+      ACCESS_STATE.saving = false; renderAccess();
+    }
+  };
 }
 
 // ─── Bonus view ─────────────────────────────────────────────────
@@ -5648,6 +5740,17 @@ async function init() {
 // ════════════════════════════════════════════════════════════════════════
 const AUTH = { user: null };
 const ROLE_RANK = { agent: 0, tm: 1, campaign_lead: 2, exco: 3, admin: 4 };
+// Admin-editable per-role tab hiding (Access tab). Shape: { role: { view: false } }.
+// Only ever HIDES a tab the role's min-role already permits (never grants), and
+// never applies to admins. Loaded from /api/settings/tab-visibility at bootstrap.
+let TAB_VIS = {};
+const TAB_VIS_EDIT_ROLES = ['agent', 'tm', 'campaign_lead', 'exco'];
+async function loadTabVisibility() {
+  try {
+    const r = await apiFetch('/api/settings/tab-visibility');
+    if (r.ok) { const j = await r.json(); TAB_VIS = (j && j.visibility) || {}; }
+  } catch { /* keep default: everything visible */ }
+}
 // Admin + EXCO both see all campaign data; only admin reaches settings.
 const isExec = (u) => u && (u.role === 'admin' || u.role === 'exco');
 // Who may see churn: admin/exco (org-wide) plus a campaign lead (their own
@@ -5723,10 +5826,18 @@ function hideLoginGate() {
 }
 
 function applyRoleVisibility() {
-  const rank = AUTH.user ? (ROLE_RANK[AUTH.user.role] ?? 0) : -1;
+  const role = AUTH.user ? AUTH.user.role : null;
+  const rank = role ? (ROLE_RANK[role] ?? 0) : -1;
+  // Admins are never subject to the hide-matrix (so they can always reach the
+  // Access tab to change it); everyone else has their permitted tabs optionally
+  // hidden by the admin-set matrix. The matrix can only subtract from what
+  // min-role already allows — it never reveals a tab the role can't otherwise see.
+  const hidden = (role && role !== 'admin' && TAB_VIS[role]) ? TAB_VIS[role] : null;
   document.querySelectorAll('[data-min-role]').forEach(el => {
     const need = ROLE_RANK[el.dataset.minRole] ?? 0;
-    el.style.display = rank >= need ? '' : 'none';
+    let show = rank >= need;
+    if (show && hidden && el.dataset.view && hidden[el.dataset.view] === false) show = false;
+    el.style.display = show ? '' : 'none';
   });
   // Targets editor is admin/campaign_lead only
   const targetsBtn = $('targetsBtn');
@@ -5828,6 +5939,7 @@ async function bootstrap() {
       if (user.must_change_password) { showPwChangeGate(); return; }
       hideLoginGate();
       renderUserChip();
+      await loadTabVisibility();   // admin-set per-role tab hiding, before we gate the tabs
       applyRoleVisibility();
       await init();
       return;
