@@ -237,6 +237,19 @@ test('shiftCampaignKeys returns every campaign a split shift touches', () => {
   assert.ok(split.includes('HYVE') && split.includes('Gousto'), `got ${split}`);
   assert.deepEqual(shiftCampaignKeys('Office Admin'), []);
 });
+test('HYVE event shifts (Mining Indaba / CWIEME) map to the HYVE campaign', () => {
+  for (const s of [
+    'Mining Indaba', 'Mining Indaba Day', 'MiningIndaba', 'Mining-Indaba',
+    'Investing in African Mining Indaba', 'Mining Indaba Support',
+  ]) assert.equal(shiftToCampaign(s), 'HYVE', `mining indaba variant: "${s}"`);
+  for (const s of [
+    'CWIEME', 'CWIEME Berlin', 'CWIEME Chicago', 'CWIEME Connect',
+    'C-WIEME', 'C WIEME Evening',
+  ]) assert.equal(shiftToCampaign(s), 'HYVE', `cwieme variant: "${s}"`);
+  // Plain "HYVE" still maps, and unrelated shifts are untouched.
+  assert.equal(shiftToCampaign('HYVE Day Shift'), 'HYVE');
+  assert.equal(shiftToCampaign('MedExpress Day Shift'), 'Medexpress');
+});
 
 // ── buildEmpIdToUid (Phase 8c: resolve terminated/duplicate People IDs) ────────
 const { buildEmpIdToUid } = globalThis.BoomerangNames;
