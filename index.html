@@ -2372,6 +2372,11 @@ function overlayAttendanceHeadcount() {
   }
   for (const c in (STATE.teamWeek || {})) {
     for (const t in STATE.teamWeek[c]) {
+      // The "— Unassigned" catch-all is skipped: the shrinkage feed drops the
+      // unmatched People IDs that make up most of it, so its headcount from here
+      // would undercount (or be 0 → blank "—"). applyShiftBillable sets its HC
+      // instead, from the distinct people it actually seeded rows for.
+      if (t === UNASSIGNED_TEAM) continue;
       for (const wk in STATE.teamWeek[c][t]) {
         const hc = STATE.shrinkageTeamWeek?.[c + '||' + t]?.[wk]?.headcount || 0;
         if (hc > 0) STATE.teamWeek[c][t][wk].fte = hc;
@@ -2550,6 +2555,27 @@ function applyShiftBillable() {
   for (const uk in (b.byUnmatched || {})) {
     const j = uk.indexOf('||'); const camp = uk.slice(0, j), empId = uk.slice(j + 2);
     seedUnassigned(camp, 'att:' + empId, b.unmatchedNames?.[empId] || ('Unmatched · ' + empId), b.byUnmatched[uk], true);
+  }
+  // Headcount for the Unassigned catch-all: its people aren't in the metrics
+  // roster (or resolve cross-campaign), so shrinkage/metrics gave it no HC and it
+  // rendered real hours next to a blank "—". Its headcount IS knowable — the
+  // distinct people we just seeded rows for — so set the team-week fte to that
+  // count, and fte=1 on each seeded row, so HC reads a number, not "—". (overlay
+  // AttendanceHeadcount skips this team, so it won't clobber these with a partial
+  // shrinkage count.)
+  for (const camp in STATE.agentWeek) {
+    const team = STATE.agentWeek[camp][U];
+    if (!team) continue;
+    const teamBk = STATE.teamWeek[camp]?.[U];
+    const perWeek = {};
+    for (const key in team) {
+      for (const wk in team[key]) {
+        if (!(team[key][wk]?.billable > 0)) continue;
+        team[key][wk].fte ??= 1;
+        (perWeek[wk] ??= new Set()).add(key);
+      }
+    }
+    if (teamBk) for (const wk in perWeek) if (teamBk[wk]) teamBk[wk].fte = perWeek[wk].size;
   }
   for (const tk in b.byTeamWeek) {
     const i = tk.indexOf('||'); const camp = tk.slice(0, i), team = tk.slice(i + 2);

@@ -384,7 +384,12 @@
   // won't match an admin's.
   const SHIFT_PATTERNS = [
     [/beer\s*52/i,                  'BEER52'],
-    [/\bhyve\b/i,                   'HYVE'],
+    // HYVE runs live trade-show events; agents' shifts are labelled with the
+    // event name, not "HYVE". Map every spelling variant of those events to the
+    // HYVE campaign: "Mining Indaba" (incl. no-space / hyphen / "Investing in
+    // African Mining Indaba") and "CWIEME" (incl. "CWIEME Berlin/Chicago",
+    // "CWIEME Connect", and the loose "C-WIEME" hyphenation).
+    [/\bhyve\b|mining[\s-]*indaba|\bc[\s-]*wieme\b/i, 'HYVE'],
     [/bb\s*marro|\bmarro\b/i,       'BUTTERNUTBOX'],
     [/butternut|\bbbox\b/i,         'BUTTERNUTBOX'],
     [/gousto/i,                     'Gousto'],
