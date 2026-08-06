@@ -1463,9 +1463,9 @@ let STATE = {
   shrinkageTeamWeek: null,    // {[camp||team]:{[week]:{...}}}
   shrinkageAvailable: false,
   // Churn (from EmployeeProfile full history; aggregate across client campaigns)
-  churnRows: null,        // extractChurnRows() output: {join,exit,reason,status,contractType,campaignSlug}[]
-  churnByMonth: null,     // computeMonthlyChurn(): per-month {month,leavers,avgHC,churn_pct} for the trend
-  churnRolling: null,     // headline: latest month's rolling-12 result (churn_annual_pct + tenure split)
+  churnRows: null,          // extractChurnRows() output: {join,exit,reason,status,contractType,campaignSlug}[]
+  churnByMonth: null,       // computeMonthlyChurn(): per-month {month,leavers,avgHC,churn_pct} for the trend
+  churnRollingByMonth: null,// computeRolling12Churn() per month; the tile picks the month of the SELECTED period end
   granularity: 'week',   // 'day' | 'week' | 'month' — re-aggregation grain
   rangeBounds: null,     // {from,to} YYYY-MM-DD → custom day range (one combined bucket)
   weeks: [],             // period labels for the current granularity
@@ -4225,14 +4225,15 @@ function renderSummary() {
     // the absence single-digit bands. '—' (never 0.0%) when we couldn't compute it;
     // '—' + "insufficient history" when the 12-month window predates our data.
     ...(isExec(AUTH.user) ? (() => {
-      const cr = STATE.churnRolling;
+      const cr = currentChurnRolling();   // 12 months ending at the SELECTED period, not today
       const ok = cr && !cr.incomplete_window;
       const insufficient = cr && cr.incomplete_window;
       const pct = (v) => (ok && v != null) ? v.toFixed(1) + '%' : '—';
       const sub = (txt) => insufficient ? { dir:'', txt:'insufficient history' } : { dir:'', txt };
+      const winTo = cr && cr.windowEnd ? cr.windowEnd.toLocaleDateString('en-GB', { month: 'short', year: 'numeric', timeZone: 'UTC' }) : '';
       return [
         hero(ok ? band(cr.churn_annual_pct, 20, 30) : 'info', 'Churn (12mo)', pct(cr && cr.churn_annual_pct),
-          null, sub('rolling annual · target ≤20%')),
+          null, sub(`rolling 12mo to ${winTo} · ≤20%`)),
         hero(ok ? band(cr.churn_early_pct, 20, 30) : 'info', 'Early (<3mo)', pct(cr && cr.churn_early_pct),
           null, insufficient ? { dir:'', txt:'insufficient history' }
             : { dir:'', txt: (cr && cr.early_share_of_leavers_pct != null) ? `${Math.round(cr.early_share_of_leavers_pct)}% of all leavers` : 'component of 12mo churn' }),
@@ -5293,8 +5294,25 @@ function recentMonths(n) {
 // _campaign_slug already excludes internal/admin staff; extractChurnRows drops the
 // rest). The headline tile is the rolling-12 figure for the latest month; the
 // trend uses the per-month churn_pct. Per-campaign is a documented follow-on.
+// The month ('YYYY-MM') the churn tiles roll to: the month containing the END of
+// the selected period / custom range — i.e. "12 months to date" relative to
+// whatever the user picked, not always today.
+function churnMonthForSelection() {
+  const r = periodDateRange(STATE.selectedWeek, STATE.granularity);
+  const end = (r && r.end) || new Date();
+  return `${end.getUTCFullYear()}-${String(end.getUTCMonth() + 1).padStart(2, '0')}`;
+}
+// The rolling-12 result whose window ends at the selected period's month (falls
+// back to the latest computed month if the selection is outside the span).
+function currentChurnRolling() {
+  const arr = STATE.churnRollingByMonth || [];
+  if (!arr.length) return null;
+  const ym = churnMonthForSelection();
+  return arr.find(r => r.month === ym) || arr[arr.length - 1];
+}
+
 function buildChurn() {
-  STATE.churnRows = []; STATE.churnByMonth = []; STATE.churnRolling = null;
+  STATE.churnRows = []; STATE.churnByMonth = []; STATE.churnRollingByMonth = [];
   // Churn needs the FULL EmployeeProfile history — leavers are its numerator — and
   // is an org-wide leadership metric. Scoped users (campaign_lead / tm) receive a
   // name-filtered EmployeeProfile that keeps only their CURRENT agents, which
@@ -5313,10 +5331,11 @@ function buildChurn() {
     let earliest = null;
     for (const r of withExit) if (!earliest || +r.exit < +earliest) earliest = r.exit;
     console.info(`[churn] ${emp.length} EmployeeProfile rows → ${STATE.churnRows.length} churnRows (in a campaign, with a join date) · ${withExit.length} have an exit date · earliest exit ${earliest ? earliest.toISOString().slice(0, 10) : '(none)'}`);
-    const months = recentMonths(13);
+    // Compute over a span of recent months so the tiles can roll to the selected
+    // period's month (not just today) and the trend has history behind it.
+    const months = recentMonths(18);
     STATE.churnByMonth = computeMonthlyChurn(STATE.churnRows, months);
-    const rolling = computeRolling12Churn(STATE.churnRows, months);
-    STATE.churnRolling = rolling[rolling.length - 1] || null;  // latest month's trailing-12 window = the headline
+    STATE.churnRollingByMonth = computeRolling12Churn(STATE.churnRows, months);
   } catch (e) {
     console.warn('[churn] compute failed:', e.message);
   }
