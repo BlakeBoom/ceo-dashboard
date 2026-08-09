@@ -32,6 +32,24 @@ const visibilitySchema = z.object(
   ]))
 ).partial();
 
+// Ensure the app_settings table exists. Migrations here are applied manually
+// (`npm run migrate`) rather than on deploy, so a fresh environment can hit these
+// routes before 0014 has run. This mirrors 0014_app_settings.sql exactly and is
+// idempotent (CREATE TABLE IF NOT EXISTS), so a write never 500s on a missing
+// table — the migration stays the canonical schema; this is just belt-and-braces.
+let _tableEnsured = false;
+async function ensureTable() {
+  if (_tableEnsured) return;
+  await query(`
+    CREATE TABLE IF NOT EXISTS app_settings (
+      key        TEXT PRIMARY KEY,
+      value      JSONB NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_by INT REFERENCES users(id) ON DELETE SET NULL
+    )`);
+  _tableEnsured = true;
+}
+
 async function readSetting(key) {
   try {
     const { rows } = await query(`SELECT value FROM app_settings WHERE key = $1`, [key]);
@@ -48,6 +66,7 @@ async function readSetting(key) {
 // to filter their tab bar, and it carries no sensitive data (just tab names).
 router.get('/tab-visibility', requireRole('agent'), async (req, res) => {
   try {
+    await ensureTable();
     const value = await readSetting(TAB_VISIBILITY_KEY);
     res.json({ visibility: value || {} });
   } catch (err) {
@@ -70,11 +89,12 @@ router.put('/tab-visibility', requireRole('admin'), async (req, res) => {
     if (Object.keys(hidden).length) clean[role] = hidden;
   }
   try {
+    await ensureTable();
     await query(
       `INSERT INTO app_settings (key, value, updated_by, updated_at)
        VALUES ($1, $2, $3, NOW())
        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_by = EXCLUDED.updated_by, updated_at = NOW()`,
-      [TAB_VISIBILITY_KEY, JSON.stringify(clean), req.user.id]
+      [TAB_VISIBILITY_KEY, clean, req.user.id]
     );
     await query(
       `INSERT INTO audit_log (user_id, action, metadata) VALUES ($1, 'settings.tab_visibility', $2)`,
