@@ -4161,7 +4161,10 @@ const CAMPADMIN_STATE = {
   campaigns: [], rules: [], activeRules: [],
   showCreate: false, editingCampId: null,
   expandedCampId: null,
-  editingRuleId: null,
+  expandedPanel: 'rules',  // 'rules' | 'kpis' | 'workgroups'
+  editingRuleId: null, editingKpiId: null,
+  kpisByCamp: {},           // campId → [kpi rows]
+  workgroupsByCamp: {},     // campId → [workgroup rows]
   testShift: '', testResult: null, testBusy: false,
   busy: false,
 };
@@ -4189,10 +4192,12 @@ async function createCampaign() {
   const slug = $('nc_slug')?.value?.trim();
   const name = $('nc_name')?.value?.trim();
   const shift_key = $('nc_shiftkey')?.value?.trim() || null;
+  const display_name = $('nc_display')?.value?.trim() || null;
+  const section = $('nc_section')?.value?.trim() || null;
   if (!slug || !name) { alert('Slug and name are required.'); return; }
-  const r = await apiFetch('/api/campaigns', { method: 'POST', body: JSON.stringify({ slug, name, shift_key }) });
+  const r = await apiFetch('/api/campaigns', { method: 'POST', body: JSON.stringify({ slug, name, shift_key, display_name, section }) });
   const text = await r.text(); let data; try { data = JSON.parse(text); } catch { data = {}; }
-  if (r.ok) { CAMPADMIN_STATE.showCreate = false; await loadCampAdmin(); }
+  if (r.ok) { CAMPADMIN_STATE.showCreate = false; await loadCampAdmin(); await primeCampaignConfig(); }
   else alert('Create failed: ' + (data.error === 'slug_or_shift_key_exists' ? 'slug or shift key already exists' : (data.error || r.status)));
 }
 
@@ -4202,15 +4207,90 @@ async function saveCampaignEdit(id, rowEl) {
   const body = {};
   const name = (get('name') || '').trim();
   const sk = (get('shift_key') || '').trim();
+  const dn = (get('display_name') || '').trim();
+  const sec = (get('section') || '').trim();
   if (name && name !== orig.name) body.name = name;
   if (sk !== (orig.shift_key || '')) body.shift_key = sk || null;
+  if (dn !== (orig.display_name || '')) body.display_name = dn || null;
+  if (sec !== (orig.section || '')) body.section = sec || null;
   if (!Object.keys(body).length) { CAMPADMIN_STATE.editingCampId = null; renderCampAdmin(); return; }
   const r = await apiFetch(`/api/campaigns/${id}`, { method: 'PATCH', body: JSON.stringify(body) });
-  if (r.ok) { CAMPADMIN_STATE.editingCampId = null; await loadCampAdmin(); }
+  if (r.ok) { CAMPADMIN_STATE.editingCampId = null; await loadCampAdmin(); await primeCampaignConfig(); }
   else {
     const text = await r.text(); let data; try { data = JSON.parse(text); } catch { data = {}; }
     alert('Save failed: ' + (data.error || text.slice(0, 160)));
   }
+}
+
+async function loadCampKpis(campId) {
+  const r = await apiFetch(`/api/campaigns/${campId}/kpis`);
+  if (r.ok) { CAMPADMIN_STATE.kpisByCamp[campId] = (await r.json()).kpis || []; renderCampAdmin(); }
+}
+async function loadCampWorkgroups(campId) {
+  const r = await apiFetch(`/api/campaigns/${campId}/workgroups`);
+  if (r.ok) { CAMPADMIN_STATE.workgroupsByCamp[campId] = (await r.json()).workgroups || []; renderCampAdmin(); }
+}
+
+async function createKpi(campId) {
+  const kpi_key = $(`nk_key_${campId}`)?.value?.trim();
+  const label = $(`nk_label_${campId}`)?.value?.trim();
+  const direction = $(`nk_dir_${campId}`)?.value || 'higher';
+  const targetStr = $(`nk_tgt_${campId}`)?.value?.trim();
+  const priorityStr = $(`nk_pri_${campId}`)?.value?.trim();
+  const is_tile = $(`nk_tile_${campId}`)?.checked !== false;
+  if (!kpi_key || !label) { alert('KPI key and label are required.'); return; }
+  const body = { kpi_key, label, direction, is_tile };
+  if (targetStr !== '') body.target = Number(targetStr);
+  if (priorityStr !== '') body.priority = parseInt(priorityStr, 10);
+  const r = await apiFetch(`/api/campaigns/${campId}/kpis`, { method: 'POST', body: JSON.stringify(body) });
+  const text = await r.text(); let data; try { data = JSON.parse(text); } catch { data = {}; }
+  if (r.ok) { await loadCampKpis(campId); await primeCampaignConfig(); }
+  else alert('Add KPI failed: ' + (data.error === 'kpi_key_exists_for_campaign' ? 'this KPI key is already on this campaign' : (data.detail || data.error || text.slice(0, 160))));
+}
+async function saveKpiEdit(id, rowEl, campId) {
+  const get = (f) => rowEl.querySelector(`[data-kf="${f}"]`);
+  const orig = (CAMPADMIN_STATE.kpisByCamp[campId] || []).find(k => k.id === id) || {};
+  const body = {};
+  const label = (get('label')?.value || '').trim();
+  const direction = get('direction')?.value;
+  const targetStr = (get('target')?.value || '').trim();
+  const priStr = (get('priority')?.value || '').trim();
+  const is_tile = get('is_tile') ? get('is_tile').checked : orig.is_tile;
+  if (label && label !== orig.label) body.label = label;
+  if (direction && direction !== orig.direction) body.direction = direction;
+  const newTarget = targetStr === '' ? null : Number(targetStr);
+  if (newTarget !== (orig.target == null ? null : Number(orig.target))) body.target = newTarget;
+  const newPri = priStr === '' ? orig.priority : parseInt(priStr, 10);
+  if (Number.isFinite(newPri) && newPri !== orig.priority) body.priority = newPri;
+  if (is_tile !== orig.is_tile) body.is_tile = is_tile;
+  if (!Object.keys(body).length) { CAMPADMIN_STATE.editingKpiId = null; renderCampAdmin(); return; }
+  const r = await apiFetch(`/api/campaigns/kpis/${id}`, { method: 'PATCH', body: JSON.stringify(body) });
+  const text = await r.text(); let data; try { data = JSON.parse(text); } catch { data = {}; }
+  if (r.ok) { CAMPADMIN_STATE.editingKpiId = null; await loadCampKpis(campId); await primeCampaignConfig(); }
+  else alert('Save KPI failed: ' + (data.detail || data.error || text.slice(0, 160)));
+}
+async function deleteKpi(id, campId, label) {
+  if (!confirm(`Remove KPI "${label}"? Tiles rebuild on next load.`)) return;
+  const r = await apiFetch(`/api/campaigns/kpis/${id}`, { method: 'DELETE' });
+  if (r.ok) { await loadCampKpis(campId); await primeCampaignConfig(); } else alert('Delete failed.');
+}
+async function toggleKpiActive(id, campId, active) {
+  const r = await apiFetch(`/api/campaigns/kpis/${id}`, { method: 'PATCH', body: JSON.stringify({ active }) });
+  if (r.ok) { await loadCampKpis(campId); await primeCampaignConfig(); } else alert('Update failed.');
+}
+
+async function createWorkgroup(campId) {
+  const label = $(`nw_label_${campId}`)?.value?.trim();
+  if (!label) { alert('Workgroup label required.'); return; }
+  const r = await apiFetch(`/api/campaigns/${campId}/workgroups`, { method: 'POST', body: JSON.stringify({ label }) });
+  const text = await r.text(); let data; try { data = JSON.parse(text); } catch { data = {}; }
+  if (r.ok) { await loadCampWorkgroups(campId); await primeCampaignConfig(); }
+  else alert('Add workgroup failed: ' + (data.error === 'workgroup_label_exists' ? 'that workgroup label is already mapped to a campaign' : (data.detail || data.error || text.slice(0, 160))));
+}
+async function deleteWorkgroup(id, campId, label) {
+  if (!confirm(`Remove workgroup "${label}"? Shifts under this workgroup will stop attributing to this campaign.`)) return;
+  const r = await apiFetch(`/api/campaigns/workgroups/${id}`, { method: 'DELETE' });
+  if (r.ok) { await loadCampWorkgroups(campId); await primeCampaignConfig(); } else alert('Delete failed.');
 }
 
 async function setCampaignActive(id, active, name) {
@@ -4299,88 +4379,193 @@ function renderCampAdmin() {
         : `<div class="agent-tbl-sub" style="margin-top:8px;color:#b45309">⚠ <b>${esc(testR.shift)}</b> matched no rule.</div>`) : ''}
     </div>`;
 
+  const dirOpts = ['higher','lower','none'];
+  const _dirLabel = { higher: '↑ higher', lower: '↓ lower', none: '— none' };
+  const COLSPAN = 8;
+
   const campRows = S.campaigns.map(c => {
     const isEditing = S.editingCampId === c.id;
     const isExpanded = S.expandedCampId === c.id;
     const rc = rulesByCamp[c.id] || [];
     const activeRuleCount = rc.filter(r => r.active).length;
+    const kpiRows = S.kpisByCamp[c.id] || null;
+    const wgRows  = S.workgroupsByCamp[c.id] || null;
+
     const nameCell = isEditing
-      ? `<td><input data-cf="name" class="modal-month" value="${esc(c.name)}" style="font-size:12px;padding:4px 6px;width:160px"></td>`
+      ? `<td><input data-cf="name" class="modal-month" value="${esc(c.name)}" style="font-size:12px;padding:4px 6px;width:150px"></td>`
       : `<td class="name">${esc(c.name)}</td>`;
+    const displayCell = isEditing
+      ? `<td><input data-cf="display_name" class="modal-month" value="${esc(c.display_name||'')}" placeholder="—" style="font-size:11px;padding:4px 6px;width:130px"></td>`
+      : `<td class="dim">${esc(c.display_name||'—')}</td>`;
+    const sectionCell = isEditing
+      ? `<td><input data-cf="section" class="modal-month" value="${esc(c.section||'')}" placeholder="—" style="font-size:11px;padding:4px 6px;width:120px"></td>`
+      : `<td class="dim">${esc(c.section||'—')}</td>`;
     const keyCell = isEditing
-      ? `<td><input data-cf="shift_key" class="modal-month" value="${esc(c.shift_key||'')}" placeholder="—" style="font-size:11px;padding:4px 6px;width:120px"></td>`
+      ? `<td><input data-cf="shift_key" class="modal-month" value="${esc(c.shift_key||'')}" placeholder="—" style="font-size:11px;padding:4px 6px;width:110px"></td>`
       : `<td class="mono dim">${esc(c.shift_key||'—')}</td>`;
+    const configCell = `<td class="numeric dim" style="font-size:10.5px;line-height:1.4">
+      ${activeRuleCount} rule${activeRuleCount===1?'':'s'}<br>
+      ${c.kpi_count||0} KPI${(c.kpi_count||0)===1?'':'s'}<br>
+      ${c.workgroup_count||0} workgroup${(c.workgroup_count||0)===1?'':'s'}
+    </td>`;
     const actions = isEditing
       ? `<button class="row-btn save" data-cact="save" data-id="${c.id}">Save</button>
          <button class="row-btn" data-cact="cancelcamp">Cancel</button>`
       : `<button class="row-btn" data-cact="editcamp" data-id="${c.id}">Edit</button>
-         <button class="row-btn" data-cact="expand" data-id="${c.id}">${isExpanded?'Hide rules':`Rules (${rc.length})`}</button>
+         <button class="row-btn" data-cact="expand" data-id="${c.id}">${isExpanded?'Hide':'Configure…'}</button>
          ${c.active
            ? `<button class="row-btn danger" data-cact="deact" data-id="${c.id}" data-name="${esc(c.name)}">Deactivate</button>`
            : `<button class="row-btn" data-cact="react" data-id="${c.id}" data-name="${esc(c.name)}">Activate</button>`}`;
     const mainRow = `<tr data-camp="${c.id}">
-      ${nameCell}
+      ${nameCell}${displayCell}${sectionCell}
       <td class="mono dim">${esc(c.slug)}</td>
       ${keyCell}
-      <td class="numeric dim">${activeRuleCount}${rc.length !== activeRuleCount?` <span class="dim">of ${rc.length}</span>`:''}</td>
+      ${configCell}
       <td>${c.active ? '<span class="chip ok">active</span>' : '<span class="chip">inactive</span>'}</td>
       <td class="numeric" style="white-space:nowrap">${actions}</td>
     </tr>`;
     if (!isExpanded) return mainRow;
 
-    const ruleRows = rc.map(r => {
-      const isRE = S.editingRuleId === r.id;
-      if (isRE) return `<tr data-rule="${r.id}">
-        <td><input data-rf="pattern" class="modal-month" value="${esc(r.pattern)}" style="font-size:11px;padding:4px 6px;width:200px"></td>
-        <td><select data-rf="match_mode" class="modal-month" style="font-size:11px;padding:4px 6px">${modeOpts.map(m=>`<option value="${m}"${m===r.match_mode?' selected':''}>${_matchModeLabel[m]}</option>`).join('')}</select></td>
-        <td><input data-rf="priority" class="modal-month" type="number" value="${r.priority}" style="font-size:11px;padding:4px 6px;width:70px"></td>
-        <td>${r.active?'<span class="chip ok">on</span>':'<span class="chip">off</span>'}</td>
-        <td class="numeric" style="white-space:nowrap">
-          <button class="row-btn save" data-ract="saverule" data-id="${r.id}">Save</button>
-          <button class="row-btn" data-ract="cancelrule">Cancel</button>
-        </td></tr>`;
-      return `<tr data-rule="${r.id}">
-        <td class="mono">${esc(r.pattern)}</td>
-        <td class="dim">${_matchModeLabel[r.match_mode]||r.match_mode}</td>
-        <td class="numeric dim">${r.priority}</td>
-        <td>${r.active?'<span class="chip ok">on</span>':'<span class="chip">off</span>'}</td>
-        <td class="numeric" style="white-space:nowrap">
-          <button class="row-btn" data-ract="editrule" data-id="${r.id}">Edit</button>
-          <button class="row-btn" data-ract="toggle" data-id="${r.id}" data-active="${r.active?'0':'1'}">${r.active?'Disable':'Enable'}</button>
-          <button class="row-btn danger" data-ract="delete" data-id="${r.id}" data-pat="${esc(r.pattern)}">Delete</button>
-        </td></tr>`;
-    }).join('');
+    const active = S.expandedPanel || 'rules';
+    const panelTabs = `<div style="display:flex;gap:6px;margin-bottom:10px;border-bottom:1px solid var(--border-light);padding-bottom:8px">
+      ${[['rules', `Shift rules (${rc.length})`],
+         ['kpis',  `KPI tiles / targets (${c.kpi_count||0})`],
+         ['workgroups', `Workgroups (${c.workgroup_count||0})`]
+        ].map(([k,l]) => `<button class="row-btn${active===k?' save':''}" data-cact="panel" data-id="${c.id}" data-panel="${k}" style="${active===k?'font-weight:600':''}">${l}</button>`).join('')}
+    </div>`;
 
-    const rulesPanel = `<tr class="camp-rules-row"><td colspan="6" style="background:var(--bg-2);padding:14px 18px">
-      <div class="users-panel-h" style="margin-bottom:8px">Shift rules for ${esc(c.name)} — lower priority wins</div>
-      <table class="agent-tbl" style="width:100%;background:var(--card)">
-        <thead><tr><th>Pattern</th><th>Mode</th><th class="numeric">Priority</th><th>Status</th><th></th></tr></thead>
-        <tbody>${ruleRows || `<tr><td colspan="5" class="flag-empty" style="padding:16px">No rules yet — add one below.</td></tr>`}</tbody>
-      </table>
-      <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-        <input id="nr_pat_${c.id}" class="modal-month" placeholder="Pattern (e.g. mining or ^hyve\\b)" style="font-size:12px;padding:7px 10px;width:260px">
-        <select id="nr_mode_${c.id}" class="modal-month" style="font-size:12px;padding:7px 10px">
-          ${modeOpts.map(m=>`<option value="${m}">${_matchModeLabel[m]}</option>`).join('')}
-        </select>
-        <input id="nr_pri_${c.id}" class="modal-month" type="number" placeholder="Priority (default 100)" value="100" style="font-size:12px;padding:7px 10px;width:150px">
-        <button class="btn-primary" data-cact="addrule" data-id="${c.id}">+ Add rule</button>
-      </div>
-      <div class="agent-tbl-sub" style="margin-top:6px"><b>contains</b> = case-insensitive substring · <b>whole word</b> = adds \\b boundaries · <b>regex</b> = raw JS regex (i flag)</div>
+    let panelBody = '';
+    if (active === 'rules') {
+      const ruleTblRows = rc.map(r => {
+        const isRE = S.editingRuleId === r.id;
+        if (isRE) return `<tr data-rule="${r.id}">
+          <td><input data-rf="pattern" class="modal-month" value="${esc(r.pattern)}" style="font-size:11px;padding:4px 6px;width:200px"></td>
+          <td><select data-rf="match_mode" class="modal-month" style="font-size:11px;padding:4px 6px">${modeOpts.map(m=>`<option value="${m}"${m===r.match_mode?' selected':''}>${_matchModeLabel[m]}</option>`).join('')}</select></td>
+          <td><input data-rf="priority" class="modal-month" type="number" value="${r.priority}" style="font-size:11px;padding:4px 6px;width:70px"></td>
+          <td>${r.active?'<span class="chip ok">on</span>':'<span class="chip">off</span>'}</td>
+          <td class="numeric" style="white-space:nowrap">
+            <button class="row-btn save" data-ract="saverule" data-id="${r.id}">Save</button>
+            <button class="row-btn" data-ract="cancelrule">Cancel</button>
+          </td></tr>`;
+        return `<tr data-rule="${r.id}">
+          <td class="mono">${esc(r.pattern)}</td>
+          <td class="dim">${_matchModeLabel[r.match_mode]||r.match_mode}</td>
+          <td class="numeric dim">${r.priority}</td>
+          <td>${r.active?'<span class="chip ok">on</span>':'<span class="chip">off</span>'}</td>
+          <td class="numeric" style="white-space:nowrap">
+            <button class="row-btn" data-ract="editrule" data-id="${r.id}">Edit</button>
+            <button class="row-btn" data-ract="toggle" data-id="${r.id}" data-active="${r.active?'0':'1'}">${r.active?'Disable':'Enable'}</button>
+            <button class="row-btn danger" data-ract="delete" data-id="${r.id}" data-pat="${esc(r.pattern)}">Delete</button>
+          </td></tr>`;
+      }).join('');
+      panelBody = `
+        <table class="agent-tbl" style="width:100%;background:var(--card)">
+          <thead><tr><th>Pattern</th><th>Mode</th><th class="numeric">Priority</th><th>Status</th><th></th></tr></thead>
+          <tbody>${ruleTblRows || `<tr><td colspan="5" class="flag-empty" style="padding:16px">No rules yet — add one below.</td></tr>`}</tbody>
+        </table>
+        <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          <input id="nr_pat_${c.id}" class="modal-month" placeholder="Pattern (e.g. mining or ^hyve\\b)" style="font-size:12px;padding:7px 10px;width:260px">
+          <select id="nr_mode_${c.id}" class="modal-month" style="font-size:12px;padding:7px 10px">
+            ${modeOpts.map(m=>`<option value="${m}">${_matchModeLabel[m]}</option>`).join('')}
+          </select>
+          <input id="nr_pri_${c.id}" class="modal-month" type="number" placeholder="Priority (default 100)" value="100" style="font-size:12px;padding:7px 10px;width:150px">
+          <button class="btn-primary" data-cact="addrule" data-id="${c.id}">+ Add rule</button>
+        </div>
+        <div class="agent-tbl-sub" style="margin-top:6px"><b>contains</b> = case-insensitive substring · <b>whole word</b> = adds \\b boundaries · <b>regex</b> = raw JS regex (i flag)</div>`;
+    } else if (active === 'kpis') {
+      if (kpiRows === null) { loadCampKpis(c.id); panelBody = `<div class="loading" style="padding:16px"><div class="spinner"></div><div>Loading KPIs…</div></div>`; }
+      else {
+        const kTblRows = kpiRows.map(k => {
+          const isKE = S.editingKpiId === k.id;
+          if (isKE) return `<tr data-kpi="${k.id}">
+            <td class="mono dim">${esc(k.kpi_key)}</td>
+            <td><input data-kf="label" class="modal-month" value="${esc(k.label)}" style="font-size:11px;padding:4px 6px;width:130px"></td>
+            <td><select data-kf="direction" class="modal-month" style="font-size:11px;padding:4px 6px">${dirOpts.map(d=>`<option value="${d}"${d===k.direction?' selected':''}>${_dirLabel[d]}</option>`).join('')}</select></td>
+            <td><input data-kf="target" class="modal-month" type="number" step="any" value="${k.target ?? ''}" placeholder="—" style="font-size:11px;padding:4px 6px;width:80px"></td>
+            <td><input data-kf="priority" class="modal-month" type="number" value="${k.priority}" style="font-size:11px;padding:4px 6px;width:70px"></td>
+            <td><label style="display:inline-flex;align-items:center;gap:4px;font-size:11px"><input data-kf="is_tile" type="checkbox" ${k.is_tile?'checked':''}>tile</label></td>
+            <td class="numeric" style="white-space:nowrap">
+              <button class="row-btn save" data-kact="savekpi" data-id="${k.id}" data-camp="${c.id}">Save</button>
+              <button class="row-btn" data-kact="cancelkpi">Cancel</button>
+            </td></tr>`;
+          return `<tr data-kpi="${k.id}">
+            <td class="mono dim">${esc(k.kpi_key)}</td>
+            <td>${esc(k.label)}</td>
+            <td class="dim">${_dirLabel[k.direction]||k.direction}</td>
+            <td class="numeric dim">${k.target ?? '—'}</td>
+            <td class="numeric dim">${k.priority}</td>
+            <td class="dim">${k.is_tile?'tile':'—'}</td>
+            <td class="numeric" style="white-space:nowrap">
+              <button class="row-btn" data-kact="editkpi" data-id="${k.id}" data-camp="${c.id}">Edit</button>
+              <button class="row-btn" data-kact="togglekpi" data-id="${k.id}" data-camp="${c.id}" data-active="${k.active?'0':'1'}">${k.active?'Disable':'Enable'}</button>
+              <button class="row-btn danger" data-kact="deletekpi" data-id="${k.id}" data-camp="${c.id}" data-label="${esc(k.label)}">Delete</button>
+            </td></tr>`;
+        }).join('');
+        panelBody = `
+          <table class="agent-tbl" style="width:100%;background:var(--card)">
+            <thead><tr><th>Key</th><th>Label</th><th>Direction</th><th class="numeric">Target</th><th class="numeric">Order</th><th>Tile</th><th></th></tr></thead>
+            <tbody>${kTblRows || `<tr><td colspan="7" class="flag-empty" style="padding:16px">No KPIs yet — add one below.</td></tr>`}</tbody>
+          </table>
+          <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+            <input id="nk_key_${c.id}" class="modal-month" placeholder="Key (e.g. csat)" style="font-size:12px;padding:7px 10px;width:130px">
+            <input id="nk_label_${c.id}" class="modal-month" placeholder="Label (e.g. CSAT)" style="font-size:12px;padding:7px 10px;width:150px">
+            <select id="nk_dir_${c.id}" class="modal-month" style="font-size:12px;padding:7px 10px">
+              ${dirOpts.map(d=>`<option value="${d}">${_dirLabel[d]}</option>`).join('')}
+            </select>
+            <input id="nk_tgt_${c.id}" class="modal-month" type="number" step="any" placeholder="Target" style="font-size:12px;padding:7px 10px;width:110px">
+            <input id="nk_pri_${c.id}" class="modal-month" type="number" placeholder="Order (100)" value="100" style="font-size:12px;padding:7px 10px;width:120px">
+            <label style="display:inline-flex;align-items:center;gap:4px;font-size:12px"><input id="nk_tile_${c.id}" type="checkbox" checked>tile</label>
+            <button class="btn-primary" data-cact="addkpi" data-id="${c.id}">+ Add KPI</button>
+          </div>
+          <div class="agent-tbl-sub" style="margin-top:6px">Uncheck <b>tile</b> to keep a KPI as a target only (used off-tile for RAG scoring). <b>Direction</b>: higher = green when higher; lower = green when lower; none = display only.</div>`;
+      }
+    } else if (active === 'workgroups') {
+      if (wgRows === null) { loadCampWorkgroups(c.id); panelBody = `<div class="loading" style="padding:16px"><div class="spinner"></div><div>Loading workgroups…</div></div>`; }
+      else {
+        const wTblRows = wgRows.map(w => `<tr data-wg="${w.id}">
+          <td>${esc(w.label)}</td>
+          <td>${w.active?'<span class="chip ok">on</span>':'<span class="chip">off</span>'}</td>
+          <td class="numeric" style="white-space:nowrap">
+            <button class="row-btn danger" data-wact="delete" data-id="${w.id}" data-camp="${c.id}" data-label="${esc(w.label)}">Remove</button>
+          </td></tr>`).join('');
+        panelBody = `
+          <table class="agent-tbl" style="width:100%;background:var(--card)">
+            <thead><tr><th>Workgroup label</th><th>Status</th><th></th></tr></thead>
+            <tbody>${wTblRows || `<tr><td colspan="3" class="flag-empty" style="padding:16px">No workgroups yet — add one below.</td></tr>`}</tbody>
+          </table>
+          <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+            <input id="nw_label_${c.id}" class="modal-month" placeholder="Exact workgroup label (e.g. Butternut Box)" style="font-size:12px;padding:7px 10px;width:280px">
+            <button class="btn-primary" data-cact="addwg" data-id="${c.id}">+ Add workgroup</button>
+          </div>
+          <div class="agent-tbl-sub" style="margin-top:6px">Workgroup labels are matched exactly (case-sensitive) against the Zoho <code>Workgroup</code> column. Each label maps to one campaign.</div>`;
+      }
+    }
+
+    const panel = `<tr class="camp-rules-row"><td colspan="${COLSPAN}" style="background:var(--bg-2);padding:14px 18px">
+      <div class="users-panel-h" style="margin-bottom:8px">Configure ${esc(c.name)}</div>
+      ${panelTabs}
+      ${panelBody}
     </td></tr>`;
-    return mainRow + rulesPanel;
+    return mainRow + panel;
   }).join('');
 
   const createPanel = S.showCreate ? `
     <div class="users-panel">
       <div class="users-panel-h">New campaign</div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-        <input id="nc_name" class="modal-month" placeholder="Display name (e.g. Acme Widgets)" style="font-size:12px;padding:7px 10px;width:220px">
+        <input id="nc_name" class="modal-month" placeholder="Name (e.g. Acme Widgets)" style="font-size:12px;padding:7px 10px;width:200px">
         <input id="nc_slug" class="modal-month" placeholder="Slug (lowercase, e.g. acme-widgets)" style="font-size:12px;padding:7px 10px;width:220px">
-        <input id="nc_shiftkey" class="modal-month" placeholder="Shift key (e.g. ACME) — optional" style="font-size:12px;padding:7px 10px;width:220px">
+        <input id="nc_shiftkey" class="modal-month" placeholder="Shift key (e.g. ACME)" style="font-size:12px;padding:7px 10px;width:180px">
+        <input id="nc_display" class="modal-month" placeholder="Display (e.g. ACME WIDGETS)" style="font-size:12px;padding:7px 10px;width:200px">
+        <select id="nc_section" class="modal-month" style="font-size:12px;padding:7px 10px">
+          <option value="">— section —</option>
+          <option value="Customer Services">Customer Services</option>
+          <option value="Sales">Sales</option>
+        </select>
         <button id="nc_save" class="btn-primary">Create</button>
         <button id="nc_cancel" class="btn-ghost">Cancel</button>
       </div>
-      <div class="agent-tbl-sub" style="margin-top:6px">The <b>shift key</b> is the identifier the resolver returns for this campaign; leave blank for back-office campaigns that don't appear in Zoho shifts. Add shift rules from the campaign's Rules panel after creating.</div>
+      <div class="agent-tbl-sub" style="margin-top:6px">The <b>shift key</b> is the identifier the resolver returns for this campaign; leave blank for back-office campaigns that don't appear in Zoho shifts. <b>Display</b> is the short uppercase label shown on campaign cards. Add shift rules, KPI tiles and workgroups from the campaign's <i>Configure</i> panel after creating.</div>
     </div>` : '';
 
   $('campadminView').innerHTML = `
@@ -4398,8 +4583,8 @@ function renderCampAdmin() {
     ${S.loading ? '<div class="loading"><div class="spinner"></div><div>Loading campaigns…</div></div>' :
       `<div class="agent-tbl-wrap" style="border-radius:0 0 12px 12px;border-top:none">
         <table class="agent-tbl">
-          <thead><tr><th>Name</th><th>Slug</th><th>Shift key</th><th class="numeric">Rules</th><th>Status</th><th></th></tr></thead>
-          <tbody>${campRows || `<tr><td colspan="6" class="flag-empty" style="padding:24px">No campaigns yet.</td></tr>`}</tbody>
+          <thead><tr><th>Name</th><th>Display</th><th>Section</th><th>Slug</th><th>Shift key</th><th class="numeric">Config</th><th>Status</th><th></th></tr></thead>
+          <tbody>${campRows || `<tr><td colspan="${COLSPAN}" class="flag-empty" style="padding:24px">No campaigns yet.</td></tr>`}</tbody>
         </table>
       </div>`}
     ${testPanel}
@@ -4421,10 +4606,13 @@ function renderCampAdmin() {
     if (act === 'editcamp')   { CAMPADMIN_STATE.editingCampId = id; renderCampAdmin(); }
     else if (act === 'cancelcamp') { CAMPADMIN_STATE.editingCampId = null; renderCampAdmin(); }
     else if (act === 'save')  saveCampaignEdit(id, b.closest('tr'));
-    else if (act === 'expand'){ CAMPADMIN_STATE.expandedCampId = CAMPADMIN_STATE.expandedCampId === id ? null : id; renderCampAdmin(); }
+    else if (act === 'expand'){ CAMPADMIN_STATE.expandedCampId = CAMPADMIN_STATE.expandedCampId === id ? null : id; CAMPADMIN_STATE.expandedPanel = 'rules'; renderCampAdmin(); }
     else if (act === 'deact') setCampaignActive(id, false, b.dataset.name);
     else if (act === 'react') setCampaignActive(id, true, b.dataset.name);
     else if (act === 'addrule') createShiftRule(id);
+    else if (act === 'addkpi')  createKpi(id);
+    else if (act === 'addwg')   createWorkgroup(id);
+    else if (act === 'panel')   { CAMPADMIN_STATE.expandedPanel = b.dataset.panel; renderCampAdmin(); }
   });
   // Rule row actions.
   $('campadminView').querySelectorAll('[data-ract]').forEach(b => b.onclick = () => {
@@ -4434,6 +4622,22 @@ function renderCampAdmin() {
     else if (act === 'saverule') saveRuleEdit(id, b.closest('tr'));
     else if (act === 'toggle')   setRuleActive(id, b.dataset.active === '1');
     else if (act === 'delete')   deleteShiftRule(id, b.dataset.pat);
+  });
+  // KPI row actions.
+  $('campadminView').querySelectorAll('[data-kact]').forEach(b => b.onclick = () => {
+    const act = b.dataset.kact, id = parseInt(b.dataset.id, 10);
+    const camp = parseInt(b.dataset.camp, 10);
+    if (act === 'editkpi')     { CAMPADMIN_STATE.editingKpiId = id; renderCampAdmin(); }
+    else if (act === 'cancelkpi') { CAMPADMIN_STATE.editingKpiId = null; renderCampAdmin(); }
+    else if (act === 'savekpi')   saveKpiEdit(id, b.closest('tr'), camp);
+    else if (act === 'togglekpi') toggleKpiActive(id, camp, b.dataset.active === '1');
+    else if (act === 'deletekpi') deleteKpi(id, camp, b.dataset.label);
+  });
+  // Workgroup row actions.
+  $('campadminView').querySelectorAll('[data-wact]').forEach(b => b.onclick = () => {
+    const act = b.dataset.wact, id = parseInt(b.dataset.id, 10);
+    const camp = parseInt(b.dataset.camp, 10);
+    if (act === 'delete') deleteWorkgroup(id, camp, b.dataset.label);
   });
 }
 
@@ -6000,8 +6204,37 @@ async function primeShiftRules() {
   } catch { /* keep fallback */ }
 }
 
+// Prime the per-campaign KPI tiles, targets, workgroup routing, section &
+// display-name maps from the DB. The hardcoded WG_MAP / CAMP_DISPLAY /
+// CAMP_SECTION / TARGETS / KPI_CONFIG / SLUG_TO_CAMPKEY at the top of this
+// file act as the fallback when the fetch fails; when it succeeds we clear
+// each object and reassign so a campaign an admin deactivated in the DB does
+// NOT leak in from the hardcoded default. Same-reference mutation keeps every
+// closure that already captured these objects working.
+function _replaceObj(target, source) {
+  for (const k of Object.keys(target)) delete target[k];
+  Object.assign(target, source || {});
+}
+async function primeCampaignConfig() {
+  try {
+    const r = await apiFetch('/api/campaigns/config');
+    if (!r.ok) return;
+    const cfg = await r.json();
+    if (cfg && typeof cfg === 'object') {
+      _replaceObj(WG_MAP,          cfg.WG_MAP);
+      _replaceObj(CAMP_DISPLAY,    cfg.CAMP_DISPLAY);
+      _replaceObj(CAMP_SECTION,    cfg.CAMP_SECTION);
+      _replaceObj(TARGETS,         cfg.TARGETS);
+      _replaceObj(KPI_CONFIG,      cfg.KPI_CONFIG);
+      _replaceObj(SLUG_TO_CAMPKEY, cfg.SLUG_TO_CAMPKEY);
+      const missing = Object.keys(CAMP_DISPLAY).filter(c => !KPI_CONFIG[c] || !TARGETS[c]);
+      if (missing.length) console.warn(`[dashboard] ${missing.length} campaign(s) from DB config still missing KPI_CONFIG/TARGETS: ${missing.join(', ')}`);
+    }
+  } catch { /* keep hardcoded fallback */ }
+}
+
 async function init() {
-  await primeShiftRules();
+  await Promise.all([primeShiftRules(), primeCampaignConfig()]);
   // Wire tab nav
   document.querySelectorAll('.tab').forEach(t => t.onclick = () => setView(t.dataset.view));
   // Wire granularity toggle (Day / Week / Month)
