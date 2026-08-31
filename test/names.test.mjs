@@ -247,6 +247,15 @@ test('HYVE event shifts (Mining Indaba / CWIEME) map to the HYVE campaign', () =
     'CWIEME', 'CWIEME Berlin', 'CWIEME Chicago', 'CWIEME Connect',
     'C-WIEME', 'C WIEME Evening',
   ]) assert.equal(shiftToCampaign(s), 'HYVE', `cwieme variant: "${s}"`);
+  // Spring Fair (any spacing / hyphenation) → HYVE.
+  for (const s of [
+    'Spring Fair', 'Spring Fair Day', 'Spring-Fair', 'SpringFair',
+    'Spring Fair Support', 'spring  fair evening',
+  ]) assert.equal(shiftToCampaign(s), 'HYVE', `spring fair variant: "${s}"`);
+  // Any shift with "Mining" (not just Mining Indaba) → HYVE.
+  for (const s of [
+    'Mining', 'Mining Support', 'Mining Day Shift', 'African Mining',
+  ]) assert.equal(shiftToCampaign(s), 'HYVE', `mining variant: "${s}"`);
   // Plain "HYVE" still maps, and unrelated shifts are untouched.
   assert.equal(shiftToCampaign('HYVE Day Shift'), 'HYVE');
   assert.equal(shiftToCampaign('MedExpress Day Shift'), 'Medexpress');
