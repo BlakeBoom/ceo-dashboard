@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import '../shared/names.js';
 const { normalizeName, firstLastKey, stripKnownNameSuffix, buildTeamCanonMap, titleToRole, looksLikeLookupId,
         buildRoleIndexFromUsers, resolveTeamNode, unassignedShare,
-        shiftToCampaign, shiftCampaignKeys } = globalThis.BoomerangNames;
+        shiftToCampaign, shiftCampaignKeys, setShiftRules } = globalThis.BoomerangNames;
 const UNASSIGNED = '— Unassigned';
 
 // provision.js eagerly imports db.js, which reads env vars at module-eval and
@@ -259,6 +259,66 @@ test('HYVE event shifts (Mining Indaba / CWIEME) map to the HYVE campaign', () =
   // Plain "HYVE" still maps, and unrelated shifts are untouched.
   assert.equal(shiftToCampaign('HYVE Day Shift'), 'HYVE');
   assert.equal(shiftToCampaign('MedExpress Day Shift'), 'Medexpress');
+});
+
+// ── setShiftRules parity: seeded DB rules must reproduce the hardcoded ones ──
+// Once migration 0013 lands, shift → campaign resolution runs against DB rows.
+// The rows the migration seeds must match SHIFT_PATTERNS one-for-one — a
+// regression here means someone changed the fallback list without updating
+// the seed and the two sides would diverge silently. The list below mirrors
+// the migration's VALUES clause; any change to SHIFT_PATTERNS goes here too.
+const _SEED = [
+  { pattern: 'beer\\s*52',                                                       shift_key: 'BEER52',        priority: 10 },
+  { pattern: '\\bhyve\\b|indaba|\\bc[\\s-]*wieme\\b|\\bmining\\b|spring[\\s-]*fair', shift_key: 'HYVE',      priority: 20 },
+  { pattern: 'bb\\s*marro|\\bmarro\\b',                                          shift_key: 'BUTTERNUTBOX',  priority: 30 },
+  { pattern: 'butternut|\\bbbox\\b',                                             shift_key: 'BUTTERNUTBOX',  priority: 40 },
+  { pattern: 'gousto',                                                            shift_key: 'Gousto',        priority: 50 },
+  { pattern: 'hunza\\s*g',                                                        shift_key: 'HUNZAG',        priority: 60 },
+  { pattern: 'med\\s*express|\\bmedx\\b',                                         shift_key: 'Medexpress',    priority: 70 },
+  { pattern: 'pic?k\\s*n\\s*pay|\\bpnp\\b',                                       shift_key: 'PICKNPAY',      priority: 80 },
+  { pattern: 'royal\\s*canin',                                                    shift_key: 'ROYALCANIN',    priority: 90 },
+  { pattern: 'good\\s*life|\\bgls\\b',                                            shift_key: 'GOODLIFESORTED',priority: 100 },
+  { pattern: 'lint\\s*bells|vetnique',                                            shift_key: 'VETNIQUE',      priority: 110 },
+  { pattern: 'pinter',                                                             shift_key: 'PINTER',        priority: 120 },
+  { pattern: '1\\s*life|one\\s*life',                                             shift_key: '1LIFE',         priority: 130 },
+  { pattern: 'just\\s*park.*(space\\s*owner|\\bsp\\b|event\\s*pass|\\bus\\b)',    shift_key: 'JUSTPARK_usa',  priority: 140 },
+  { pattern: 'just\\s*park',                                                      shift_key: 'JUSTPARK_uk',   priority: 150 },
+].map(r => ({ ...r, match_mode: 'regex' }));
+
+test('setShiftRules(SEED) reproduces every fallback-resolver fixture', () => {
+  setShiftRules(_SEED);
+  const cases = [
+    ['Beer52 CS', 'BEER52'], ['BB Marro Day', 'BUTTERNUTBOX'], ['Butternut Box PM', 'BUTTERNUTBOX'],
+    ['Gousto Late', 'Gousto'], ['HunzaG', 'HUNZAG'], ['MedExpress Day Shift', 'Medexpress'],
+    ['PICK N PAY', 'PICKNPAY'], ['PnP Ticketing', 'PICKNPAY'], ['Royal Canin CS', 'ROYALCANIN'],
+    ['Good Life Sorted', 'GOODLIFESORTED'], ['Lint Bells', 'VETNIQUE'], ['Vetnique Ops', 'VETNIQUE'],
+    ['Pinter Day', 'PINTER'], ['1 Life Sales', '1LIFE'], ['One Life Evening', '1LIFE'],
+    ['JustPark Space Owner AM', 'JUSTPARK_usa'], ['JustPark Event Pass', 'JUSTPARK_usa'],
+    ['Just Park UK', 'JUSTPARK_uk'], ['Just Park US Ops', 'JUSTPARK_usa'],
+    ['HYVE Day Shift', 'HYVE'], ['Mining Indaba', 'HYVE'], ['Spring Fair', 'HYVE'],
+    ['Mining', 'HYVE'], ['CWIEME Berlin', 'HYVE'], ['Indaba Cape Town', 'HYVE'],
+    ['Office Admin', null], ['Springboard training', null],
+  ];
+  for (const [s, want] of cases) {
+    assert.equal(shiftToCampaign(s), want, `seed rules: "${s}" → ${want}`);
+  }
+  setShiftRules([]);   // back to fallback for downstream tests
+});
+
+test('setShiftRules with contains / word / regex modes each match correctly', () => {
+  setShiftRules([
+    { pattern: 'my new campaign', match_mode: 'contains', shift_key: 'NEWCAMP', priority: 10 },
+    { pattern: 'zeta',            match_mode: 'word',     shift_key: 'ZETA',    priority: 20 },
+    { pattern: '^alpha\\d+',      match_mode: 'regex',    shift_key: 'ALPHA',   priority: 30 },
+  ]);
+  assert.equal(shiftToCampaign('The My New Campaign shift'), 'NEWCAMP');
+  assert.equal(shiftToCampaign('mynewcampaignshift'), null); // contains preserves spaces literally
+  assert.equal(shiftToCampaign('a my new campaignish'), 'NEWCAMP');     // no word-boundary
+  assert.equal(shiftToCampaign('Zeta Team AM'), 'ZETA');
+  assert.equal(shiftToCampaign('Zetacore'), null);                       // word boundary blocks partial
+  assert.equal(shiftToCampaign('alpha42 line'), 'ALPHA');
+  assert.equal(shiftToCampaign(' alpha42 line'), null);                  // ^ anchor
+  setShiftRules([]);
 });
 
 // ── buildEmpIdToUid (Phase 8c: resolve terminated/duplicate People IDs) ────────
