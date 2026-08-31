@@ -5204,8 +5204,13 @@ function renderCampaigns() {
 
 function renderCampaignList(root) {
   const wk = STATE.selectedWeek;
-  const camps = Object.keys(STATE.campaignWeek)
-    .filter(c => STATE.campaignWeek[c][wk])
+  // Union of "campaigns with live data this period" and "campaigns configured
+  // in CAMP_DISPLAY". The second half surfaces newly-added campaigns as
+  // placeholder tiles BEFORE any Zoho rows route to them — otherwise an admin
+  // sets up a campaign and gets no visible confirmation, which was reported.
+  const withData = Object.keys(STATE.campaignWeek).filter(c => STATE.campaignWeek[c][wk]);
+  const configured = Object.keys(CAMP_DISPLAY);
+  const camps = [...new Set([...withData, ...configured])]
     .sort((a,b) => (CAMP_DISPLAY[a]||a).localeCompare(CAMP_DISPLAY[b]||b));
 
   // Group by section
@@ -5221,7 +5226,8 @@ function renderCampaignList(root) {
     html += `<div style="margin-bottom:6px;font-size:10px;font-family:var(--mono);text-transform:uppercase;letter-spacing:1.4px;color:var(--text3);padding:14px 0 8px">${sec}</div>`;
     html += `<div class="camp-list">`;
     for (const c of list) {
-      html += campaignCardHtml(c, wk);
+      const hasData = !!STATE.campaignWeek[c]?.[wk];
+      html += hasData ? campaignCardHtml(c, wk) : campaignCardPlaceholderHtml(c);
     }
     html += `</div>`;
   }
@@ -5342,6 +5348,31 @@ function kpiCellHtml(m, tgts, k, lbl, dir) {
 // Light campaign tile: at-a-glance only (health, fulfilment ring, HC/FTE, how
 // many KPIs are at risk, a billable spark). The full breakdown lives in the
 // campaign-dedicated view that opens when the tile is clicked.
+// Empty-state tile for a campaign that is fully configured but has no data
+// routing to it yet (typically: freshly added; workgroup label doesn't match
+// Zoho's actual value; or no shifts rostered for the current period). Renders
+// alongside the real tiles so the grid confirms "this campaign IS configured"
+// and points the admin at where to look.
+function campaignCardPlaceholderHtml(c) {
+  const ring = svgRing(0, { size: 52, stroke: 9, color: 'var(--text3)', val: '—', sub: 'no data' });
+  return `
+    <div class="camp-card" data-camp="${c}" style="opacity:.75">
+      <div class="camp-head">
+        <div class="camp-name"><span class="camp-overall none"></span>${CAMP_DISPLAY[c]||c}</div>
+        <span class="camp-drill">Open ›</span>
+      </div>
+      <div class="camp-tile-body">
+        <span class="ring-wrap">${ring}</span>
+        <div class="camp-tile-meta">
+          <span class="camp-risk" title="Configured, but no shifts have routed to this campaign this ${periodNoun()}. Check that the workgroup label matches Zoho exactly, or add a shift rule that matches the shift names.">awaiting data</span>
+          <div class="camp-meta">
+            <span class="camp-meta-chip">0 HC</span>
+          </div>
+        </div>
+      </div>
+    </div>`;
+}
+
 function campaignCardHtml(c, wk) {
   const m = STATE.campaignWeek[c][wk];
   const tgts = TARGETS[c] || {};
