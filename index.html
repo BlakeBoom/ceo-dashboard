@@ -470,6 +470,7 @@ svg.ring .rs{font-size:8px;letter-spacing:.5px;text-transform:uppercase}
         <button class="tab" data-view="targets" data-min-role="exco">Targets</button>
         <button class="tab" data-view="rules" data-min-role="admin">Rules</button>
         <button class="tab" data-view="users" data-min-role="admin">Users</button>
+        <button class="tab" data-view="campadmin" data-min-role="admin">Campaign admin</button>
         <button class="tab" data-view="access" data-min-role="admin">Access</button>
       </div>
       <div class="gran-toggle" id="granNav">
@@ -520,6 +521,7 @@ svg.ring .rs{font-size:8px;letter-spacing:.5px;text-transform:uppercase}
 
   <div id="summaryView" class="view"></div>
   <div id="campaignsView" class="view"></div>
+  <div id="campadminView" class="view"></div>
   <div id="trendsView" class="view"></div>
   <div id="bonusView" class="view"></div>
   <div id="targetsView" class="view"></div>
@@ -2901,6 +2903,7 @@ function render() {
   else if (STATE.view === 'targets') renderTargets();
   else if (STATE.view === 'rules') renderRules();
   else if (STATE.view === 'users') renderUsers();
+  else if (STATE.view === 'campadmin') renderCampAdmin();
   else if (STATE.view === 'access') renderAccess();
 }
 
@@ -4145,6 +4148,293 @@ function renderUsers() {
         `<select data-uf="team_id" class="modal-month" style="font-size:11px;padding:4px 6px;max-width:130px">${opts.map(o => `<option value="${o.v}">${o.l}</option>`).join('')}</select>`;
     });
   }
+}
+
+// ─── Campaign admin view (admin only) ────────────────────────────
+// Lets an admin add / rename / deactivate campaigns and, per campaign, edit
+// the shift-name rules that route Zoho attendance shifts to it. A rule is
+// {pattern, match_mode: contains|word|regex, priority}. The tester at the
+// bottom answers "if I paste this shift name, which campaign resolves?" and
+// which rule fired first — the same code path shiftToCampaign() uses.
+const CAMPADMIN_STATE = {
+  loaded: false, loading: false, error: null,
+  campaigns: [], rules: [], activeRules: [],
+  showCreate: false, editingCampId: null,
+  expandedCampId: null,
+  editingRuleId: null,
+  testShift: '', testResult: null, testBusy: false,
+  busy: false,
+};
+
+async function loadCampAdmin() {
+  CAMPADMIN_STATE.loading = true; renderCampAdmin();
+  try {
+    const [cr, rr] = await Promise.all([apiFetch('/api/campaigns'), apiFetch('/api/shift-rules')]);
+    if (!cr.ok) throw new Error(`campaigns HTTP ${cr.status}`);
+    if (!rr.ok) throw new Error(`shift-rules HTTP ${rr.status}`);
+    CAMPADMIN_STATE.campaigns = (await cr.json()).campaigns || [];
+    const rj = await rr.json();
+    CAMPADMIN_STATE.rules = rj.rules || [];
+    CAMPADMIN_STATE.activeRules = rj.active || [];
+    // Keep the shared resolver in sync every time the admin reloads.
+    globalThis.BoomerangNames?.setShiftRules?.(CAMPADMIN_STATE.activeRules);
+    CAMPADMIN_STATE.error = null;
+  } catch (e) {
+    CAMPADMIN_STATE.error = `Could not load campaigns (${e.message})`;
+  }
+  CAMPADMIN_STATE.loading = false; renderCampAdmin();
+}
+
+async function createCampaign() {
+  const slug = $('nc_slug')?.value?.trim();
+  const name = $('nc_name')?.value?.trim();
+  const shift_key = $('nc_shiftkey')?.value?.trim() || null;
+  if (!slug || !name) { alert('Slug and name are required.'); return; }
+  const r = await apiFetch('/api/campaigns', { method: 'POST', body: JSON.stringify({ slug, name, shift_key }) });
+  const text = await r.text(); let data; try { data = JSON.parse(text); } catch { data = {}; }
+  if (r.ok) { CAMPADMIN_STATE.showCreate = false; await loadCampAdmin(); }
+  else alert('Create failed: ' + (data.error === 'slug_or_shift_key_exists' ? 'slug or shift key already exists' : (data.error || r.status)));
+}
+
+async function saveCampaignEdit(id, rowEl) {
+  const get = (f) => rowEl.querySelector(`[data-cf="${f}"]`)?.value;
+  const orig = CAMPADMIN_STATE.campaigns.find(c => c.id === id) || {};
+  const body = {};
+  const name = (get('name') || '').trim();
+  const sk = (get('shift_key') || '').trim();
+  if (name && name !== orig.name) body.name = name;
+  if (sk !== (orig.shift_key || '')) body.shift_key = sk || null;
+  if (!Object.keys(body).length) { CAMPADMIN_STATE.editingCampId = null; renderCampAdmin(); return; }
+  const r = await apiFetch(`/api/campaigns/${id}`, { method: 'PATCH', body: JSON.stringify(body) });
+  if (r.ok) { CAMPADMIN_STATE.editingCampId = null; await loadCampAdmin(); }
+  else {
+    const text = await r.text(); let data; try { data = JSON.parse(text); } catch { data = {}; }
+    alert('Save failed: ' + (data.error || text.slice(0, 160)));
+  }
+}
+
+async function setCampaignActive(id, active, name) {
+  if (!active && !confirm(`Deactivate ${name}? It'll be hidden from users but rows aren't deleted.`)) return;
+  const r = await apiFetch(`/api/campaigns/${id}`, { method: 'PATCH', body: JSON.stringify({ active }) });
+  if (r.ok) await loadCampAdmin(); else alert('Update failed.');
+}
+
+async function createShiftRule(campaignId) {
+  const pattern = $(`nr_pat_${campaignId}`)?.value?.trim();
+  const match_mode = $(`nr_mode_${campaignId}`)?.value || 'contains';
+  const priority = parseInt($(`nr_pri_${campaignId}`)?.value, 10);
+  if (!pattern) { alert('Pattern required.'); return; }
+  const body = { campaign_id: campaignId, pattern, match_mode };
+  if (Number.isFinite(priority)) body.priority = priority;
+  const r = await apiFetch('/api/shift-rules', { method: 'POST', body: JSON.stringify(body) });
+  const text = await r.text(); let data; try { data = JSON.parse(text); } catch { data = {}; }
+  if (r.ok) await loadCampAdmin();
+  else alert('Add rule failed: ' + (data.detail || data.error || text.slice(0, 160)));
+}
+
+async function saveRuleEdit(id, rowEl) {
+  const get = (f) => rowEl.querySelector(`[data-rf="${f}"]`)?.value;
+  const orig = CAMPADMIN_STATE.rules.find(r => r.id === id) || {};
+  const body = {};
+  const pat = (get('pattern') || '').trim();
+  const mode = get('match_mode');
+  const pri = parseInt(get('priority'), 10);
+  if (pat && pat !== orig.pattern) body.pattern = pat;
+  if (mode && mode !== orig.match_mode) body.match_mode = mode;
+  if (Number.isFinite(pri) && pri !== orig.priority) body.priority = pri;
+  if (!Object.keys(body).length) { CAMPADMIN_STATE.editingRuleId = null; renderCampAdmin(); return; }
+  const r = await apiFetch(`/api/shift-rules/${id}`, { method: 'PATCH', body: JSON.stringify(body) });
+  const text = await r.text(); let data; try { data = JSON.parse(text); } catch { data = {}; }
+  if (r.ok) { CAMPADMIN_STATE.editingRuleId = null; await loadCampAdmin(); }
+  else alert('Save failed: ' + (data.detail || data.error || text.slice(0, 160)));
+}
+
+async function setRuleActive(id, active) {
+  const r = await apiFetch(`/api/shift-rules/${id}`, { method: 'PATCH', body: JSON.stringify({ active }) });
+  if (r.ok) await loadCampAdmin(); else alert('Update failed.');
+}
+
+async function deleteShiftRule(id, pattern) {
+  if (!confirm(`Delete rule "${pattern}"? This can't be undone.`)) return;
+  const r = await apiFetch(`/api/shift-rules/${id}`, { method: 'DELETE' });
+  if (r.ok) await loadCampAdmin(); else alert('Delete failed.');
+}
+
+async function runRuleTest() {
+  const shift = CAMPADMIN_STATE.testShift.trim();
+  if (!shift) { CAMPADMIN_STATE.testResult = null; renderCampAdmin(); return; }
+  CAMPADMIN_STATE.testBusy = true; renderCampAdmin();
+  try {
+    const r = await apiFetch('/api/shift-rules/test', { method: 'POST', body: JSON.stringify({ shift }) });
+    const j = await r.json();
+    CAMPADMIN_STATE.testResult = j.result || null;
+  } catch (e) { CAMPADMIN_STATE.testResult = { shift, error: e.message }; }
+  CAMPADMIN_STATE.testBusy = false; renderCampAdmin();
+}
+
+const _matchModeLabel = { contains: 'contains', word: 'whole word', regex: 'regex' };
+
+function renderCampAdmin() {
+  const u = AUTH.user;
+  if (!u || u.role !== 'admin') { $('campadminView').innerHTML = '<div class="flag-empty" style="padding:32px">Admins only.</div>'; return; }
+  if (!CAMPADMIN_STATE.loaded) { CAMPADMIN_STATE.loaded = true; loadCampAdmin(); }
+
+  const S = CAMPADMIN_STATE;
+  const esc = (s) => (s == null ? '' : String(s)).replace(/"/g, '&quot;');
+  const rulesByCamp = {};
+  for (const r of S.rules) (rulesByCamp[r.campaign_id] ||= []).push(r);
+
+  const modeOpts = ['contains','word','regex'];
+  const testR = S.testResult;
+  const testPanel = `
+    <div class="users-panel" style="margin-top:14px">
+      <div class="users-panel-h">Rule tester — paste a shift name to see how it resolves</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <input id="ct_shift" class="modal-month" placeholder="e.g. Mining Indaba Day" value="${esc(S.testShift)}" style="font-size:12px;padding:7px 10px;width:320px">
+        <button id="ct_run" class="btn-primary" ${S.testBusy?'disabled':''}>${S.testBusy?'Testing…':'Test'}</button>
+      </div>
+      ${testR ? (testR.shift_key
+        ? `<div class="agent-tbl-sub" style="margin-top:8px">✓ <b>${esc(testR.shift)}</b> → <span class="chip">${esc(testR.campaign_name)}</span> <span class="mono dim">(${esc(testR.shift_key)})</span>
+             &nbsp;·&nbsp; matched rule #${testR.rule_id}: <span class="mono">${esc(testR.matched_pattern)}</span> <span class="dim">(${_matchModeLabel[testR.match_mode]||testR.match_mode})</span></div>`
+        : `<div class="agent-tbl-sub" style="margin-top:8px;color:#b45309">⚠ <b>${esc(testR.shift)}</b> matched no rule.</div>`) : ''}
+    </div>`;
+
+  const campRows = S.campaigns.map(c => {
+    const isEditing = S.editingCampId === c.id;
+    const isExpanded = S.expandedCampId === c.id;
+    const rc = rulesByCamp[c.id] || [];
+    const activeRuleCount = rc.filter(r => r.active).length;
+    const nameCell = isEditing
+      ? `<td><input data-cf="name" class="modal-month" value="${esc(c.name)}" style="font-size:12px;padding:4px 6px;width:160px"></td>`
+      : `<td class="name">${esc(c.name)}</td>`;
+    const keyCell = isEditing
+      ? `<td><input data-cf="shift_key" class="modal-month" value="${esc(c.shift_key||'')}" placeholder="—" style="font-size:11px;padding:4px 6px;width:120px"></td>`
+      : `<td class="mono dim">${esc(c.shift_key||'—')}</td>`;
+    const actions = isEditing
+      ? `<button class="row-btn save" data-cact="save" data-id="${c.id}">Save</button>
+         <button class="row-btn" data-cact="cancelcamp">Cancel</button>`
+      : `<button class="row-btn" data-cact="editcamp" data-id="${c.id}">Edit</button>
+         <button class="row-btn" data-cact="expand" data-id="${c.id}">${isExpanded?'Hide rules':`Rules (${rc.length})`}</button>
+         ${c.active
+           ? `<button class="row-btn danger" data-cact="deact" data-id="${c.id}" data-name="${esc(c.name)}">Deactivate</button>`
+           : `<button class="row-btn" data-cact="react" data-id="${c.id}" data-name="${esc(c.name)}">Activate</button>`}`;
+    const mainRow = `<tr data-camp="${c.id}">
+      ${nameCell}
+      <td class="mono dim">${esc(c.slug)}</td>
+      ${keyCell}
+      <td class="numeric dim">${activeRuleCount}${rc.length !== activeRuleCount?` <span class="dim">of ${rc.length}</span>`:''}</td>
+      <td>${c.active ? '<span class="chip ok">active</span>' : '<span class="chip">inactive</span>'}</td>
+      <td class="numeric" style="white-space:nowrap">${actions}</td>
+    </tr>`;
+    if (!isExpanded) return mainRow;
+
+    const ruleRows = rc.map(r => {
+      const isRE = S.editingRuleId === r.id;
+      if (isRE) return `<tr data-rule="${r.id}">
+        <td><input data-rf="pattern" class="modal-month" value="${esc(r.pattern)}" style="font-size:11px;padding:4px 6px;width:200px"></td>
+        <td><select data-rf="match_mode" class="modal-month" style="font-size:11px;padding:4px 6px">${modeOpts.map(m=>`<option value="${m}"${m===r.match_mode?' selected':''}>${_matchModeLabel[m]}</option>`).join('')}</select></td>
+        <td><input data-rf="priority" class="modal-month" type="number" value="${r.priority}" style="font-size:11px;padding:4px 6px;width:70px"></td>
+        <td>${r.active?'<span class="chip ok">on</span>':'<span class="chip">off</span>'}</td>
+        <td class="numeric" style="white-space:nowrap">
+          <button class="row-btn save" data-ract="saverule" data-id="${r.id}">Save</button>
+          <button class="row-btn" data-ract="cancelrule">Cancel</button>
+        </td></tr>`;
+      return `<tr data-rule="${r.id}">
+        <td class="mono">${esc(r.pattern)}</td>
+        <td class="dim">${_matchModeLabel[r.match_mode]||r.match_mode}</td>
+        <td class="numeric dim">${r.priority}</td>
+        <td>${r.active?'<span class="chip ok">on</span>':'<span class="chip">off</span>'}</td>
+        <td class="numeric" style="white-space:nowrap">
+          <button class="row-btn" data-ract="editrule" data-id="${r.id}">Edit</button>
+          <button class="row-btn" data-ract="toggle" data-id="${r.id}" data-active="${r.active?'0':'1'}">${r.active?'Disable':'Enable'}</button>
+          <button class="row-btn danger" data-ract="delete" data-id="${r.id}" data-pat="${esc(r.pattern)}">Delete</button>
+        </td></tr>`;
+    }).join('');
+
+    const rulesPanel = `<tr class="camp-rules-row"><td colspan="6" style="background:var(--bg-2);padding:14px 18px">
+      <div class="users-panel-h" style="margin-bottom:8px">Shift rules for ${esc(c.name)} — lower priority wins</div>
+      <table class="agent-tbl" style="width:100%;background:var(--card)">
+        <thead><tr><th>Pattern</th><th>Mode</th><th class="numeric">Priority</th><th>Status</th><th></th></tr></thead>
+        <tbody>${ruleRows || `<tr><td colspan="5" class="flag-empty" style="padding:16px">No rules yet — add one below.</td></tr>`}</tbody>
+      </table>
+      <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <input id="nr_pat_${c.id}" class="modal-month" placeholder="Pattern (e.g. mining or ^hyve\\b)" style="font-size:12px;padding:7px 10px;width:260px">
+        <select id="nr_mode_${c.id}" class="modal-month" style="font-size:12px;padding:7px 10px">
+          ${modeOpts.map(m=>`<option value="${m}">${_matchModeLabel[m]}</option>`).join('')}
+        </select>
+        <input id="nr_pri_${c.id}" class="modal-month" type="number" placeholder="Priority (default 100)" value="100" style="font-size:12px;padding:7px 10px;width:150px">
+        <button class="btn-primary" data-cact="addrule" data-id="${c.id}">+ Add rule</button>
+      </div>
+      <div class="agent-tbl-sub" style="margin-top:6px"><b>contains</b> = case-insensitive substring · <b>whole word</b> = adds \\b boundaries · <b>regex</b> = raw JS regex (i flag)</div>
+    </td></tr>`;
+    return mainRow + rulesPanel;
+  }).join('');
+
+  const createPanel = S.showCreate ? `
+    <div class="users-panel">
+      <div class="users-panel-h">New campaign</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <input id="nc_name" class="modal-month" placeholder="Display name (e.g. Acme Widgets)" style="font-size:12px;padding:7px 10px;width:220px">
+        <input id="nc_slug" class="modal-month" placeholder="Slug (lowercase, e.g. acme-widgets)" style="font-size:12px;padding:7px 10px;width:220px">
+        <input id="nc_shiftkey" class="modal-month" placeholder="Shift key (e.g. ACME) — optional" style="font-size:12px;padding:7px 10px;width:220px">
+        <button id="nc_save" class="btn-primary">Create</button>
+        <button id="nc_cancel" class="btn-ghost">Cancel</button>
+      </div>
+      <div class="agent-tbl-sub" style="margin-top:6px">The <b>shift key</b> is the identifier the resolver returns for this campaign; leave blank for back-office campaigns that don't appear in Zoho shifts. Add shift rules from the campaign's Rules panel after creating.</div>
+    </div>` : '';
+
+  $('campadminView').innerHTML = `
+    <div class="agent-tbl-head" style="background:var(--card);border:1px solid var(--border-light);border-radius:12px 12px 0 0;border-bottom:none">
+      <div style="flex:1">
+        <div style="font-weight:600">Campaigns &amp; shift rules</div>
+        <div class="agent-tbl-sub">${S.campaigns.length} campaign${S.campaigns.length===1?'':'s'} · ${S.rules.length} rule${S.rules.length===1?'':'s'} (${S.activeRules.length} active)</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <button id="camp_new" class="btn-ghost">+ New campaign</button>
+      </div>
+    </div>
+    ${createPanel}
+    ${S.error ? `<div class="err-banner show" style="margin-top:8px">${esc(S.error)}</div>` : ''}
+    ${S.loading ? '<div class="loading"><div class="spinner"></div><div>Loading campaigns…</div></div>' :
+      `<div class="agent-tbl-wrap" style="border-radius:0 0 12px 12px;border-top:none">
+        <table class="agent-tbl">
+          <thead><tr><th>Name</th><th>Slug</th><th>Shift key</th><th class="numeric">Rules</th><th>Status</th><th></th></tr></thead>
+          <tbody>${campRows || `<tr><td colspan="6" class="flag-empty" style="padding:24px">No campaigns yet.</td></tr>`}</tbody>
+        </table>
+      </div>`}
+    ${testPanel}
+  `;
+
+  $('camp_new')?.addEventListener('click', () => { CAMPADMIN_STATE.showCreate = !CAMPADMIN_STATE.showCreate; renderCampAdmin(); });
+  $('nc_save')?.addEventListener('click', createCampaign);
+  $('nc_cancel')?.addEventListener('click', () => { CAMPADMIN_STATE.showCreate = false; renderCampAdmin(); });
+  const testEl = $('ct_shift');
+  if (testEl) {
+    testEl.addEventListener('input', (e) => { CAMPADMIN_STATE.testShift = e.target.value; });
+    testEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') runRuleTest(); });
+  }
+  $('ct_run')?.addEventListener('click', runRuleTest);
+
+  // Campaign row actions.
+  $('campadminView').querySelectorAll('[data-cact]').forEach(b => b.onclick = () => {
+    const act = b.dataset.cact, id = parseInt(b.dataset.id, 10);
+    if (act === 'editcamp')   { CAMPADMIN_STATE.editingCampId = id; renderCampAdmin(); }
+    else if (act === 'cancelcamp') { CAMPADMIN_STATE.editingCampId = null; renderCampAdmin(); }
+    else if (act === 'save')  saveCampaignEdit(id, b.closest('tr'));
+    else if (act === 'expand'){ CAMPADMIN_STATE.expandedCampId = CAMPADMIN_STATE.expandedCampId === id ? null : id; renderCampAdmin(); }
+    else if (act === 'deact') setCampaignActive(id, false, b.dataset.name);
+    else if (act === 'react') setCampaignActive(id, true, b.dataset.name);
+    else if (act === 'addrule') createShiftRule(id);
+  });
+  // Rule row actions.
+  $('campadminView').querySelectorAll('[data-ract]').forEach(b => b.onclick = () => {
+    const act = b.dataset.ract, id = parseInt(b.dataset.id, 10);
+    if (act === 'editrule')   { CAMPADMIN_STATE.editingRuleId = id; renderCampAdmin(); }
+    else if (act === 'cancelrule') { CAMPADMIN_STATE.editingRuleId = null; renderCampAdmin(); }
+    else if (act === 'saverule') saveRuleEdit(id, b.closest('tr'));
+    else if (act === 'toggle')   setRuleActive(id, b.dataset.active === '1');
+    else if (act === 'delete')   deleteShiftRule(id, b.dataset.pat);
+  });
 }
 
 // ─── Summary view ────────────────────────────────────────────────
@@ -5695,7 +5985,23 @@ async function fetchTeamMap() {
   } catch { return null; }
 }
 
+// Prime shared/names.js with the DB-backed shift → campaign rules so every
+// resolver on the page (billable attribution, scoping, campaign chips) uses
+// the same list an admin edits on the Campaign admin tab. Failure is silent
+// — shared/names.js keeps its hardcoded SHIFT_PATTERNS as the fallback.
+async function primeShiftRules() {
+  try {
+    const r = await apiFetch('/api/shift-rules');
+    if (!r.ok) return;
+    const { active } = await r.json();
+    if (active && active.length && globalThis.BoomerangNames?.setShiftRules) {
+      globalThis.BoomerangNames.setShiftRules(active);
+    }
+  } catch { /* keep fallback */ }
+}
+
 async function init() {
+  await primeShiftRules();
   // Wire tab nav
   document.querySelectorAll('.tab').forEach(t => t.onclick = () => setView(t.dataset.view));
   // Wire granularity toggle (Day / Week / Month)

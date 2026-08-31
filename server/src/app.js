@@ -21,6 +21,8 @@ import syncRoutes from './routes/sync.js';
 import zohoRoutes from './routes/zoho.js';
 import targetRoutes from './routes/targets.js';
 import settingsRoutes from './routes/settings.js';
+import campaignRoutes from './routes/campaigns.js';
+import shiftRuleRoutes from './routes/shift-rules.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
@@ -85,6 +87,8 @@ app.use('/api', (req, res, next) => {
 });
 app.use('/api/users', userRoutes);
 app.use('/api/teams', teamRoutes);
+app.use('/api/campaigns', campaignRoutes);
+app.use('/api/shift-rules', shiftRuleRoutes);
 app.use('/api/bonus', bonusRoutes);
 app.use('/api/targets', targetRoutes);
 app.use('/api/settings', settingsRoutes);

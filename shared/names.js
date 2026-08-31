@@ -382,6 +382,10 @@
   // scope a campaign lead's attendance by shift→campaign EXACTLY the way the
   // dashboard attributes billable by shift — the two must agree or a lead's total
   // won't match an admin's.
+  // Fallback pattern list — used ONLY when setShiftRules() has not been called
+  // (fresh boot before /api/shift-rules returns, or the endpoint failed). Once
+  // rules load from the DB, `_activeRules` replaces this. Keep this list as the
+  // shipped mapping so the app degrades to today's behaviour, not silence.
   const SHIFT_PATTERNS = [
     [/beer\s*52/i,                  'BEER52'],
     // HYVE runs live trade-show events; agents' shifts are labelled with the
@@ -407,9 +411,45 @@
     [/just\s*park.*(space\s*owner|\bsp\b|event\s*pass|\bus\b)/i, 'JUSTPARK_usa'],
     [/just\s*park/i,                'JUSTPARK_uk'],
   ];
+
+  // Active rule list, once loaded from the DB. Same shape as SHIFT_PATTERNS:
+  // an ordered array of [RegExp, key] tuples. Null = use SHIFT_PATTERNS.
+  let _activeRules = null;
+
+  // Escape a raw string for use inside a RegExp source.
+  function _reEscape(s) { return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+
+  // Compile one persisted rule ({pattern, match_mode, shift_key, ...}) into a
+  // [RegExp, key] tuple. Invalid regex sources (bad user input from the editor)
+  // are dropped rather than throwing — the tester surfaces the parse error.
+  function _compileRule(r) {
+    if (!r || !r.pattern || !r.shift_key) return null;
+    let source;
+    const mode = r.match_mode || 'contains';
+    if (mode === 'regex')         source = r.pattern;
+    else if (mode === 'word')     source = `\\b${_reEscape(r.pattern)}\\b`;
+    else /* contains */           source = _reEscape(r.pattern);
+    try { return [new RegExp(source, 'i'), r.shift_key]; }
+    catch { return null; }
+  }
+
+  // Replace the active resolver rule set. Called once at boot from the client
+  // (with /api/shift-rules) and after any admin write. Rules is an array of
+  // { pattern, match_mode, shift_key, priority, active } — the caller filters
+  // to active rules and sorts by priority ascending. Passing null / [] reverts
+  // to the SHIFT_PATTERNS fallback.
+  function setShiftRules(rules) {
+    if (!rules || !rules.length) { _activeRules = null; return; }
+    const compiled = [];
+    for (const r of rules) { const c = _compileRule(r); if (c) compiled.push(c); }
+    _activeRules = compiled.length ? compiled : null;
+  }
+  function getShiftRules() { return _activeRules ? _activeRules.slice() : null; }
+
   function shiftToCampaign(shiftName) {
     if (!shiftName) return null;
-    for (const [re, key] of SHIFT_PATTERNS) if (re.test(shiftName)) return key;
+    const list = _activeRules || SHIFT_PATTERNS;
+    for (const [re, key] of list) if (re.test(shiftName)) return key;
     return null;
   }
   // Every campaign key a shift references, so a '+' split shift (two campaigns in
@@ -429,6 +469,7 @@
     titleToRole, looksLikeLookupId,
     _buildRoleIndex, buildRoleIndexFromUsers, resolveTeamNode, unassignedShare,
     LOWER_BETTER, CUMULATIVE_KPIS, rag, overallRag, agentScore, fulfilPct, realisationPct,
-    SHIFT_PATTERNS, shiftToCampaign, shiftCampaignKeys, buildEmpIdToUid, detectEmpNoCol,
+    SHIFT_PATTERNS, shiftToCampaign, shiftCampaignKeys, setShiftRules, getShiftRules,
+    buildEmpIdToUid, detectEmpNoCol,
   };
 })(globalThis);
