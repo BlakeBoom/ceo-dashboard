@@ -1468,6 +1468,9 @@ let STATE = {
   dataSource: 'static',
   sortKey: 'billable',
   sortDir: 'desc',
+  // Last raw fetch, cached so we can re-apply attribution when the admin edits
+  // shift rules / workgroups / campaigns without paying for another Zoho round-trip.
+  lastRaw: null,   // { primary, attendance, empProfile, roleUsers } | null
 };
 
 // ════════════════════════════════════════════════════════════════════════
@@ -4197,7 +4200,7 @@ async function createCampaign() {
   if (!slug || !name) { alert('Slug and name are required.'); return; }
   const r = await apiFetch('/api/campaigns', { method: 'POST', body: JSON.stringify({ slug, name, shift_key, display_name, section }) });
   const text = await r.text(); let data; try { data = JSON.parse(text); } catch { data = {}; }
-  if (r.ok) { CAMPADMIN_STATE.showCreate = false; await loadCampAdmin(); await primeCampaignConfig(); }
+  if (r.ok) { CAMPADMIN_STATE.showCreate = false; await loadCampAdmin(); await refreshCampaignEverywhere(); }
   else alert('Create failed: ' + (data.error === 'slug_or_shift_key_exists' ? 'slug or shift key already exists' : (data.error || r.status)));
 }
 
@@ -4215,7 +4218,7 @@ async function saveCampaignEdit(id, rowEl) {
   if (sec !== (orig.section || '')) body.section = sec || null;
   if (!Object.keys(body).length) { CAMPADMIN_STATE.editingCampId = null; renderCampAdmin(); return; }
   const r = await apiFetch(`/api/campaigns/${id}`, { method: 'PATCH', body: JSON.stringify(body) });
-  if (r.ok) { CAMPADMIN_STATE.editingCampId = null; await loadCampAdmin(); await primeCampaignConfig(); }
+  if (r.ok) { CAMPADMIN_STATE.editingCampId = null; await loadCampAdmin(); await refreshCampaignEverywhere(); }
   else {
     const text = await r.text(); let data; try { data = JSON.parse(text); } catch { data = {}; }
     alert('Save failed: ' + (data.error || text.slice(0, 160)));
@@ -4244,7 +4247,7 @@ async function createKpi(campId) {
   if (priorityStr !== '') body.priority = parseInt(priorityStr, 10);
   const r = await apiFetch(`/api/campaigns/${campId}/kpis`, { method: 'POST', body: JSON.stringify(body) });
   const text = await r.text(); let data; try { data = JSON.parse(text); } catch { data = {}; }
-  if (r.ok) { await loadCampKpis(campId); await primeCampaignConfig(); }
+  if (r.ok) { await loadCampKpis(campId); await refreshCampaignEverywhere(); }
   else alert('Add KPI failed: ' + (data.error === 'kpi_key_exists_for_campaign' ? 'this KPI key is already on this campaign' : (data.detail || data.error || text.slice(0, 160))));
 }
 async function saveKpiEdit(id, rowEl, campId) {
@@ -4266,17 +4269,17 @@ async function saveKpiEdit(id, rowEl, campId) {
   if (!Object.keys(body).length) { CAMPADMIN_STATE.editingKpiId = null; renderCampAdmin(); return; }
   const r = await apiFetch(`/api/campaigns/kpis/${id}`, { method: 'PATCH', body: JSON.stringify(body) });
   const text = await r.text(); let data; try { data = JSON.parse(text); } catch { data = {}; }
-  if (r.ok) { CAMPADMIN_STATE.editingKpiId = null; await loadCampKpis(campId); await primeCampaignConfig(); }
+  if (r.ok) { CAMPADMIN_STATE.editingKpiId = null; await loadCampKpis(campId); await refreshCampaignEverywhere(); }
   else alert('Save KPI failed: ' + (data.detail || data.error || text.slice(0, 160)));
 }
 async function deleteKpi(id, campId, label) {
   if (!confirm(`Remove KPI "${label}"? Tiles rebuild on next load.`)) return;
   const r = await apiFetch(`/api/campaigns/kpis/${id}`, { method: 'DELETE' });
-  if (r.ok) { await loadCampKpis(campId); await primeCampaignConfig(); } else alert('Delete failed.');
+  if (r.ok) { await loadCampKpis(campId); await refreshCampaignEverywhere(); } else alert('Delete failed.');
 }
 async function toggleKpiActive(id, campId, active) {
   const r = await apiFetch(`/api/campaigns/kpis/${id}`, { method: 'PATCH', body: JSON.stringify({ active }) });
-  if (r.ok) { await loadCampKpis(campId); await primeCampaignConfig(); } else alert('Update failed.');
+  if (r.ok) { await loadCampKpis(campId); await refreshCampaignEverywhere(); } else alert('Update failed.');
 }
 
 async function createWorkgroup(campId) {
@@ -4284,19 +4287,19 @@ async function createWorkgroup(campId) {
   if (!label) { alert('Workgroup label required.'); return; }
   const r = await apiFetch(`/api/campaigns/${campId}/workgroups`, { method: 'POST', body: JSON.stringify({ label }) });
   const text = await r.text(); let data; try { data = JSON.parse(text); } catch { data = {}; }
-  if (r.ok) { await loadCampWorkgroups(campId); await primeCampaignConfig(); }
+  if (r.ok) { await loadCampWorkgroups(campId); await refreshCampaignEverywhere(); }
   else alert('Add workgroup failed: ' + (data.error === 'workgroup_label_exists' ? 'that workgroup label is already mapped to a campaign' : (data.detail || data.error || text.slice(0, 160))));
 }
 async function deleteWorkgroup(id, campId, label) {
   if (!confirm(`Remove workgroup "${label}"? Shifts under this workgroup will stop attributing to this campaign.`)) return;
   const r = await apiFetch(`/api/campaigns/workgroups/${id}`, { method: 'DELETE' });
-  if (r.ok) { await loadCampWorkgroups(campId); await primeCampaignConfig(); } else alert('Delete failed.');
+  if (r.ok) { await loadCampWorkgroups(campId); await refreshCampaignEverywhere(); } else alert('Delete failed.');
 }
 
 async function setCampaignActive(id, active, name) {
   if (!active && !confirm(`Deactivate ${name}? It'll be hidden from users but rows aren't deleted.`)) return;
   const r = await apiFetch(`/api/campaigns/${id}`, { method: 'PATCH', body: JSON.stringify({ active }) });
-  if (r.ok) await loadCampAdmin(); else alert('Update failed.');
+  if (r.ok) { await loadCampAdmin(); await refreshCampaignEverywhere(); } else alert('Update failed.');
 }
 
 async function createShiftRule(campaignId) {
@@ -4308,7 +4311,7 @@ async function createShiftRule(campaignId) {
   if (Number.isFinite(priority)) body.priority = priority;
   const r = await apiFetch('/api/shift-rules', { method: 'POST', body: JSON.stringify(body) });
   const text = await r.text(); let data; try { data = JSON.parse(text); } catch { data = {}; }
-  if (r.ok) await loadCampAdmin();
+  if (r.ok) { await loadCampAdmin(); await refreshCampaignEverywhere(); }
   else alert('Add rule failed: ' + (data.detail || data.error || text.slice(0, 160)));
 }
 
@@ -4325,19 +4328,62 @@ async function saveRuleEdit(id, rowEl) {
   if (!Object.keys(body).length) { CAMPADMIN_STATE.editingRuleId = null; renderCampAdmin(); return; }
   const r = await apiFetch(`/api/shift-rules/${id}`, { method: 'PATCH', body: JSON.stringify(body) });
   const text = await r.text(); let data; try { data = JSON.parse(text); } catch { data = {}; }
-  if (r.ok) { CAMPADMIN_STATE.editingRuleId = null; await loadCampAdmin(); }
+  if (r.ok) { CAMPADMIN_STATE.editingRuleId = null; await loadCampAdmin(); await refreshCampaignEverywhere(); }
   else alert('Save failed: ' + (data.detail || data.error || text.slice(0, 160)));
 }
 
 async function setRuleActive(id, active) {
   const r = await apiFetch(`/api/shift-rules/${id}`, { method: 'PATCH', body: JSON.stringify({ active }) });
-  if (r.ok) await loadCampAdmin(); else alert('Update failed.');
+  if (r.ok) { await loadCampAdmin(); await refreshCampaignEverywhere(); } else alert('Update failed.');
 }
 
 async function deleteShiftRule(id, pattern) {
   if (!confirm(`Delete rule "${pattern}"? This can't be undone.`)) return;
   const r = await apiFetch(`/api/shift-rules/${id}`, { method: 'DELETE' });
-  if (r.ok) await loadCampAdmin(); else alert('Delete failed.');
+  if (r.ok) { await loadCampAdmin(); await refreshCampaignEverywhere(); } else alert('Delete failed.');
+}
+
+// Diagnostic: workgroup labels that live Zoho data carries but nothing in the
+// DB routes to a campaign. The primary billable pipeline (User_metrics_3) is
+// bucketed by workgroup — shift rules only affect attendance-derived data —
+// so a campaign with matching shift rules but no workgroup mapping still gets
+// no billable hours attributed. This panel exposes those unmapped strings so
+// an admin can map them to a campaign in one click without opening the browser
+// console.
+function _renderUnmappedWorkgroups(S) {
+  const wg = STATE.wgSkipped || {};
+  const entries = Object.entries(wg).sort((a, b) => b[1] - a[1]);
+  if (!entries.length) return '';
+  const esc = (s) => (s == null ? '' : String(s)).replace(/"/g, '&quot;');
+  const campOpts = S.campaigns.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('');
+  const rows = entries.map(([label, n]) => `<tr>
+    <td class="mono">${esc(label)}</td>
+    <td class="numeric dim">${n}</td>
+    <td>
+      <select data-uwg-camp="${esc(label)}" class="modal-month" style="font-size:11px;padding:4px 6px;max-width:180px">
+        <option value="">— pick campaign —</option>${campOpts}
+      </select>
+      <button class="row-btn" data-uwg-map="${esc(label)}">Map</button>
+    </td></tr>`).join('');
+  return `
+    <div class="users-panel" style="margin-top:14px;border-color:rgba(245,158,11,.4);background:rgba(245,158,11,.05)">
+      <div class="users-panel-h">⚠ ${entries.length} workgroup${entries.length===1?'':'s'} in live data with no campaign mapping — billable rows are being dropped</div>
+      <div class="agent-tbl-sub" style="margin-bottom:8px">These are the exact <span class="mono">Workgroup</span> values Zoho sends for rows that the current mapping can't route. Assign one to a campaign to fix the routing without a code change.</div>
+      <table class="agent-tbl" style="width:100%;background:var(--card)">
+        <thead><tr><th>Workgroup</th><th class="numeric">Rows (dropped)</th><th></th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+}
+
+async function mapUnmappedWorkgroup(label, campId) {
+  if (!campId) { alert('Pick a campaign first.'); return; }
+  const r = await apiFetch(`/api/campaigns/${campId}/workgroups`, {
+    method: 'POST', body: JSON.stringify({ label }),
+  });
+  const text = await r.text(); let data; try { data = JSON.parse(text); } catch { data = {}; }
+  if (r.ok) { await loadCampAdmin(); await refreshCampaignEverywhere(); }
+  else alert('Map failed: ' + (data.error === 'workgroup_label_exists' ? 'already mapped somewhere' : (data.error || text.slice(0, 160))));
 }
 
 async function runRuleTest() {
@@ -4377,7 +4423,8 @@ function renderCampAdmin() {
         ? `<div class="agent-tbl-sub" style="margin-top:8px">✓ <b>${esc(testR.shift)}</b> → <span class="chip">${esc(testR.campaign_name)}</span> <span class="mono dim">(${esc(testR.shift_key)})</span>
              &nbsp;·&nbsp; matched rule #${testR.rule_id}: <span class="mono">${esc(testR.matched_pattern)}</span> <span class="dim">(${_matchModeLabel[testR.match_mode]||testR.match_mode})</span></div>`
         : `<div class="agent-tbl-sub" style="margin-top:8px;color:#b45309">⚠ <b>${esc(testR.shift)}</b> matched no rule.</div>`) : ''}
-    </div>`;
+    </div>
+    ${_renderUnmappedWorkgroups(S)}`;
 
   const dirOpts = ['higher','lower','none'];
   const _dirLabel = { higher: '↑ higher', lower: '↓ lower', none: '— none' };
@@ -4638,6 +4685,13 @@ function renderCampAdmin() {
     const act = b.dataset.wact, id = parseInt(b.dataset.id, 10);
     const camp = parseInt(b.dataset.camp, 10);
     if (act === 'delete') deleteWorkgroup(id, camp, b.dataset.label);
+  });
+  // Unmapped-workgroup one-click mapping.
+  $('campadminView').querySelectorAll('[data-uwg-map]').forEach(b => b.onclick = () => {
+    const label = b.dataset.uwgMap;
+    const sel = $('campadminView').querySelector(`[data-uwg-camp="${label.replace(/"/g,'\\"')}"]`);
+    const campId = sel ? parseInt(sel.value, 10) : NaN;
+    mapUnmappedWorkgroup(label, campId);
   });
 }
 
@@ -6246,6 +6300,28 @@ function _replaceObj(target, source) {
   for (const k of Object.keys(target)) delete target[k];
   Object.assign(target, source || {});
 }
+// Re-run the attribution pipeline over the cached raw Zoho rows so a shift-rule
+// or workgroup change takes effect immediately — no page reload. The resolver
+// (shared/names.js) is already primed by setShiftRules() / primeCampaignConfig()
+// on write, but STATE.campaignWeek was computed BEFORE the change and would
+// otherwise stay stale until the next 30-min auto-refresh.
+function reapplyAttribution() {
+  const raw = STATE.lastRaw;
+  if (!raw) return;   // first fetch hasn't landed yet — nothing to re-attribute
+  applyData(raw.primary, raw.attendance, raw.empProfile, raw.roleUsers);
+  render();
+}
+
+// After a Campaign-admin write, refresh every downstream that depends on the
+// campaign config: the WG_MAP / CAMP_DISPLAY / KPI_CONFIG maps, the shift
+// resolver, and the already-computed attribution (STATE.campaignWeek). Called
+// after every create/edit/delete of campaigns, shift rules, KPIs, workgroups.
+async function refreshCampaignEverywhere() {
+  await primeShiftRules();
+  await primeCampaignConfig();
+  reapplyAttribution();
+}
+
 async function primeCampaignConfig() {
   try {
     const r = await apiFetch('/api/campaigns/config');
@@ -6294,6 +6370,7 @@ async function init() {
     try {
       const [{ primary, attendance, empProfile }, roleUsers, teamMap] = await Promise.all([fetchAll(), fetchUsers(), fetchTeamMap()]);
       STATE.teamMap = teamMap;
+      STATE.lastRaw = { primary, attendance, empProfile, roleUsers };
       applyData(primary, attendance, empProfile, roleUsers);
       STATE.dataSource = 'live';
       setBadge('live', STATE.shrinkageAvailable ? 'Live · shrinkage on' : 'Live');
@@ -6308,6 +6385,7 @@ async function init() {
         try {
           const [next, roleUsers, teamMap] = await Promise.all([fetchAll(), fetchUsers(), fetchTeamMap()]);
           STATE.teamMap = teamMap;
+          STATE.lastRaw = { primary: next.primary, attendance: next.attendance, empProfile: next.empProfile, roleUsers };
           applyData(next.primary, next.attendance, next.empProfile, roleUsers);
           STATE.dataSource = 'live';
           setBadge('live', STATE.shrinkageAvailable ? 'Live · shrinkage on' : 'Live');
