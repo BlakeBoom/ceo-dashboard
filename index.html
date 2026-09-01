@@ -2556,14 +2556,16 @@ function applyShiftBillable() {
   STATE.nonBillableHours = b.nonBillable || {};
   STATE.excludedShifts = b.excluded || {};
   // Override the billable in each campaign/team period bucket with the
-  // attendance figure. The shift feed runs ahead of the metrics feed, so a period
-  // may have attendance before its KPI rows land (the current week-to-date): where
-  // the campaign/team already exists (has metrics in some period) but this period
-  // has no bucket yet, synthesise a billable-only one (_attendanceOnly) so the live
-  // week is viewable. We still never invent a campaign/team that has no metrics at
-  // all — those attendance hours have nowhere real to land.
+  // attendance figure. The shift feed (Zoho attendance) is the source of truth
+  // for hours; User_metrics_3 (Alpha) only carries Operational/Quality/Outcome
+  // KPIs. So a campaign that is CONFIGURED IN THE DB (present in CAMP_DISPLAY)
+  // gets its bucket created here even if User_metrics_3 has no rows for it —
+  // otherwise brand-new campaigns Alpha hasn't been updated for silently drop.
+  // Truly unknown campaigns (no DB config, no User_metrics_3 rows) still get
+  // no bucket — those attendance hours have nowhere real to land.
   for (const camp in b.byCampWeek) {
-    if (!STATE.campaignWeek[camp]) continue;
+    if (!STATE.campaignWeek[camp] && !CAMP_DISPLAY[camp]) continue;
+    STATE.campaignWeek[camp] ??= {};
     for (const wk in b.byCampWeek[camp])
       (STATE.campaignWeek[camp][wk] ??= { _attendanceOnly: true }).billable = b.byCampWeek[camp][wk];
   }
@@ -4169,6 +4171,7 @@ const CAMPADMIN_STATE = {
   kpisByCamp: {},           // campId → [kpi rows]
   workgroupsByCamp: {},     // campId → [workgroup rows]
   testShift: '', testResult: null, testBusy: false,
+  wgSearch: '',
   busy: false,
 };
 
@@ -4343,35 +4346,63 @@ async function deleteShiftRule(id, pattern) {
   if (r.ok) { await loadCampAdmin(); await refreshCampaignEverywhere(); } else alert('Delete failed.');
 }
 
-// Diagnostic: workgroup labels that live Zoho data carries but nothing in the
-// DB routes to a campaign. The primary billable pipeline (User_metrics_3) is
-// bucketed by workgroup — shift rules only affect attendance-derived data —
-// so a campaign with matching shift rules but no workgroup mapping still gets
-// no billable hours attributed. This panel exposes those unmapped strings so
-// an admin can map them to a campaign in one click without opening the browser
-// console.
+// Diagnostic: every workgroup label the User_metrics_3 (Alpha) view carries
+// in the loaded periods, showing which campaign it routes to (or "dropped"
+// when nothing does). NOTE: workgroups only route the Operational / Quality /
+// Outcome KPIs (CSAT, QA, CPH…) — hours / HC / FTE come from Zoho attendance
+// bucketed by shift name, not from here. So an unmapped workgroup here means
+// "the KPI numbers Alpha computes for these agents aren't attributed to any
+// campaign", NOT "the campaign has no hours". A campaign's card can populate
+// with Zoho hours even if it has zero workgroup mapping.
+function _flattenWgDebug(wgDebug) {
+  const out = {};   // label → { campKey, rows }
+  for (const camp in (wgDebug || {})) {
+    for (const wk in wgDebug[camp]) {
+      for (const wg in wgDebug[camp][wk]) {
+        const rec = (out[wg] ||= { campKey: camp, rows: 0 });
+        rec.rows += wgDebug[camp][wk][wg];
+      }
+    }
+  }
+  return out;
+}
 function _renderUnmappedWorkgroups(S) {
-  const wg = STATE.wgSkipped || {};
-  const entries = Object.entries(wg).sort((a, b) => b[1] - a[1]);
-  if (!entries.length) return '';
+  const mapped = _flattenWgDebug(STATE.wgDebug);
+  const unmapped = STATE.wgSkipped || {};
+  const all = [];
+  for (const [label, n] of Object.entries(unmapped)) all.push({ label, rows: n, campKey: null });
+  for (const [label, rec] of Object.entries(mapped)) all.push({ label, rows: rec.rows, campKey: rec.campKey });
+  if (!all.length) return '';
+  const q = (S.wgSearch || '').trim().toLowerCase();
+  const filtered = q ? all.filter(r => r.label.toLowerCase().includes(q)) : all;
+  filtered.sort((a, b) => (a.campKey ? 1 : 0) - (b.campKey ? 1 : 0) || b.rows - a.rows);
   const esc = (s) => (s == null ? '' : String(s)).replace(/"/g, '&quot;');
   const campOpts = S.campaigns.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('');
-  const rows = entries.map(([label, n]) => `<tr>
-    <td class="mono">${esc(label)}</td>
-    <td class="numeric dim">${n}</td>
-    <td>
-      <select data-uwg-camp="${esc(label)}" class="modal-month" style="font-size:11px;padding:4px 6px;max-width:180px">
-        <option value="">— pick campaign —</option>${campOpts}
-      </select>
-      <button class="row-btn" data-uwg-map="${esc(label)}">Map</button>
-    </td></tr>`).join('');
+  const rows = filtered.map(r => {
+    if (r.campKey) return `<tr>
+      <td class="mono">${esc(r.label)}</td>
+      <td class="numeric dim">${r.rows}</td>
+      <td><span class="chip">${esc(CAMP_DISPLAY[r.campKey] || r.campKey)}</span></td>
+    </tr>`;
+    return `<tr style="background:rgba(245,158,11,.05)">
+      <td class="mono">${esc(r.label)}</td>
+      <td class="numeric dim">${r.rows}</td>
+      <td>
+        <select data-uwg-camp="${esc(r.label)}" class="modal-month" style="font-size:11px;padding:4px 6px;max-width:180px">
+          <option value="">— dropped, pick campaign —</option>${campOpts}
+        </select>
+        <button class="row-btn" data-uwg-map="${esc(r.label)}">Map</button>
+      </td></tr>`;
+  }).join('');
+  const droppedCount = all.filter(r => !r.campKey).length;
   return `
-    <div class="users-panel" style="margin-top:14px;border-color:rgba(245,158,11,.4);background:rgba(245,158,11,.05)">
-      <div class="users-panel-h">⚠ ${entries.length} workgroup${entries.length===1?'':'s'} in live data with no campaign mapping — billable rows are being dropped</div>
-      <div class="agent-tbl-sub" style="margin-bottom:8px">These are the exact <span class="mono">Workgroup</span> values Zoho sends for rows that the current mapping can't route. Assign one to a campaign to fix the routing without a code change.</div>
+    <div class="users-panel" style="margin-top:14px">
+      <div class="users-panel-h">User_metrics_3 workgroups — <span class="dim">${all.length} total${droppedCount?`, ${droppedCount} dropped`:''}</span></div>
+      <div class="agent-tbl-sub" style="margin-bottom:8px">Workgroups the <span class="mono">User_metrics_3</span> (Alpha) view carries. This routes <b>Operational / Quality / Outcome KPIs only</b> (CSAT, QA, CPH…). Hours / HC / FTE come from Zoho attendance via shift rules and don't depend on this — a campaign can populate its card with zero workgroup mapping here.</div>
+      <div style="margin-bottom:8px"><input id="wgSearch" class="modal-month" placeholder="🔍 Search workgroup label…" value="${esc(S.wgSearch||'')}" style="font-size:12px;padding:7px 10px;width:280px"></div>
       <table class="agent-tbl" style="width:100%;background:var(--card)">
-        <thead><tr><th>Workgroup</th><th class="numeric">Rows (dropped)</th><th></th></tr></thead>
-        <tbody>${rows}</tbody>
+        <thead><tr><th>Workgroup</th><th class="numeric">Rows</th><th>Currently routes to</th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="3" class="flag-empty" style="padding:16px">No workgroups match “${esc(q)}”.</td></tr>`}</tbody>
       </table>
     </div>`;
 }
@@ -4693,6 +4724,15 @@ function renderCampAdmin() {
     const campId = sel ? parseInt(sel.value, 10) : NaN;
     mapUnmappedWorkgroup(label, campId);
   });
+  const wgSearchEl = $('wgSearch');
+  if (wgSearchEl) {
+    wgSearchEl.addEventListener('input', (e) => {
+      CAMPADMIN_STATE.wgSearch = e.target.value;
+      renderCampAdmin();
+      const s = $('wgSearch');
+      if (s) { s.focus(); try { s.setSelectionRange(s.value.length, s.value.length); } catch {} }
+    });
+  }
 }
 
 // ─── Summary view ────────────────────────────────────────────────
@@ -5418,7 +5458,7 @@ function campaignCardPlaceholderHtml(c) {
       <div class="camp-tile-body">
         <span class="ring-wrap">${ring}</span>
         <div class="camp-tile-meta">
-          <span class="camp-risk" title="Configured, but no shifts have routed to this campaign this ${periodNoun()}. Check that the workgroup label matches Zoho exactly, or add a shift rule that matches the shift names.">awaiting data</span>
+          <span class="camp-risk" title="Configured in the DB, but no Zoho attendance rows resolved to this campaign this ${periodNoun()}. Check that at least one shift rule matches the shift names Zoho carries (Campaign admin → Configure → Rule tester).">awaiting data</span>
           <div class="camp-meta">
             <span class="camp-meta-chip">0 HC</span>
           </div>
