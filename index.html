@@ -4169,6 +4169,7 @@ const CAMPADMIN_STATE = {
   kpisByCamp: {},           // campId → [kpi rows]
   workgroupsByCamp: {},     // campId → [workgroup rows]
   testShift: '', testResult: null, testBusy: false,
+  wgSearch: '',
   busy: false,
 };
 
@@ -4343,35 +4344,67 @@ async function deleteShiftRule(id, pattern) {
   if (r.ok) { await loadCampAdmin(); await refreshCampaignEverywhere(); } else alert('Delete failed.');
 }
 
-// Diagnostic: workgroup labels that live Zoho data carries but nothing in the
-// DB routes to a campaign. The primary billable pipeline (User_metrics_3) is
-// bucketed by workgroup — shift rules only affect attendance-derived data —
-// so a campaign with matching shift rules but no workgroup mapping still gets
-// no billable hours attributed. This panel exposes those unmapped strings so
-// an admin can map them to a campaign in one click without opening the browser
-// console.
+// Diagnostic: every workgroup label the primary Zoho pipeline (User_metrics_3)
+// carries in the currently-loaded periods, showing which campaign it routes to
+// (or "— dropped —" when nothing does). This is the source of truth for the
+// question "where do MY campaign's rows actually land?". Two things it makes
+// obvious:
+//   - Unmapped workgroups get a one-click "pick campaign → Map" action.
+//   - Mapped workgroups reveal when a campaign's agents are being silently
+//     routed to a different campaign (e.g. still tagged with the old Zoho
+//     workgroup string).
+// If MD/GTN don't appear at all here, Zoho's User_metrics_3 view has ZERO
+// billable rows for those agents in the selected period — a Zoho-side setup
+// issue, not a mapping issue.
+function _flattenWgDebug(wgDebug) {
+  const out = {};   // label → { campKey, rows }
+  for (const camp in (wgDebug || {})) {
+    for (const wk in wgDebug[camp]) {
+      for (const wg in wgDebug[camp][wk]) {
+        const rec = (out[wg] ||= { campKey: camp, rows: 0 });
+        rec.rows += wgDebug[camp][wk][wg];
+      }
+    }
+  }
+  return out;
+}
 function _renderUnmappedWorkgroups(S) {
-  const wg = STATE.wgSkipped || {};
-  const entries = Object.entries(wg).sort((a, b) => b[1] - a[1]);
-  if (!entries.length) return '';
+  const mapped = _flattenWgDebug(STATE.wgDebug);
+  const unmapped = STATE.wgSkipped || {};
+  const all = [];
+  for (const [label, n] of Object.entries(unmapped)) all.push({ label, rows: n, campKey: null });
+  for (const [label, rec] of Object.entries(mapped)) all.push({ label, rows: rec.rows, campKey: rec.campKey });
+  if (!all.length) return '';
+  const q = (S.wgSearch || '').trim().toLowerCase();
+  const filtered = q ? all.filter(r => r.label.toLowerCase().includes(q)) : all;
+  filtered.sort((a, b) => (a.campKey ? 1 : 0) - (b.campKey ? 1 : 0) || b.rows - a.rows);
   const esc = (s) => (s == null ? '' : String(s)).replace(/"/g, '&quot;');
   const campOpts = S.campaigns.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('');
-  const rows = entries.map(([label, n]) => `<tr>
-    <td class="mono">${esc(label)}</td>
-    <td class="numeric dim">${n}</td>
-    <td>
-      <select data-uwg-camp="${esc(label)}" class="modal-month" style="font-size:11px;padding:4px 6px;max-width:180px">
-        <option value="">— pick campaign —</option>${campOpts}
-      </select>
-      <button class="row-btn" data-uwg-map="${esc(label)}">Map</button>
-    </td></tr>`).join('');
+  const rows = filtered.map(r => {
+    if (r.campKey) return `<tr>
+      <td class="mono">${esc(r.label)}</td>
+      <td class="numeric dim">${r.rows}</td>
+      <td><span class="chip">${esc(CAMP_DISPLAY[r.campKey] || r.campKey)}</span></td>
+    </tr>`;
+    return `<tr style="background:rgba(245,158,11,.05)">
+      <td class="mono">${esc(r.label)}</td>
+      <td class="numeric dim">${r.rows}</td>
+      <td>
+        <select data-uwg-camp="${esc(r.label)}" class="modal-month" style="font-size:11px;padding:4px 6px;max-width:180px">
+          <option value="">— dropped, pick campaign —</option>${campOpts}
+        </select>
+        <button class="row-btn" data-uwg-map="${esc(r.label)}">Map</button>
+      </td></tr>`;
+  }).join('');
+  const droppedCount = all.filter(r => !r.campKey).length;
   return `
-    <div class="users-panel" style="margin-top:14px;border-color:rgba(245,158,11,.4);background:rgba(245,158,11,.05)">
-      <div class="users-panel-h">⚠ ${entries.length} workgroup${entries.length===1?'':'s'} in live data with no campaign mapping — billable rows are being dropped</div>
-      <div class="agent-tbl-sub" style="margin-bottom:8px">These are the exact <span class="mono">Workgroup</span> values Zoho sends for rows that the current mapping can't route. Assign one to a campaign to fix the routing without a code change.</div>
+    <div class="users-panel" style="margin-top:14px">
+      <div class="users-panel-h">Workgroups seen in live data — <span class="dim">${all.length} total${droppedCount?`, ${droppedCount} dropped`:''}</span></div>
+      <div class="agent-tbl-sub" style="margin-bottom:8px">Every <span class="mono">Workgroup</span> string Zoho's <span class="mono">User_metrics_3</span> view returned in the loaded periods. If a campaign's workgroup isn't here at all, Zoho isn't producing billable rows for it yet.</div>
+      <div style="margin-bottom:8px"><input id="wgSearch" class="modal-month" placeholder="🔍 Search workgroup label…" value="${esc(S.wgSearch||'')}" style="font-size:12px;padding:7px 10px;width:280px"></div>
       <table class="agent-tbl" style="width:100%;background:var(--card)">
-        <thead><tr><th>Workgroup</th><th class="numeric">Rows (dropped)</th><th></th></tr></thead>
-        <tbody>${rows}</tbody>
+        <thead><tr><th>Workgroup</th><th class="numeric">Rows</th><th>Currently routes to</th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="3" class="flag-empty" style="padding:16px">No workgroups match “${esc(q)}”.</td></tr>`}</tbody>
       </table>
     </div>`;
 }
@@ -4693,6 +4726,15 @@ function renderCampAdmin() {
     const campId = sel ? parseInt(sel.value, 10) : NaN;
     mapUnmappedWorkgroup(label, campId);
   });
+  const wgSearchEl = $('wgSearch');
+  if (wgSearchEl) {
+    wgSearchEl.addEventListener('input', (e) => {
+      CAMPADMIN_STATE.wgSearch = e.target.value;
+      renderCampAdmin();
+      const s = $('wgSearch');
+      if (s) { s.focus(); try { s.setSelectionRange(s.value.length, s.value.length); } catch {} }
+    });
+  }
 }
 
 // ─── Summary view ────────────────────────────────────────────────
