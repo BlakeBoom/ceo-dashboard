@@ -2448,6 +2448,7 @@ function buildBillableByShift(attRows, empProfileRows, agentMeta, gran) {
   const byTeamWeek = {};   // "camp||team" -> week -> hrs
   const byAgentWeek = {};  // "camp||uid" -> week -> hrs (so the BAE breakdown reconciles to its team)
   const byUnmatched = {};  // "camp||empId" -> week -> hrs (attendance with no matching metrics agent)
+  const byCampShift = {};  // camp -> shift name -> { hrs, rows } (diagnostic: which shift names contribute to each campaign's billable, so an over-broad shift rule is visible at a glance)
   const unmatchedNames = {}; // empId -> EmployeeProfile name (for the Unassigned drill-down)
   const unmatched = {};    // shift name -> hrs (no campaign match)
   const nonBillable = {};  // role -> hrs (excluded: non-billable role)
@@ -2478,6 +2479,12 @@ function buildBillableByShift(attRows, empProfileRows, agentMeta, gran) {
       (byCampWeek[c] ??= {})[week] = (byCampWeek[c][week] || 0) + amt;
       const tk = c + '||' + team;
       (byTeamWeek[tk] ??= {})[week] = (byTeamWeek[tk][week] || 0) + amt;
+      // Per-campaign → per-shift-name breakdown (diagnostic: makes an over-broad
+      // shift rule visible at a glance — the Campaign admin surfaces this so an
+      // admin can see e.g. "MD absorbed 340h from a Command Center shift").
+      const s = shift || '(blank)';
+      const cs = ((byCampShift[c] ??= {})[s] ??= { hrs: 0, rows: 0 });
+      cs.hrs += amt; cs.rows += 1;
       // Same hours, also per employee, so each BAE's billable sums to its team.
       if (uid != null) {
         const ak = c + '||' + uid;
@@ -2537,7 +2544,7 @@ function buildBillableByShift(attRows, empProfileRows, agentMeta, gran) {
     }
     attribute(camp, bill);
   }
-  return { byCampWeek, byTeamWeek, byAgentWeek, byUnmatched, unmatchedNames, unmatched, nonBillable, excluded };
+  return { byCampWeek, byTeamWeek, byAgentWeek, byUnmatched, byCampShift, unmatchedNames, unmatched, nonBillable, excluded };
 }
 
 // Override billable in the already-built campaign/team rollups with the
@@ -4417,6 +4424,38 @@ async function mapUnmappedWorkgroup(label, campId) {
   else alert('Map failed: ' + (data.error === 'workgroup_label_exists' ? 'already mapped somewhere' : (data.error || text.slice(0, 160))));
 }
 
+// Diagnostic: for the currently-expanded campaign, list every distinct shift
+// name whose rows the resolver routes here, with the billable hours it
+// contributes. A campaign whose total looks too high almost always shows a
+// suspect shift name here — an over-broad regex is the usual cause, and this
+// panel makes that visible in one look. Sourced from STATE.shiftBillable.
+// byCampShift ({camp: {shift: {hrs, rows}}}), populated by buildBillableByShift.
+function _renderAttributedShifts(c) {
+  const shiftKey = c.shift_key;
+  if (!shiftKey) return '';
+  const bs = STATE.shiftBillable?.byCampShift?.[shiftKey];
+  if (!bs) return '';
+  const rows = Object.entries(bs).sort((a, b) => b[1].hrs - a[1].hrs);
+  if (!rows.length) return '';
+  const total = rows.reduce((s, [, v]) => s + v.hrs, 0);
+  const esc = (s) => (s == null ? '' : String(s)).replace(/"/g, '&quot;');
+  const tbl = rows.map(([shift, v]) => `<tr>
+    <td class="mono">${esc(shift)}</td>
+    <td class="numeric dim">${v.rows}</td>
+    <td class="numeric">${v.hrs.toFixed(1)} h</td>
+    <td class="numeric dim">${total>0?((v.hrs/total)*100).toFixed(1):'0.0'}%</td>
+  </tr>`).join('');
+  return `
+    <div style="margin-top:14px;padding:12px;border:1px solid var(--border-light);border-radius:8px;background:var(--bg-2)">
+      <div class="users-panel-h" style="margin-bottom:6px">Attributed shifts (all loaded periods) — ${total.toFixed(1)} h total</div>
+      <div class="agent-tbl-sub" style="margin-bottom:8px">Distinct shift names your rules route to <b>${esc(c.name)}</b>. If a suspect shift name is here (e.g. a Command/Ops/Admin shift landing on MD), the pattern is over-matching — tighten it with <b>whole word</b> mode or a stricter regex.</div>
+      <table class="agent-tbl" style="width:100%;background:var(--card)">
+        <thead><tr><th>Shift name</th><th class="numeric">Rows</th><th class="numeric">Hours</th><th class="numeric">Share</th></tr></thead>
+        <tbody>${tbl}</tbody>
+      </table>
+    </div>`;
+}
+
 async function runRuleTest() {
   const shift = CAMPADMIN_STATE.testShift.trim();
   if (!shift) { CAMPADMIN_STATE.testResult = null; renderCampAdmin(); return; }
@@ -4549,7 +4588,8 @@ function renderCampAdmin() {
           <input id="nr_pri_${c.id}" class="modal-month" type="number" placeholder="Priority (default 100)" value="100" style="font-size:12px;padding:7px 10px;width:150px">
           <button class="btn-primary" data-cact="addrule" data-id="${c.id}">+ Add rule</button>
         </div>
-        <div class="agent-tbl-sub" style="margin-top:6px"><b>contains</b> = case-insensitive substring · <b>whole word</b> = adds \\b boundaries · <b>regex</b> = raw JS regex (i flag)</div>`;
+        <div class="agent-tbl-sub" style="margin-top:6px"><b>contains</b> = case-insensitive substring · <b>whole word</b> = adds \\b boundaries · <b>regex</b> = raw JS regex (i flag)</div>
+        ${_renderAttributedShifts(c)}`;
     } else if (active === 'kpis') {
       if (kpiRows === null) { loadCampKpis(c.id); panelBody = `<div class="loading" style="padding:16px"><div class="spinner"></div><div>Loading KPIs…</div></div>`; }
       else {
