@@ -2611,20 +2611,46 @@ function applyShiftBillable() {
       teamBk[wk] ??= { _attendanceOnly: true };         // so the byTeamWeek override can set the total below
     }
   };
+  // Cross-campaign cover: an agent whose home team sits on ANOTHER campaign
+  // (their agentMeta.team is a real team name, not Unassigned) works a shift
+  // for THIS campaign. Their hours belong in this campaign's breakdown, but
+  // this campaign doesn't have a bucket for their home team — so route them
+  // to Unassigned here. Skips agents whose home team already has a bucket on
+  // this campaign (they're handled by the agent-level loop below).
   for (const ak in agentByKey) {
     const j = ak.indexOf('||'); const camp = ak.slice(0, j), uid = ak.slice(j + 2);
-    if (STATE.agentMeta[uid]?.team !== U) continue;     // only those that resolve to Unassigned
-    seedUnassigned(camp, uid, STATE.agentMeta[uid]?.name, agentByKey[ak], false);
+    const meta = STATE.agentMeta[uid];
+    if (meta?.team && meta.team !== U && STATE.teamWeek[camp]?.[meta.team]) continue;
+    seedUnassigned(camp, uid, meta?.name, agentByKey[ak], false);
   }
   for (const uk in (b.byUnmatched || {})) {
     const j = uk.indexOf('||'); const camp = uk.slice(0, j), empId = uk.slice(j + 2);
     seedUnassigned(camp, 'att:' + empId, b.unmatchedNames?.[empId] || ('Unmatched · ' + empId), b.byUnmatched[uk], true);
   }
+  // byTeamWeek only lands where a bucket exists for the metrics-side team.
+  // A cross-campaign agent's hours already went to Unassigned above, so the
+  // Unassigned team-total needs to reflect that or the campaign total will
+  // exceed the sum of teams. Accumulate into the campaign's Unassigned team
+  // whenever a byTeamWeek entry targets a team the campaign has no bucket for.
+  const unassignedTeamTotals = {};   // camp -> wk -> hrs (goes to Unassigned)
   for (const tk in b.byTeamWeek) {
     const i = tk.indexOf('||'); const camp = tk.slice(0, i), team = tk.slice(i + 2);
-    if (!(STATE.teamWeek[camp] && STATE.teamWeek[camp][team])) continue;
-    for (const wk in b.byTeamWeek[tk])
-      (STATE.teamWeek[camp][team][wk] ??= { _attendanceOnly: true }).billable = b.byTeamWeek[tk][wk];
+    const hasBucket = STATE.teamWeek[camp] && STATE.teamWeek[camp][team];
+    if (hasBucket) {
+      for (const wk in b.byTeamWeek[tk])
+        (STATE.teamWeek[camp][team][wk] ??= { _attendanceOnly: true }).billable = b.byTeamWeek[tk][wk];
+    } else if (CAMP_DISPLAY[camp] && STATE.campaignWeek[camp]) {
+      // Team bucket missing on a DB-configured campaign → funnel to Unassigned
+      const bag = (unassignedTeamTotals[camp] ??= {});
+      for (const wk in b.byTeamWeek[tk]) bag[wk] = (bag[wk] || 0) + b.byTeamWeek[tk][wk];
+    }
+  }
+  for (const camp in unassignedTeamTotals) {
+    const teamBk = ((STATE.teamWeek[camp] ??= {})[U] ??= {});
+    for (const wk in unassignedTeamTotals[camp]) {
+      (teamBk[wk] ??= { _attendanceOnly: true }).billable =
+        (teamBk[wk].billable || 0) + unassignedTeamTotals[camp][wk];
+    }
   }
   // Push attendance billable down to each agent so the BAE breakdown reconciles
   // to its team total, AND add a row for anyone whose attendance lands on a team
