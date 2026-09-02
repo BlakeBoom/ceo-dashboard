@@ -2424,13 +2424,13 @@ function overlayAttendanceHeadcount() {
   }
 }
 // ── Billable from Attendance, attributed by Shift ───────────────────────────
-// Billable = (Payable Hours (Min) − Unpaid Break (Min) − Paid Break (Min))/60
-// per attendance row. Paid breaks are subtracted too because clients aren't
-// invoiced for break time, paid or unpaid — including them over-reports billable
-// vs the invoices. Bucketed by the campaign named in the Shift column (so an
-// agent who works both UK and US shifts is split correctly). Overrides the
-// workgroup-based billable from User_metrics_3 wherever attendance covers a
-// campaign/period.
+// Billable = (Payable Hours (Mins) − Unpaid Break (Mins)) / 60 per attendance
+// row — hours worked against the shift, minus the unpaid lunch break. Paid
+// tea breaks are NOT subtracted: they're time the client's paying us to have
+// someone on-shift. Bucketed by the campaign named in the Shift column (so
+// an agent who works both UK and US shifts is split correctly). Overrides
+// the workgroup-based billable from User_metrics_3 wherever attendance covers
+// a campaign/period.
 function buildBillableByShift(attRows, empProfileRows, agentMeta, gran) {
   // Zoho People ID → user_id, resolving duplicate/terminated records too, so
   // attendance keyed to an old People ID still lands on its real agent/team
@@ -2459,11 +2459,27 @@ function buildBillableByShift(attRows, empProfileRows, agentMeta, gran) {
     if (!wk[k]) wk[k] = { shift: shift || '(blank)', reason, role: ROLE_LABEL[role] || role, camp: camp || '—', hrs: 0 };
     wk[k].hrs += hrs;
   };
+  // One-shot diagnostic: log the first attendance row's raw field values the
+  // very first time this runs each session. Answers "what does Zoho actually
+  // give us in Payable / Unpaid / Paid / Total?" so the billable formula can
+  // be validated against a live row without opening the network tab.
+  if (!globalThis._attRowLogged && attRows[0]) {
+    globalThis._attRowLogged = true;
+    console.log('[buildBillableByShift] sample attendance row fields:',
+      Object.fromEntries(['Date','Shift','Status','Payable Hours','Payable Hours (Mins)',
+        'Total Hours','Total Hours (Mins)','Unpaid Break','Unpaid Break (Mins)',
+        'Paid Break','Paid Break (Mins)']
+        .map(k => [k, attRows[0][k]]).filter(([,v]) => v !== undefined)));
+  }
   for (const row of attRows) {
+    // Billable = hours worked against the shift MINUS the lunch break. Read
+    // literally: subtract only the unpaid break (lunch) from Payable Hours.
+    // Paid tea breaks stay in — they're time the client's paying us to have
+    // someone on-shift. Earlier code subtracted paid break too, which
+    // wrongly stripped that on-shift time.
     const payable = +row['Payable Hours (Mins)'] || parseHMS(row['Payable Hours']) || 0;
     const unpaid  = +row['Unpaid Break (Mins)']  || parseHMS(row['Unpaid Break']) || 0;
-    const paid    = +row['Paid Break (Mins)']    || parseHMS(row['Paid Break']) || 0;
-    const hrs = Math.max(0, payable - unpaid - paid) / 60;
+    const hrs = Math.max(0, payable - unpaid) / 60;
     if (hrs <= 0) continue;
     const date = parseDate(row['Date'] ?? row.date);
     const week = periodKeyForDate(row['Date'] ?? row.date, gran);
