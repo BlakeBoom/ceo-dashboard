@@ -10,7 +10,8 @@
     "dev": "node --watch server/src/index.js",
     "migrate": "node server/src/migrate.js",
     "seed": "node server/src/seed.js",
-    "test": "node --test"
+    "test": "node --test",
+    "demo": "node demo/build-demo.mjs"
   },
   "engines": {
     "node": ">=20.0.0"
