@@ -91,6 +91,9 @@ export const VIEW = {
   userMetrics: '2292884000018755200',
   attendance:  '2292884000019604651',
   employee:    '2292884000019602125',
+  // Alpha wfm_attendance (Alpha-scheduled campaigns). null until the table is
+  // synced into the workspace and ZOHO_ALPHA_ATTENDANCE_VIEW_ID is set.
+  alphaAttendance: env.ZOHO_ALPHA_ATTENDANCE_VIEW_ID || null,
 };
 
 export async function fetchView(viewId, { criteria = null } = {}) {
@@ -138,6 +141,7 @@ export const VIEW_DATE_COL = {
   [VIEW.userMetrics]: 'metric_date',
   [VIEW.attendance]:  'Date',
   [VIEW.employee]:    NO_DATE_COL,   // EmployeeProfile has no date column — never probe/filter it
+  ...(VIEW.alphaAttendance ? { [VIEW.alphaAttendance]: 'ShiftDate' } : {}),
 };
 
 // Resolved date-column name per view, cached for the lifetime of the lambda so

@@ -35,6 +35,11 @@ export const env = {
   ZOHO_REFRESH_TOKEN:          opt('ZOHO_REFRESH_TOKEN', ''),
   ZOHO_ANALYTICS_WORKSPACE_ID: opt('ZOHO_ANALYTICS_WORKSPACE_ID', '2292884000018741001'),
   ZOHO_ANALYTICS_ORG_ID:       opt('ZOHO_ANALYTICS_ORG_ID', '723580241'),
+  // View ID of Alpha's wfm_attendance table once it's synced into the Zoho
+  // Analytics workspace (attendance for Alpha-scheduled campaigns: PICKnPAY,
+  // Pinter, Lint Bells). Empty = not synced yet; the AlphaAttendance feed then
+  // returns no rows and the dashboard runs on Zoho attendance alone.
+  ZOHO_ALPHA_ATTENDANCE_VIEW_ID: opt('ZOHO_ALPHA_ATTENDANCE_VIEW_ID', ''),
 };
 
 export const isProd = env.NODE_ENV === 'production';

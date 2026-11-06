@@ -538,6 +538,7 @@ svg.ring .rs{font-size:8px;letter-spacing:.5px;text-transform:uppercase}
 <script src="/shared/names.js"></script>
 <script src="/shared/churn.js"></script>
 <script src="/shared/hours.js"></script>
+<script src="/shared/alpha.js"></script>
 <script>
 // Shared name-matching helpers live in /shared/names.js (one source of truth
 // for the server too). Pull them into scope so the call sites below are
@@ -550,6 +551,7 @@ const { normalizeName, firstLastKey, stripKnownNameSuffix, buildTeamCanonMap, ti
 const { extractChurnRows, computeMonthlyChurn, computeRolling12Churn } = globalThis.BoomerangChurn;
 // Hours-sourcing rule: billable may only come from attendance, never metrics.
 const { seedBillableFromMetrics } = globalThis.BoomerangHours;
+const { alphaToAttendanceRows, mergeAttendanceSources, buildEmpNoToPeopleId } = globalThis.BoomerangAlpha;
 // ════════════════════════════════════════════════════════════════════════
 // CONFIGURATION
 // ════════════════════════════════════════════════════════════════════════
@@ -1103,11 +1105,16 @@ const UNCLASSIFIED_STATUSES = new Set();
 // whole day is Null; otherwise we sum the absent fractions of the remaining
 // segments (a Present segment contributes 0), capped at 1.
 // Returns a number 0..1, OR null meaning "exclude this day from the rate".
-// This drives the Absence KPI, sourced from AttendanceUserReport (not alpha).
-const ABSENCE_EXCLUDE_STATUS = /\bannual\b/i;                                 // → null (excluded)
+// This drives the Absence KPI, sourced from attendance — Zoho AttendanceUserReport,
+// plus Alpha WFM attendance for Alpha-scheduled campaigns (never User_metrics_3).
+// Long-term statutory leave (maternity / paternity / parental) is excluded the same
+// way as Annual: it's approved leave measured in months, not absenteeism, and
+// counting it would let one person on maternity dominate a team's Absence %.
+// One rule for every campaign, whichever system (Zoho or Alpha) scheduled it.
+const ABSENCE_EXCLUDE_STATUS = /\bannual\b|maternity|paternity|parental/i;   // → null (excluded)
 const ABSENCE_PRESENT_STATUS = /\bpresent\b|on\s*duty|work\s*from\s*home|\bremote\b/i;  // → 0
 function absenceSegment(seg) {
-  if (ABSENCE_EXCLUDE_STATUS.test(seg)) return null;   // Annual → exclude whole day
+  if (ABSENCE_EXCLUDE_STATUS.test(seg)) return null;   // Annual / statutory long-term leave → exclude whole day
   if (ABSENCE_PRESENT_STATUS.test(seg)) return 0;      // present
   const m = seg.match(/(\d+(?:\.\d+)?)\s*day/i);        // explicit "0.5 day"
   if (m) return Math.min(parseFloat(m[1]), 1);
@@ -1442,7 +1449,8 @@ const FALLBACK_RAW = [];
 // ════════════════════════════════════════════════════════════════════════
 let STATE = {
   rawAgentWeek: null,     // raw agent-week records
-  teamMap: null,          // { byId: Map(zoho_user_id->node), byName: Map(cleanName->node) } from /api/users/team-map
+  teamMap: null,
+  alphaStatus: null,      // Alpha WFM attendance merge summary (configured / rows / campaign-days) — see combineAlphaAttendance          // { byId: Map(zoho_user_id->node), byName: Map(cleanName->node) } from /api/users/team-map
   campaignWeek: null,     // {[camp]:{[week]:metrics}}
   teamWeek: null,         // {[camp]:{[team]:{[week]:metrics}}}
   agentWeek: null,        // {[camp]:{[team]:{[user]:{[week]:metrics}}}}
@@ -1868,6 +1876,42 @@ async function fetchAttendance() {
   // aggregating weekly absence server-side, not raising the raw-row window again.
   const data = await fetchView('AttendanceUserReport', { since: dateNWeeksAgo(26) });
   return extractAttendanceRows(data);
+}
+
+// Attendance for campaigns scheduled in Alpha rather than Zoho People (PICKnPAY,
+// Pinter, Lint Bells): Alpha's wfm_attendance table, synced into the same Zoho
+// Analytics workspace and served as the "AlphaAttendance" view. Until that view is
+// configured on the server it answers { configured:false } and this is a no-op.
+async function fetchAlphaAttendance() {
+  const data = await fetchView('AlphaAttendance', { since: dateNWeeksAgo(26) });
+  if (data && data.configured === false) return { configured: false, rows: [] };
+  return { configured: true, rows: extractEmployeeProfileRows(data) };   // same {data:[…]} unwrap
+}
+
+// Fold Alpha attendance into the Zoho attendance rows: convert Alpha rows to the
+// AttendanceUserReport shape (shared/alpha.js), then merge with per-campaign-day
+// precedence so the same campaign + date is never counted from both systems.
+// Failure semantics stay those of the Zoho feed: if Zoho attendance failed this
+// cycle we return its failure untouched (applyData then keeps the last good rows);
+// if only Alpha failed we reuse the last good Alpha rows rather than letting the
+// Alpha campaigns drop to zero for a refresh.
+let _lastAlphaRaw = null;
+function combineAlphaAttendance(zohoRows, empProfile, alpha) {
+  if (alpha && alpha.configured === false) { STATE.alphaStatus = { configured: false }; return zohoRows; }
+  let raw = alpha ? alpha.rows : null;
+  const stale = !alpha && !!_lastAlphaRaw;
+  if (raw && raw.length) _lastAlphaRaw = raw;
+  else if (!raw) raw = _lastAlphaRaw;
+  if (!zohoRows || !raw || !raw.length) return zohoRows;
+  const empRows = (empProfile && empProfile.length) ? empProfile : (STATE.rawEmpRows || []);
+  const empNoToPeopleId = buildEmpNoToPeopleId(empRows, globalThis.BoomerangNames.detectEmpNoCol);
+  const today = new Date().toLocaleDateString('en-CA');   // local YYYY-MM-DD
+  const { rows: conv, stats } = alphaToAttendanceRows(raw, { empNoToPeopleId, today });
+  const merged = mergeAttendanceSources(zohoRows, conv, shiftToCampaign);
+  STATE.alphaStatus = { configured: true, stale, rows: conv.length, droppedZoho: merged.droppedZoho,
+                        campaignDays: merged.coveredCampaignDays, unmappedPeople: stats.unmappedPeople, byWorkgroup: stats.byWorkgroup };
+  console.info(`[alpha] ${conv.length} Alpha attendance rows merged${stale ? ' (cached — this refresh failed)' : ''} · by workgroup ${JSON.stringify(stats.byWorkgroup)} · ${merged.coveredCampaignDays} campaign-days now Alpha-sourced, ${merged.droppedZoho} overlapping Zoho rows dropped · skipped ${stats.notActual} scheduled/not-yet-worked + ${stats.future} future-dated · ${stats.unmappedPeople} with no EmployeeProfile match (kept, named from Alpha)`);
+  return merged.rows;
 }
 
 async function fetchEmployeeProfile() {
@@ -2479,7 +2523,12 @@ function buildBillableByShift(attRows, empProfileRows, agentMeta, gran) {
     // wrongly stripped that on-shift time.
     const payable = +row['Payable Hours (Mins)'] || parseHMS(row['Payable Hours']) || 0;
     const unpaid  = +row['Unpaid Break (Mins)']  || parseHMS(row['Unpaid Break']) || 0;
-    const hrs = Math.max(0, payable - unpaid) / 60;
+    // Alpha-sourced rows carry an explicit billable (_billableMins): their paid-
+    // leave days have PayableHours but bill nothing, and their Payable is already
+    // net of lunch (see /shared/alpha.js). Zoho rows use Payable − Unpaid as before.
+    const hrs = row._billableMins != null
+      ? Math.max(0, +row._billableMins || 0) / 60
+      : Math.max(0, payable - unpaid) / 60;
     if (hrs <= 0) continue;
     const date = parseDate(row['Date'] ?? row.date);
     const week = periodKeyForDate(row['Date'] ?? row.date, gran);
@@ -2510,7 +2559,7 @@ function buildBillableByShift(attRows, empProfileRows, agentMeta, gran) {
         // the "— Unassigned" catch-all can name it instead of showing empty hours.
         const uk = c + '||' + empId;
         (byUnmatched[uk] ??= {})[week] = (byUnmatched[uk][week] || 0) + amt;
-        if (!(empId in unmatchedNames)) unmatchedNames[empId] = eidToName.get(empId) || null;
+        if (!(empId in unmatchedNames)) unmatchedNames[empId] = eidToName.get(empId) || (row['Employee Name'] ? String(row['Employee Name']).trim() : null);
       }
     };
     const markNonBillable = (c, lbl, reason, amt) => {
@@ -6351,10 +6400,11 @@ async function fetchAll() {
   const primaryPromise = fetchLiveData();
   const attendancePromise = fetchWithRetry(fetchAttendance, 'Attendance');
   const empProfilePromise = fetchWithRetry(fetchEmployeeProfile, 'Employee Profile');
+  const alphaPromise = fetchWithRetry(fetchAlphaAttendance, 'Alpha attendance');
 
   const primary = await primaryPromise;  // primary failure throws & lets caller fall back
-  const [attendance, empProfile] = await Promise.all([attendancePromise, empProfilePromise]);
-  return { primary, attendance, empProfile };
+  const [attendance, empProfile, alpha] = await Promise.all([attendancePromise, empProfilePromise, alphaPromise]);
+  return { primary, attendance: combineAlphaAttendance(attendance, empProfile, alpha), empProfile };
 }
 
 // Authoritative resolved roles from Postgres for the team-leader role index.
