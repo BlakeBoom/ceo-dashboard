@@ -14,7 +14,9 @@ import { seesAllScope } from '../rbac.js';
 // Shared with the dashboard so name matching AND shift→campaign line up exactly
 // (see /shared/names.js). firstLast is this file's local name for firstLastKey.
 import '../../../shared/names.js';
-const { normalizeName: normName, firstLastKey: firstLast, shiftCampaignKeys } = globalThis.BoomerangNames;
+import '../../../shared/alpha.js';
+const { normalizeName: normName, firstLastKey: firstLast, shiftCampaignKeys, detectEmpNoCol } = globalThis.BoomerangNames;
+const { synthShift: alphaShift, buildEmpNoToPeopleId } = globalThis.BoomerangAlpha;
 
 const router = Router();
 
@@ -23,7 +25,18 @@ const VIEW_KEYS = {
   'User_metrics_3':       VIEW.userMetrics,
   'AttendanceUserReport': VIEW.attendance,
   'EmployeeProfile':      VIEW.employee,
+  // Alpha wfm_attendance (campaigns scheduled in Alpha, not Zoho People). null until
+  // the table is synced into the workspace — the route then serves no rows.
+  'AlphaAttendance':      VIEW.alphaAttendance,
 };
+
+// Canonical campaign slugs an Alpha attendance row belongs to. Uses the SAME
+// synthesized shift name the dashboard attributes it by (shared/alpha.js) and the
+// same shiftCampaignKeys resolver as Zoho attendance, so scoping and attribution
+// can't disagree.
+function alphaRowSlugs(r) {
+  return shiftCampaignKeys(alphaShift(r)).map(k => canonicalCampaign(k)?.slug).filter(Boolean);
+}
 
 function metricName(r) {
   return r.fullname ?? r.Full_Name ?? r.full_name ?? null;
@@ -183,6 +196,22 @@ async function campaignShiftAttendanceIds(slug) {
       if (id) ids.add(id);
     }
   }
+  // Alpha-scheduled campaigns: their workers appear in Alpha's attendance (keyed by
+  // HR employee number), not Zoho's. Map those to People IDs so the lead's
+  // EmployeeProfile also carries identity rows for Alpha cover workers.
+  if (VIEW.alphaAttendance) {
+    try {
+      const alpha = await fetchViewByDate(VIEW.alphaAttendance, isoWeeksAgo(26), '9999-12-31');
+      const noToId = buildEmpNoToPeopleId(await getEmployeeProfiles(), detectEmpNoCol);
+      for (const r of alpha) {
+        if (!alphaRowSlugs(r).includes(slug)) continue;
+        const id = noToId.get(String(r.EmployeeId ?? '').trim());
+        if (id) ids.add(id);
+      }
+    } catch (err) {
+      console.warn('[zoho/alpha] widen-by-Alpha-attendance failed:', err.message);
+    }
+  }
   _attIdsCache.set(slug, { ids, at: Date.now() });
   return ids;
 }
@@ -202,6 +231,9 @@ async function allowedAttendanceIds(user, since) {
 
 router.get('/view/:key', requireRole('tm'), async (req, res) => {
   const viewId = VIEW_KEYS[req.params.key];
+  // Alpha attendance is optional: until its view is configured, answer with no rows
+  // (and say so) rather than an error, so the dashboard just runs on Zoho alone.
+  if (req.params.key === 'AlphaAttendance' && !viewId) return res.json({ data: [], configured: false });
   if (!viewId) return res.status(400).json({ error: 'unknown_view', detail: req.params.key });
 
   const since = req.query.since;
@@ -268,6 +300,22 @@ router.get('/view/:key', requireRole('tm'), async (req, res) => {
         // scope by their agents' People IDs (name-matched, metrics date-bounded).
         const allowedIds = await allowedAttendanceIds(req.user, since);
         rows = rows.filter(r => allowedIds.has(String(r['Employee'] ?? r.employee ?? '')));
+      }
+    } else if (req.params.key === 'AlphaAttendance' && !seesAllScope(req.user)) {
+      if (req.user.role === 'campaign_lead' && req.user.campaign_slug) {
+        // Same rule as Zoho attendance: scope by the campaign the shift belongs to.
+        const slug = req.user.campaign_slug;
+        rows = rows.filter(r => alphaRowSlugs(r).includes(slug));
+      } else {
+        // Team leader: their agents' People IDs → HR employee numbers (Alpha's key).
+        const allowedIds = await allowedAttendanceIds(req.user, since);
+        const profiles = await getEmployeeProfiles();
+        const col = detectEmpNoCol(profiles);
+        const allowedNos = new Set();
+        if (col) for (const p of profiles) {
+          if (allowedIds.has(String(p['ID'] ?? p.id ?? ''))) { const no = String(p[col] ?? '').trim(); if (no) allowedNos.add(no); }
+        }
+        rows = rows.filter(r => allowedNos.has(String(r.EmployeeId ?? '').trim()));
       }
     }
     // Match the shape the existing extractRows() in index.html expects.
