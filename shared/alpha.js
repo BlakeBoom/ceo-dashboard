@@ -27,6 +27,7 @@
     'Paternity Leave':             'Paternity Leave',
     'Parental Leave':              'Parental Leave',
     'Family Responsibility Leave': 'Family Responsibility',
+    'ILO Leave':                   'ILO Leave',   // classified like Annual Leave in index.html
   };
 
   // Only shifts that have actually happened count. Allocated / Pending are future
@@ -108,15 +109,13 @@
         'Unpaid Break (Mins)':  0,
         'Paid Break (Mins)':    mins(r.TeaBreak),     // tea breaks are paid → planned shrinkage
         'Total Hours (Mins)':   mins(r.WorkHours),
-        // Billable follows the dashboard's rule for every source: time on shift minus
-        // the UNPAID lunch, paid tea breaks stay billable. For Alpha that is exactly
-        // PayableHours on a worked shift. (Alpha's own BillableHours additionally
-        // subtracts the paid tea break, so it is deliberately NOT used — it would put
-        // Alpha campaigns ~0.5h/shift below Zoho campaigns for the same work.) Leave,
-        // absent and other non-worked days bill nothing even when PayableHours carries
-        // paid leave — hence an explicit billable rather than Payable − Unpaid.
-        _billableMins:          worked ? mins(r.PayableHours) : 0,
-        _alphaBillableMins:     mins(r.BillableHours),
+        // Billable = Alpha's own BillableHours: PayableHours (already net of the
+        // unpaid lunch) minus the paid tea break — tea is payable to the employee
+        // but not billable to the client, the same rule the dashboard applies to
+        // Zoho rows (Payable − Unpaid − Paid). Leave, absent and other non-worked
+        // days bill nothing even when PayableHours carries paid leave — hence an
+        // explicit billable rather than a formula over the break columns.
+        _billableMins:          worked ? mins(r.BillableHours) : 0,
         _lunchMins:             mins(r.LunchBreak),
         _source:                'alpha',
         _alphaEmpNo:            empNo,

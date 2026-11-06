@@ -17,13 +17,14 @@ const base = {
 };
 const row = (o) => ({ ...base, ...o });
 
-test('worked shift: billable = PayableHours (already net of lunch), tea stays billable, lunch not re-deducted', () => {
+test('worked shift: billable = Alpha BillableHours (payable minus the paid tea break; lunch already out)', () => {
   const { rows } = alphaToAttendanceRows([row({})], { today: '2026-11-06' });
   assert.equal(rows.length, 1);
   const r = rows[0];
-  assert.equal(r._billableMins, 510);              // 8.5h — NOT Alpha's 8h (which also strips the paid tea break)
-  assert.equal(r._alphaBillableMins, 480);         // Alpha's own figure kept for reference
+  assert.equal(r._billableMins, 480);              // 8h: tea is payable to the employee, not billable
   assert.equal(r['Payable Hours (Mins)'], 510);
+  // Same answer the Zoho formula (Payable − Unpaid − Paid) gives on this row.
+  assert.equal(r['Payable Hours (Mins)'] - r['Unpaid Break (Mins)'] - r['Paid Break (Mins)'], r._billableMins);
   assert.equal(r['Unpaid Break (Mins)'], 0);       // lunch is already out of Payable
   assert.equal(r['Paid Break (Mins)'], 30);
   assert.equal(r.Status, 'Present');
@@ -54,14 +55,17 @@ test('scheduled (Allocated/Pending) and future-dated shifts are not actuals', ()
   assert.equal(rows[0].Status, 'Present');
 });
 
-test('status mapping: carry-forward annual → Annual Leave; FRL → Family Responsibility; unknown passes through', () => {
+test('status mapping: carry-forward annual → Annual Leave; FRL → Family Responsibility; ILO kept; unknown passes through', () => {
   const { rows } = alphaToAttendanceRows([
     row({ Status: 'Carry Forward Annual Leave' }),
     row({ Status: 'Family Responsibility Leave' }),
     row({ Status: 'Maternity Leave' }),
+    row({ Status: 'ILO Leave' }),
     row({ Status: 'Something New' }),
   ], { today: '2026-11-06' });
-  assert.deepEqual(rows.map(r => r.Status), ['Annual Leave', 'Family Responsibility', 'Maternity Leave', 'Something New']);
+  assert.deepEqual(rows.map(r => r.Status), ['Annual Leave', 'Family Responsibility', 'Maternity Leave', 'ILO Leave', 'Something New']);
+  // None of these worked, so none bill — even though the fixture carries hours.
+  assert.ok(rows.every(r => r._billableMins === 0));
 });
 
 test('synthesized shift names attribute to the right campaign and carry the role word', () => {
